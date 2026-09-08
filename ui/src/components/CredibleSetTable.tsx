@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useState } from 'react'
+import { Fragment, useEffect, useState, type CSSProperties } from 'react'
 import { Link } from 'react-router'
 import { ChevronRight } from 'lucide-react'
 import { Empty } from '@/components/states'
@@ -38,7 +38,8 @@ export default function CredibleSetTable({ rows }: { rows: CredibleSetRow[] }) {
             return (
               <Fragment key={id}>
                 {/* inline style: the row tint is the set's plot color from the chart palette, not a theme token */}
-                <tr className="cursor-pointer hover:brightness-95" onClick={() => toggle(id)} aria-expanded={isOpen} style={{ backgroundColor: csTint(id, dark) }}>
+                <tr className="cursor-pointer transition-colors bg-(--tint) hover:bg-(--tint-hover)" onClick={() => toggle(id)} aria-expanded={isOpen}
+                  style={{ '--tint': csTint(id, dark), '--tint-hover': csTint(id, dark, true) } as CSSProperties}>
                   <td><ChevronRight className={`size-4 text-base-content/40 transition-transform ${isOpen ? 'rotate-90' : ''}`} /></td>
                   <td className="font-medium">Set {id}</td>
                   <td className="text-right tabular-nums">{members.length}</td>

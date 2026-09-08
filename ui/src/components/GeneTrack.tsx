@@ -64,21 +64,28 @@ export default function GeneTrack({ spec, width, marginLeft, dark }: { spec: Tra
     const muted = dark ? '#5a4d4a' : '#b8b3b1'   // warm grays matched to the theme surfaces
     // the gene of interest is drawn in ink, not a hue: the hues above it belong to credible sets
     const accent = ink
+    // one lane unit is laneH px: the plot area is sized from the y domain so the spacing
+    // does not shrink as lanes are added. The gene of interest's exon boxes are taller than
+    // a neighbor bar, so the first neighbor (whose label rises 9 px above its bar) sits an
+    // extra GENE_GAP below it instead of running into the exons.
     const laneH = 18
-    const height = 16 + laneH * (nLanes + 1) + 8
+    const GENE_GAP = 0.35
+    const yMin = -nLanes - GENE_GAP - 0.9
+    const height = 16 + Math.round(laneH * (0.9 - yMin)) + 8
     // plain columns only: vgplot treats string channels as fields of the array data
-    const nb = neighbors.map(l => ({ start: l.start, end: l.end, mid: l.mid, label: l.label, y: l.y, y1: l.y - 0.12, y2: l.y + 0.12 }))
+    const nb = neighbors.map(l => ({ start: l.start, end: l.end, mid: l.mid, label: l.label, y: l.y - GENE_GAP, y1: l.y - GENE_GAP - 0.12, y2: l.y - GENE_GAP + 0.12 }))
     const meRow = me ? [{ start: me.start, end: me.end, mid: (me.start + me.end) / 2, y1: -0.05, y2: 0.05,
       label: `${me.symbol ?? me.gene_id}${me.strand === '+' ? ' →' : ' ←'}` }] : []
-    const exons = data.exons.map(x => ({ start: x.start, end: x.end, y1: -0.35, y2: 0.35 }))
+    const exons = data.exons.map(x => ({ start: x.start, end: x.end, y1: -0.3, y2: 0.3 }))
     const marks: unknown[] = []
     if (spec.intron) {
-      marks.push(vg.rect([{ start: spec.intron.start, end: spec.intron.end, y1: -nLanes - 0.9, y2: 0.9 }],
+      marks.push(vg.rect([{ start: spec.intron.start, end: spec.intron.end, y1: yMin, y2: 0.9 }],
         { x1: 'start', x2: 'end', y1: 'y1', y2: 'y2', fill: accent, fillOpacity: 0.12 }))
     }
     if (nb.length) {
       marks.push(vg.rect(nb, { x1: 'start', x2: 'end', y1: 'y1', y2: 'y2', fill: muted }))
-      marks.push(vg.text(nb, { x: 'mid', y: 'y', text: 'label', dy: -9, fontSize: 10, fill: ink, fillOpacity: 0.8 }))
+      // label sits closer to its own bar than the bar is to the next row's label
+      marks.push(vg.text(nb, { x: 'mid', y: 'y', text: 'label', dy: -8, fontSize: 10, fill: ink, fillOpacity: 0.8 }))
     }
     if (meRow.length) {
       marks.push(vg.rect(meRow, { x1: 'start', x2: 'end', y1: 'y1', y2: 'y2', fill: accent }))
@@ -88,7 +95,7 @@ export default function GeneTrack({ spec, width, marginLeft, dark }: { spec: Tra
     try {
       const plot = vg.plot(
         ...marks,
-        vg.xDomain(spec.domain), vg.xAxis(null), vg.yDomain([-nLanes - 0.9, 0.9]), vg.yAxis(null),
+        vg.xDomain(spec.domain), vg.xAxis(null), vg.yDomain([yMin, 0.9]), vg.yAxis(null),
         vg.xInset(8), vg.width(width), vg.height(height), vg.marginLeft(marginLeft), vg.marginRight(20), vg.marginTop(16), vg.marginBottom(8),
         vg.style({ fontFamily: 'inherit', fontSize: '11px', color: ink, background: 'transparent' }),
       ) as HTMLElement

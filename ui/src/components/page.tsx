@@ -5,5 +5,5 @@ import type { ReactNode } from 'react'
 export const CONTAINER = 'mx-auto w-full max-w-[88rem] px-[max(1.5rem,4vw)]'
 
 export function Page({ children }: { children: ReactNode }) {
-  return <div className={`${CONTAINER} py-6`}>{children}</div>
+  return <div className={`${CONTAINER} pt-6 pb-12`}>{children}</div>
 }

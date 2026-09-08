@@ -21,6 +21,7 @@ export interface LocusSpec {
 }
 const MARGIN_LEFT = 48
 const SCATTER_H = 290    // height of the locus scatter; the LocusCompare square matches it
+const TRACK_KEY = 'topchef-gene-track'   // localStorage: 'hidden' when the gene track is toggled off
 export const PLOT_MARGIN_TOP = 20
 export const PLOT_MARGIN_BOTTOM = 36
 
@@ -76,12 +77,12 @@ function locusSQL(spec: LocusSpec): string {
 
 /** -log10 p against position for one cis window. Dots colored by credible-set membership,
  *  PIP as opacity, a TSS rule, and Observable Plot's nearest-point tip. */
-export default function LocusPlot({ spec, onCount, onLegend, onExportMenu, onCredibleSets, onTable }: {
+export default function LocusPlot({ spec, onCount, onLegend, onActions, onCredibleSets, onTable }: {
   spec: LocusSpec
   onCount?: (n: number) => void
   onLegend?: (sets: string[] | null) => void
-  /** Receives the export menu once the plots are drawn (null while loading) so the parent can place it. */
-  onExportMenu?: (menu: ReactNode | null) => void
+  /** Receives the header controls (export menu, gene-track toggle) so the parent can place them. */
+  onActions?: (actions: ReactNode | null) => void
   /** credible-set members of this locus, read from the materialized window (no extra fetch) */
   onCredibleSets?: (rows: CredibleSetRow[] | null) => void
   /** the materialized window's table name once it exists (null while loading or after it is
@@ -98,6 +99,9 @@ export default function LocusPlot({ spec, onCount, onLegend, onExportMenu, onCre
   const [link, setLink] = useState<Selection | null>(null)
   const [yMax, setYMax] = useState(1)
   const [dark, setDark] = useState(isDark)
+  // the gene track under the scatter can be hidden; the choice is kept across pages
+  const [showTrack, setShowTrack] = useState(() => localStorage.getItem(TRACK_KEY) !== 'hidden')
+  useEffect(() => { localStorage.setItem(TRACK_KEY, showTrack ? 'shown' : 'hidden') }, [showTrack])
 
   // colors are baked into the SVG, so redraw when the theme flips
   useEffect(() => {
@@ -194,7 +198,7 @@ export default function LocusPlot({ spec, onCount, onLegend, onExportMenu, onCre
         }),
         // the nearest interactor binds to the mark added just before it: keep it right after the data dots
         ...linkedHoverMarks(tableName, link, 'position', 'nlp', ink, dark ? SURFACE.dark : SURFACE.light),
-        vg.xDomain([spec.tss - 1_000_000, spec.tss + 1_000_000]), vg.yLabel('−log₁₀ p'),
+        vg.xDomain([spec.tss - 1_000_000, spec.tss + 1_000_000]), vg.yLabel('QTL −log₁₀ p'),
         vg.xLabel(`${spec.hit.chr} position (Mb)`), vg.xTickFormat((d: number) => (d / 1e6).toFixed(2)),
         vg.colorDomain([...CS_DOMAIN]), vg.colorRange(colors),
         vg.symbolDomain([...CS_DOMAIN]), vg.symbolRange(CS_SYMBOLS),
@@ -215,23 +219,31 @@ export default function LocusPlot({ spec, onCount, onLegend, onExportMenu, onCre
   const compareCol = useRef<HTMLDivElement>(null)
   const stem = `${spec.hit.symbol ?? spec.hit.gene_id}${spec.phenotypeId ? '_' + spec.phenotypeId.split(':').slice(0, 3).join('_') : ''}`
   useEffect(() => {
-    // the button stays in place while a locus loads, disabled, so the header does not reflow
-    onExportMenu?.(
-      <ExportMenu disabled={state !== 'ready'} background={dark ? SURFACE.dark : SURFACE.light} targets={[
-        { label: 'Locus plot with gene track', name: `${stem}_locus`, el: () => column.current },
-        { label: 'QTL versus GWAS', name: `${stem}_locuscompare`, el: () => compareCol.current },
-      ]} />
+    // the buttons stay in place while a locus loads, disabled, so the header does not reflow
+    onActions?.(
+      <>
+        <label className={`inline-flex items-center gap-1.5 ${state === 'ready' ? 'cursor-pointer' : 'opacity-50'}`} title={showTrack ? 'Hide the gene track' : 'Show the gene track'}>
+          <input type="checkbox" className="toggle toggle-xs" checked={showTrack} disabled={state !== 'ready'} onChange={e => setShowTrack(e.target.checked)} />
+          Gene track
+        </label>
+        <ExportMenu disabled={state !== 'ready'} background={dark ? SURFACE.dark : SURFACE.light} targets={[
+          { label: showTrack ? 'Locus plot with gene track' : 'Locus plot', name: `${stem}_locus`, el: () => column.current },
+          { label: 'QTL versus GWAS', name: `${stem}_locuscompare`, el: () => compareCol.current },
+        ]} />
+      </>
     )
-  }, [state, dark, stem]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [state, dark, stem, showTrack]) // eslint-disable-line react-hooks/exhaustive-deps
 
   return (
     <div className="flex flex-col gap-6 md:flex-row md:gap-2">
-      <div ref={column} className="relative min-h-[340px] min-w-0 flex-1">
+      {/* the minimum height holds room for the skeleton only; once drawn the column is as tall
+          as its content, so a hidden gene track leaves no blank strip under the scatter */}
+      <div ref={column} className={`relative min-w-0 flex-1 ${state === 'loading' ? 'min-h-[340px]' : ''}`}>
         {state === 'loading' && <LocusSkeleton chr={spec.hit.chr} />}
         {state === 'error' && <div className="p-4 text-sm text-error">Could not draw the locus.</div>}
         <div ref={host} className={`plot-host ${state === 'ready' ? '' : 'invisible'}`}
           onPointerMove={onPlotPointerMove} onPointerLeave={clearPlotHover} />
-        {state === 'ready' && readyFor === key && width > 0 && (
+        {showTrack && state === 'ready' && readyFor === key && width > 0 && (
           <GeneTrack spec={{ chr: spec.hit.chr, geneId: spec.hit.gene_id, domain: [spec.tss - 1_000_000, spec.tss + 1_000_000], exons: spec.exons, intron: spec.intron }}
             width={width} marginLeft={MARGIN_LEFT} dark={dark} />
         )}

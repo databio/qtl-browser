@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useState, type CSSProperties } from 'react'
 import { Download, Search as SearchIcon } from 'lucide-react'
 import { useNavigate } from 'react-router'
 import { SortableTh, type SortState } from '@/components/sortable-th'
@@ -97,8 +97,11 @@ export default function CisTable({ table, failed, chr, qtlType, phenotypeId, fil
               </thead>
               <tbody>
                 {data.map((r, i) => (
-                  // inline style: credible-set rows take the set's plot color from the chart palette
-                  <tr key={i} className={`cursor-pointer transition-colors ${r.cs_id != null ? 'hover:brightness-95' : 'hover:bg-base-200/60'}`} style={{ backgroundColor: csTint(r.cs_id, dark) }}
+                  // inline style: credible-set rows take the set's plot color from the chart palette;
+                  // the resting and hover tints are passed as variables so the hover state is a
+                  // stronger tint rather than a filter (which does not show on a table row)
+                  <tr key={i} className={`cursor-pointer transition-colors ${r.cs_id != null ? 'bg-(--tint) hover:bg-(--tint-hover)' : 'hover:bg-base-200/60'}`}
+                    style={{ '--tint': csTint(r.cs_id, dark), '--tint-hover': csTint(r.cs_id, dark, true) } as CSSProperties}
                     onClick={() => navigate(variantPath(r))}>
                     <td className="tabular-nums">{r.position.toLocaleString()}</td>
                     <td>{r.rs_number != null ? rsFromNumber(r.rs_number) : <span className="text-base-content/40">{chr}:{r.position}</span>}</td>

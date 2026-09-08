@@ -52,6 +52,11 @@ does.
 
 ## Data notes
 
+- `manifest.json`, written last by the pipeline and published at the bucket root with the
+  parquet, is the provenance record: build time, pipeline commit, significance rule, source
+  versions, and for every table its path, row count, bytes, file count, columns, and whether
+  the app loads it whole at startup or by range reads. The About page shows only the counts,
+  source versions, and build date from it.
 - Coordinates GRCh38; genes GENCODE v34; rsIDs from dbSNP by position and alleles.
 - eGene / sQTL intron: permutation p < 0.05, the preprint's wording (10,220 eGenes vs the
   paper's 10,241; 13,540 sQTL introns, exact).

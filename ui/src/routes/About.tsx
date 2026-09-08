@@ -3,7 +3,6 @@ import ExternalLink from '@/components/ExternalLink'
 import { Page } from '@/components/page'
 import { PageHeader } from '@/components/page-header'
 import { KvTable } from '@/components/kv-table'
-import { SectionPanel } from '@/components/section-panel'
 import { PIPELINE, PREPRINT, ZENODO } from '@/lib/links'
 import { manifest } from '@/lib/queries'
 
@@ -23,7 +22,8 @@ export default function About() {
   return (
     <Page>
       <div className="mx-auto max-w-4xl">
-        <PageHeader title="About" description="What this browser shows, how the numbers are defined, and where the data comes from." />
+        {/* mb-4: the same 16 px the prose puts under its own h2 headings below */}
+        <PageHeader title="About" className="mb-4 mt-2" />
         <div className="space-y-10">
           <div className="prose prose-sm max-w-none">
             <p>
@@ -58,12 +58,6 @@ export default function About() {
               track shows the strongest GWAS p-value per 5 Mb window, red where the window holds a genome-wide significant
               variant; the gene page panel plots every shared variant in the cis window.
             </p>
-            <h2>How it works</h2>
-            <p>
-              The site is static. Summary statistics are stored as parquet files laid out so that a gene page reads only the
-              row groups it needs, and an in-browser DuckDB engine runs every query over HTTP range requests. Source for the
-              data pipeline and the interface is on <ExternalLink href={REPO}>GitHub</ExternalLink>.
-            </p>
           </div>
 
           {m && (
@@ -77,21 +71,11 @@ export default function About() {
             ]} />
           )}
 
-          <KvTable title="Data versions" rows={Object.entries(sources).map(([k, v]) => ({ label: k, value: <span><span className="font-medium text-base-content">{v.version}</span> · {v.description}</span> }))} />
-
-          <SectionPanel title="Tables" description={m ? `Built ${String(m.built)}` : undefined}>
-            <div className="overflow-x-auto rounded-lg border border-base-300">
-              <table className="table table-sm">
-                <thead><tr><th>Table</th><th className="text-right">Rows</th><th className="text-right">Size</th><th>Loaded</th></tr></thead>
-                <tbody>
-                  {Object.entries(tables).map(([k, t]) => (
-                    <tr key={k}><td className="font-mono text-xs">{k}</td><td className="text-right tabular-nums">{t.rows.toLocaleString()}</td>
-                      <td className="text-right tabular-nums">{(t.bytes / 1e6).toFixed(1)} MB</td><td className="text-base-content/60">{t.load === 'whole' ? 'at startup' : 'per query (range reads)'}</td></tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          </SectionPanel>
+          {/* per-table rows, sizes, and columns stay in manifest.json next to the data; only the build date is shown */}
+          <KvTable
+            title={<>Data versions{m?.built && <span className="ml-1.5 font-normal normal-case tracking-normal text-base-content/50">
+              (updated {String(m.built).slice(0, 10)})</span>}</>}
+            rows={Object.entries(sources).map(([k, v]) => ({ label: k, value: <span><span className="font-medium text-base-content">{v.version}</span> · {v.description}</span> }))} />
 
           <div className="flex flex-wrap gap-x-4 text-sm">
             <ExternalLink className="underline" href={PREPRINT}>Preprint</ExternalLink>

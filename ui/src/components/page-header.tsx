@@ -3,7 +3,7 @@ import { Link } from 'react-router'
 import { ChevronLeft, ChevronRight } from 'lucide-react'
 
 /** Title row (+ optional muted count/meta and right-aligned actions), description below. */
-export function PageHeader({ title, meta, description, actions, back, crumbs, size = 'lg' }: {
+export function PageHeader({ title, meta, description, actions, back, crumbs, size = 'lg', className = 'mb-8 mt-2' }: {
   title: ReactNode
   meta?: ReactNode
   description?: ReactNode
@@ -12,9 +12,11 @@ export function PageHeader({ title, meta, description, actions, back, crumbs, si
   /** Trail above the title: linked ancestors, then the current page's label. */
   crumbs?: { to?: string; label: string }[]
   size?: 'lg' | 'md'
+  /** Outer margins; replaces the default rather than adding to it. */
+  className?: string
 }) {
   return (
-    <div className="mb-8 mt-2">
+    <div className={className}>
       {crumbs && (
         <nav className="mb-4 flex min-w-0 items-center gap-1.5 text-sm">
           {crumbs.map((c, i) => (

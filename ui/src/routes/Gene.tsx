@@ -133,7 +133,7 @@ function EqtlTab({ hit, d, transTable }: { hit: SearchHit; d: GeneDetail; transT
   const [cs, setCs] = useState<CredibleSetRow[] | null>(null)
   const [nVar, setNVar] = useState<number | null>(null)
   const [legend, setLegend] = useState<string[] | null>(null)
-  const [exportMenu, setExportMenu] = useState<ReactNode>(null)
+  const [actions, setActions] = useState<ReactNode>(null)
   const [locus, setLocus] = useState<LocusTable>(NO_TABLE)
   useEffect(() => { setCs(null); setNVar(null) }, [hit])
   const sym = hit.symbol ?? hit.gene_id
@@ -160,9 +160,9 @@ function EqtlTab({ hit, d, transTable }: { hit: SearchHit; d: GeneDetail; transT
         ]} />
       </div>
       <SectionPanel title="Locus"
-        description={<span className="inline-flex items-center gap-3 tabular-nums"><span>{g.chr}:{fmtInt(g.tss - 1_000_000)}–{fmtInt(g.tss + 1_000_000)}{nVar != null && ` · ${fmtInt(nVar)} variants`}</span>{exportMenu}</span>}
+        description={<span className="inline-flex items-center gap-3 tabular-nums"><span>{g.chr}:{fmtInt(g.tss - 1_000_000)}–{fmtInt(g.tss + 1_000_000)}{nVar != null && ` · ${fmtInt(nVar)} variants`}</span>{actions}</span>}
         action={legend && <LocusLegend sets={legend} />}>
-        <LocusPlot spec={{ hit, qtlType: 'e', tss: g.tss, exons: d.exons }} onCount={setNVar} onLegend={setLegend} onExportMenu={setExportMenu} onCredibleSets={setCs}
+        <LocusPlot spec={{ hit, qtlType: 'e', tss: g.tss, exons: d.exons }} onCount={setNVar} onLegend={setLegend} onActions={setActions} onCredibleSets={setCs}
           onTable={(name, failed) => setLocus({ name, failed: !!failed })} />
       </SectionPanel>
       <SectionPanel title="SuSiE 95% credible sets">
@@ -183,7 +183,7 @@ function SqtlTab({ hit, d, transTable }: { hit: SearchHit; d: GeneDetail; transT
   const [selected, setSelected] = useState<string | null>(() => phens.find(x => x.is_sqtl)?.phenotype_id ?? null)
   const [nVar, setNVar] = useState<number | null>(null)
   const [legend, setLegend] = useState<string[] | null>(null)
-  const [exportMenu, setExportMenu] = useState<ReactNode>(null)
+  const [actions, setActions] = useState<ReactNode>(null)
   const [locus, setLocus] = useState<LocusTable>(NO_TABLE)
   useEffect(() => {
     setSelected(phens.find(x => x.is_sqtl)?.phenotype_id ?? null); setNVar(null); setCs(null)
@@ -220,9 +220,9 @@ function SqtlTab({ hit, d, transTable }: { hit: SearchHit; d: GeneDetail; transT
       {sel && (
         <>
           <SectionPanel title="Locus"
-            description={<span className="inline-flex items-center gap-3 tabular-nums"><span>intron {fmtPhenotype(sel.phenotype_id)}{nVar != null && ` · ${fmtInt(nVar)} variants`}</span>{exportMenu}</span>}
+            description={<span className="inline-flex items-center gap-3 tabular-nums"><span>intron {fmtPhenotype(sel.phenotype_id)}{nVar != null && ` · ${fmtInt(nVar)} variants`}</span>{actions}</span>}
             action={legend && <LocusLegend sets={legend} />}>
-            <LocusPlot spec={{ hit, qtlType: 's', phenotypeId: sel.phenotype_id, tss: sel.tss, exons: d.exons, intron: { start: sel.intron_start, end: sel.intron_end } }} onCount={setNVar} onLegend={setLegend} onExportMenu={setExportMenu} onCredibleSets={setCs}
+            <LocusPlot spec={{ hit, qtlType: 's', phenotypeId: sel.phenotype_id, tss: sel.tss, exons: d.exons, intron: { start: sel.intron_start, end: sel.intron_end } }} onCount={setNVar} onLegend={setLegend} onActions={setActions} onCredibleSets={setCs}
               onTable={(name, failed) => setLocus({ name, failed: !!failed })} />
           </SectionPanel>
           <SectionPanel title="SuSiE 95% credible sets">

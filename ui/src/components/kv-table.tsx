@@ -3,7 +3,7 @@ import type { ReactNode } from 'react'
 export type KvRow = { label: string; value: ReactNode }
 
 /** Two-column key/value metadata table: bordered, zebra-striped. */
-export function KvTable({ title, rows, align = 'left' }: { title?: string; rows: KvRow[]; align?: 'left' | 'right' }) {
+export function KvTable({ title, rows, align = 'left' }: { title?: ReactNode; rows: KvRow[]; align?: 'left' | 'right' }) {
   if (!rows.length) return null
   return (
     <div className="space-y-2">
