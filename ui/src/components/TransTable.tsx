@@ -1,18 +1,19 @@
 import { useEffect, useState } from 'react'
 import { Download, Search as SearchIcon } from 'lucide-react'
-import { useNavigate } from 'react-router'
 import { SortableTh, type SortState } from '@/components/sortable-th'
 import { Pager } from '@/components/pager'
 import { Empty, TableSkeleton } from '@/components/states'
 import { fmtInt, fmtNum, fmtP, fmtPhenotype, fmtSlopeSE } from '@/lib/format'
 import { transAll, transCount, transRows, type TransQuery, type TransRow } from '@/lib/queries'
 import { downloadCSV } from '@/lib/csv'
+import { ROW_LINK, ROW_LINK_TEXT, useRowLink } from '@/lib/row-link'
 
 /** Sortable, filterable page through one gene's trans rows of one QTL type, off the trans
  *  table the gene page materialized. Each change is one local query plus a count, like
  *  CisTable. `table` null means the gene's rows are still loading. */
 export default function TransTable({ table, qtlType, fileStem }: { table: string | null; qtlType: 'e' | 's'; fileStem: string }) {
-  const navigate = useNavigate()
+  const rowLink = useRowLink()
+  const variantPath = (r: TransRow) => `/variant/${r.rsid ?? `${r.variant_chr}:${r.position}`}`
   const [sort, setSort] = useState<SortState>({ by: 'pval', order: 'asc' })
   const [maxP, setMaxP] = useState('')
   const [search, setSearch] = useState('')
@@ -88,10 +89,10 @@ export default function TransTable({ table, qtlType, fileStem }: { table: string
               </thead>
               <tbody>
                 {data.map((r, i) => (
-                  <tr key={i} className="cursor-pointer transition-colors hover:bg-base-200/60" onClick={() => navigate(`/variant/${r.rsid ?? `${r.variant_chr}:${r.position}`}`)}>
+                  <tr key={i} className={`${ROW_LINK} hover:bg-base-200/60`} {...rowLink(variantPath(r))}>
                     {qtlType === 's' && <td className="tabular-nums text-base-content/60">{fmtPhenotype(r.phenotype_id)}</td>}
                     <td className="tabular-nums">{r.variant_chr}:{fmtInt(r.position)}</td>
-                    <td>{r.rsid ?? ''}</td>
+                    <td><span className={`${ROW_LINK_TEXT} ${r.rsid ? '' : 'text-base-content/40'}`}>{r.rsid ?? `${r.variant_chr}:${r.position}`}</span></td>
                     <td className="text-right tabular-nums text-base-content/60">{fmtNum(r.af)}</td>
                     <td className="text-right tabular-nums">{fmtP(r.pval)}</td>
                     <td className="text-right tabular-nums">{fmtSlopeSE(r.beta, r.beta_se)}</td>

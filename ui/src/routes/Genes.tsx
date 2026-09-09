@@ -1,5 +1,4 @@
 import { useEffect, useMemo, useState } from 'react'
-import { Link, useNavigate } from 'react-router'
 import { Page } from '@/components/page'
 import { PageHeader } from '@/components/page-header'
 import { Segmented } from '@/components/segmented'
@@ -9,6 +8,7 @@ import { Empty, TableSkeleton } from '@/components/states'
 import { fmtInt } from '@/lib/format'
 import { rows } from '@/lib/db'
 import type { SearchHit } from '@/lib/queries'
+import { ROW_LINK, ROW_LINK_TEXT, useRowLink } from '@/lib/row-link'
 
 type Filter = 'egenes' | 'sqtl' | 'tested' | 'all'
 const CHR_ORDER = [...Array.from({ length: 22 }, (_, i) => `chr${i + 1}`), 'chrX', 'chrY', 'chrM']
@@ -21,7 +21,7 @@ export default function Genes() {
   const [sort, setSort] = useState<SortState>({ by: 'symbol', order: 'asc' })
   const [offset, setOffset] = useState(0)
   const [pageSize, setPageSize] = useState(25)
-  const navigate = useNavigate()
+  const rowLink = useRowLink()
 
   useEffect(() => { rows<SearchHit>('SELECT * FROM search_index').then(setAll) }, [])
   useEffect(() => setOffset(0), [filter, needle, sort])
@@ -69,8 +69,8 @@ export default function Genes() {
                   </thead>
                   <tbody>
                     {page.map(g => (
-                      <tr key={g.gene_id} className="cursor-pointer hover:bg-base-200" onClick={() => navigate(`/gene/${g.gene_id}`)}>
-                        <td><Link className="font-medium link-quiet" to={`/gene/${g.gene_id}`} onClick={e => e.stopPropagation()}>{g.symbol ?? g.gene_id}</Link></td>
+                      <tr key={g.gene_id} className={`${ROW_LINK} hover:bg-base-200`} {...rowLink(`/gene/${g.gene_id}`)}>
+                        <td className="font-medium"><span className={ROW_LINK_TEXT}>{g.symbol ?? g.gene_id}</span></td>
                         <td className="text-base-content/60">{g.gene_id}</td>
                         <td className="tabular-nums text-base-content/60">{g.chr}:{fmtInt(g.tss)}</td>
                         <td className="text-right tabular-nums">{g.n_sqtl_sig || ''}</td>

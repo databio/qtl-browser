@@ -1,6 +1,5 @@
 import { useEffect, useState, type CSSProperties } from 'react'
 import { Download, Search as SearchIcon } from 'lucide-react'
-import { useNavigate } from 'react-router'
 import { SortableTh, type SortState } from '@/components/sortable-th'
 import { Pager } from '@/components/pager'
 import { Empty, TableSkeleton } from '@/components/states'
@@ -8,6 +7,7 @@ import { fmtBp, fmtNum, fmtP, rsFromNumber } from '@/lib/format'
 import { cisAll, cisCount, cisRows, type CisQuery, type CisRow } from '@/lib/queries'
 import { csTint, useIsDark } from '@/lib/plot-theme'
 import { downloadCSV } from '@/lib/csv'
+import { ROW_LINK, ROW_LINK_TEXT, useRowLink } from '@/lib/row-link'
 
 const SKEL = [{ w: 'w-24' }, { w: 'w-20' }, { w: 'w-10' }, { w: 'w-14', align: 'right' as const }, { w: 'w-10', align: 'right' as const },
   { w: 'w-10', align: 'right' as const }, { w: 'w-14', align: 'right' as const }, { w: 'w-12', align: 'right' as const }, { w: 'w-12', align: 'right' as const }, { w: 'w-10', align: 'right' as const }]
@@ -50,7 +50,7 @@ export default function CisTable({ table, failed, chr, qtlType, phenotypeId, fil
   }, [table, sort, maxP, search, offset, pageSize]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const dark = useIsDark()
-  const navigate = useNavigate()
+  const rowLink = useRowLink()
   const variantPath = (r: CisRow) => `/variant/${r.rs_number != null ? rsFromNumber(r.rs_number) : `${chr}:${r.position}`}`
 
   async function exportCSV() {
@@ -100,11 +100,11 @@ export default function CisTable({ table, failed, chr, qtlType, phenotypeId, fil
                   // inline style: credible-set rows take the set's plot color from the chart palette;
                   // the resting and hover tints are passed as variables so the hover state is a
                   // stronger tint rather than a filter (which does not show on a table row)
-                  <tr key={i} className={`cursor-pointer transition-colors ${r.cs_id != null ? 'bg-(--tint) hover:bg-(--tint-hover)' : 'hover:bg-base-200/60'}`}
+                  <tr key={i} className={`${ROW_LINK} ${r.cs_id != null ? 'bg-(--tint) hover:bg-(--tint-hover)' : 'hover:bg-base-200/60'}`}
                     style={{ '--tint': csTint(r.cs_id, dark), '--tint-hover': csTint(r.cs_id, dark, true) } as CSSProperties}
-                    onClick={() => navigate(variantPath(r))}>
+                    {...rowLink(variantPath(r))}>
                     <td className="tabular-nums">{r.position.toLocaleString()}</td>
-                    <td>{r.rs_number != null ? rsFromNumber(r.rs_number) : <span className="text-base-content/40">{chr}:{r.position}</span>}</td>
+                    <td>{r.rs_number != null ? <span className={ROW_LINK_TEXT}>{rsFromNumber(r.rs_number)}</span> : <span className={`text-base-content/40 ${ROW_LINK_TEXT}`}>{chr}:{r.position}</span>}</td>
                     <td className="font-mono text-xs text-base-content/60">{r.A1}/{r.A2}</td>
                     <td className="text-right tabular-nums text-base-content/60">{fmtBp(r.tss_distance)}</td>
                     <td className="text-right tabular-nums text-base-content/60">{fmtNum(r.af)}</td>

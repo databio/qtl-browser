@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { Link, useNavigate, useParams } from 'react-router'
+import { useParams } from 'react-router'
 import ExternalLink from '@/components/ExternalLink'
 import { Page } from '@/components/page'
 import { PageHeader } from '@/components/page-header'
@@ -7,12 +7,13 @@ import { Empty, TableSkeleton } from '@/components/states'
 import { ucsc } from '@/lib/links'
 import { fmtInt } from '@/lib/format'
 import { genesInRegion, type SearchHit } from '@/lib/queries'
+import { ROW_LINK, ROW_LINK_TEXT, useRowLink } from '@/lib/row-link'
 
 export default function Region() {
   const { loc = '' } = useParams()
   const m = /^(chr[0-9XY]+):(\d+)-(\d+)$/i.exec(loc)
   const [genes, setGenes] = useState<SearchHit[] | null>(null)
-  const navigate = useNavigate()
+  const rowLink = useRowLink()
   useEffect(() => {
     if (!m) return
     setGenes(null)
@@ -23,7 +24,7 @@ export default function Region() {
   return (
     <Page>
       <PageHeader crumbs={[{ label: 'Regions' }, { label: loc }]} title={<span className="tabular-nums">{chr}:{fmtInt(s)}-{fmtInt(e)}</span>} meta={`${fmtInt(Number(e) - Number(s))} bp`}
-        description={<ExternalLink href={ucsc(chr, Number(s), Number(e))}>Open in UCSC</ExternalLink>} />
+        description={<ExternalLink icon href={ucsc(chr, Number(s), Number(e))}>Open in UCSC</ExternalLink>} />
       {genes === null ? <TableSkeleton columns={[{ w: 'w-20' }, { w: 'w-32' }, { w: 'w-24', align: 'right' }, { w: 'w-20' }]} /> :
         genes.length === 0 ? <Empty label="No genes with a TSS in this region." /> : (
           <div className="overflow-x-auto rounded-lg border border-base-300">
@@ -31,8 +32,8 @@ export default function Region() {
               <thead><tr><th>Gene</th><th>Ensembl ID</th><th className="text-right">TSS</th><th>Status</th></tr></thead>
               <tbody>
                 {genes.map(g => (
-                  <tr key={g.gene_id} className="cursor-pointer hover:bg-base-200" onClick={() => navigate(`/gene/${g.gene_id}`)}>
-                    <td><Link className="font-medium link-quiet" to={`/gene/${g.gene_id}`} onClick={e => e.stopPropagation()}>{g.symbol ?? g.gene_id}</Link></td>
+                  <tr key={g.gene_id} className={`${ROW_LINK} hover:bg-base-200`} {...rowLink(`/gene/${g.gene_id}`)}>
+                    <td className="font-medium"><span className={ROW_LINK_TEXT}>{g.symbol ?? g.gene_id}</span></td>
                     <td className="text-base-content/60">{g.gene_id}</td>
                     <td className="text-right tabular-nums">{fmtInt(g.tss)}</td>
                     <td className="space-x-1">
