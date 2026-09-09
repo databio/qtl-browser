@@ -7,6 +7,7 @@ import { KvTable } from '@/components/kv-table'
 import { SectionPanel } from '@/components/section-panel'
 import { DetailSkeleton, Empty, TableSkeleton } from '@/components/states'
 import TransTable from '@/components/TransTable'
+import { CopyButton } from '@/components/copy-button'
 import { dbsnp, ucsc } from '@/lib/links'
 import { fmtBp, fmtInt, fmtNum, fmtP, fmtPhenotype, fmtSlopeSE } from '@/lib/format'
 import { dropTable, materialize } from '@/lib/db'
@@ -79,15 +80,11 @@ function VariantBody({ vars }: { vars: VariantRow[] }) {
     <div className="space-y-8">
       <div className="grid items-start gap-4 md:grid-cols-2">
         <KvTable rows={[
-          { label: 'rsID', value: v.rsid ? <ExternalLink icon href={dbsnp(v.rsid)}>{v.rsid}</ExternalLink> : '—' },
+          { label: 'rsID', value: v.rsid ? <span className="flex items-center justify-between gap-2">
+            <ExternalLink icon href={dbsnp(v.rsid)} title="Open in dbSNP">{v.rsid}</ExternalLink>
+            <CopyButton text={v.rsid} className="-my-1 -mr-1" />
+          </span> : '—' },
           { label: 'Position', value: <span className="tabular-nums">{v.chr}:{fmtInt(v.position)} (GRCh38)</span> },
-          { label: vars.length > 1 ? 'Alleles (A1 / A2)' : 'A1 / A2',
-            value: v.A1 ? vars.map(x => `${x.A1} / ${x.A2}`).join(', ') : 'not reported (the trans eQTL file has no allele columns)' },
-          { label: 'rsID match', value: v.match === 'exact' ? 'alleles match dbSNP'
-            : v.match === 'position' ? (v.A1 ? 'position only (alleles differ from dbSNP record)' : 'by position (alleles not reported)')
-            : 'no dbSNP record' },
-        ]} />
-        <KvTable rows={[
           { label: 'Links', value: <span className="flex flex-wrap gap-x-4">
             <ExternalLink icon href={ucsc(v.chr, v.position - 50, v.position + 50)}>UCSC</ExternalLink>
             {/* both URLs embed ref and alt, so they need the alleles */}
@@ -95,6 +92,13 @@ function VariantBody({ vars }: { vars: VariantRow[] }) {
             {v.A1 && <ExternalLink icon href={openTargets(v)}>Open Targets</ExternalLink>}
             {v.rsid && <ExternalLink icon href={ensemblVar(v.rsid)}>Ensembl</ExternalLink>}
           </span> },
+          { label: 'rsID match', value: v.match === 'exact' ? 'alleles match dbSNP'
+            : v.match === 'position' ? (v.A1 ? 'position only (alleles differ from dbSNP record)' : 'by position (alleles not reported)')
+            : 'no dbSNP record' },
+        ]} />
+        <KvTable rows={[
+          { label: vars.length > 1 ? 'Alleles (A1 / A2)' : 'A1 / A2',
+            value: v.A1 ? vars.map(x => `${x.A1} / ${x.A2}`).join(', ') : 'not reported (the trans eQTL file has no allele columns)' },
           { label: 'A1', value: 'effect allele (minor allele in TOPCHeF)' },
           { label: 'A2', value: 'reference allele' },
         ]} />

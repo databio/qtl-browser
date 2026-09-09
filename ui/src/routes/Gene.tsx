@@ -15,6 +15,7 @@ import LocusPlot, { LocusLegend } from '@/components/LocusPlot'
 import { COLOC_EQTL_GENES, COLOC_SQTL_GENES } from '@/lib/coloc'
 import { ensemblGene, geneCards, gtexGene, openTargetsGene, ucsc } from '@/lib/links'
 import { useManifest } from '@/contexts/manifest-context'
+import { CopyButton } from '@/components/copy-button'
 import { fmtBp, fmtInt, fmtNum, fmtP, fmtPhenotype, fmtSlopeSE } from '@/lib/format'
 import { dropTable, materialize } from '@/lib/db'
 import { geneDetail, resolveGene, transSQL, type GeneDetail,
@@ -101,9 +102,12 @@ function geneRows(g: GeneRow, annotation: string | undefined) {
     { label: 'TSS', value: <span className="tabular-nums">{g.chr}:{fmtInt(g.tss)}</span> },
     { label: 'Biotype', value: g.biotype.replace(/_/g, ' ') },
     // the version is the study annotation's; the link resolves the unversioned ID to Ensembl's current model
-    { label: 'Ensembl ID', value: <ExternalLink icon href={ensemblGene(g.gene_id)}
+    { label: 'Ensembl ID', value: <span className="flex items-center justify-between gap-2">
+      <ExternalLink icon href={ensemblGene(g.gene_id)}
         title={`Open in Ensembl. The version shown is from ${annotation ? `GENCODE ${annotation}` : 'the study annotation'}.`}>
-      {g.gene_id_version}</ExternalLink> },
+        {g.gene_id_version}</ExternalLink>
+      <CopyButton text={g.gene_id} className="-my-1 -mr-1" />
+    </span> },
     { label: 'Links', value: <span className="flex flex-wrap gap-x-4">
       <ExternalLink icon href={ucsc(g.chr, g.start, g.end)}>UCSC</ExternalLink>
       {g.symbol && <ExternalLink icon href={gtexGene(g.symbol)}>GTEx</ExternalLink>}
