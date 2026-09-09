@@ -49,7 +49,10 @@ def manifest(cfg: Config) -> None:
         "genes_tested": con.execute(f"SELECT count(*) FROM '{cfg.derived / 'genes.parquet'}' WHERE tested").fetchone()[0],
         "sqtl_sig_phenotypes": con.execute(f"SELECT count(*) FROM '{cfg.derived / 'splice_phenotypes.parquet'}' WHERE is_sqtl").fetchone()[0],
         "sqtl_sig_genes": con.execute(f"SELECT count(DISTINCT gene_id) FROM '{cfg.derived / 'splice_phenotypes.parquet'}' WHERE is_sqtl").fetchone()[0],
-        "rsid_match": dict(con.execute(f"SELECT match, count(*) FROM read_parquet('{cfg.derived}/variants_by_position/*/*.parquet') GROUP BY 1").fetchall()),
+        # match breakdown for cis variants; trans-only rows include allele-less positions that can only match by position
+        "rsid_match": dict(con.execute(f"SELECT match, count(*) FROM read_parquet('{cfg.derived}/variants_by_position/*/*.parquet') WHERE in_cis GROUP BY 1").fetchall()),
+        "variants_cis": con.execute(f"SELECT count(*) FROM read_parquet('{cfg.derived}/variants_by_position/*/*.parquet') WHERE in_cis").fetchone()[0],
+        "variants_trans_only": con.execute(f"SELECT count(*) FROM read_parquet('{cfg.derived}/variants_by_position/*/*.parquet') WHERE NOT in_cis").fetchone()[0],
     }
     out = {
         "built": dt.datetime.now().isoformat(timespec="seconds"),
@@ -148,9 +151,20 @@ def validate(cfg: Config) -> None:
     n_detail = con.execute(f"SELECT count(*) FROM read_parquet('{cfg.derived}/gene_detail/*/*/*.parquet', hive_partitioning=false)").fetchone()[0]
     check(n_detail == n_binned, f"gene_detail has one row per binned (eQTL- or sQTL-tested) gene ({n_detail} vs {n_binned})")
 
-    # 6. rsID exact rate
-    tot, ex = con.execute(f"SELECT count(*), sum(match = 'exact') FROM read_parquet('{cfg.derived}/variants_by_position/*/*.parquet')").fetchone()
-    check(ex / tot >= 0.90, f"rsID exact match rate {ex / tot:.1%}")
+    # 6. rsID exact rate among cis variants (trans eQTL-only positions have no alleles and can only match by position)
+    vpos = f"read_parquet('{cfg.derived}/variants_by_position/*/*.parquet')"
+    tot, ex = con.execute(f"SELECT count(*), sum(match = 'exact') FROM {vpos} WHERE in_cis").fetchone()
+    check(ex / tot >= 0.90, f"rsID exact match rate among cis variants {ex / tot:.1%}")
+
+    # 7. the cis side of the variant table is unchanged by adding trans positions: same row count as
+    #    the cis-only build (2026-09-03), and no position carries both allele-bearing and allele-less rows
+    check(tot == 8_872_723, f"cis variant rows {tot:,} (expected 8,872,723)")
+    mixed = con.execute(f"SELECT count(*) FROM (SELECT chr, position FROM {vpos} GROUP BY 1, 2 HAVING bool_or(A1 IS NULL) AND bool_or(A1 IS NOT NULL))").fetchone()[0]
+    check(mixed == 0, f"positions with both allele-bearing and allele-less rows: {mixed}")
+
+    # 8. trans rows resolve to an rsID except where dbSNP has no record at the position
+    tn, tnull = con.execute(f"SELECT count(*), sum(rsid IS NULL) FROM read_parquet('{cfg.derived}/trans_pairs/*/*.parquet', hive_partitioning=false)").fetchone()
+    check(tnull / tn < 0.001, f"trans rows without rsID {tnull:,} of {tn:,} ({tnull / tn:.3%})")
 
     if fails:
         raise SystemExit(f"validate: {len(fails)} check(s) failed")

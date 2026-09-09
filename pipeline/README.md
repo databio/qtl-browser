@@ -22,8 +22,8 @@ live in `config.yaml`. Nothing is hard-coded in the steps.
 |---|---|---|---|
 | extract | `steps_extract` | Zenodo `*.tar.gz` | per-chromosome parquet unpacked next to the archives |
 | gtf | `steps_gtf` | GENCODE v34 GTF | `gene_annotation.parquet`, `exons.parquet` (sorted by gene, small row groups) |
-| variants_collect | `steps_variants` | every cis file | `_tmp/variants_raw.parquet`: distinct (chr, position, A1, A2), 8.87M |
-| variants_rsid | `steps_variants` | dbSNP b157 VCF via `bcftools query -T` on those positions | `variants_by_position/chr=*/`, `variants_by_rsid.parquet`, with an exact / position / none match flag |
+| variants_collect | `steps_variants` | every cis file, then both trans files | `_tmp/variants_raw.parquet`: distinct (chr, position, A1, A2) with `in_cis`. 8.87M cis variants plus 343k positions seen only in the genome-wide trans scan; trans_eQTL has no allele columns, so its positions get null alleles unless trans_sQTL has them |
+| variants_rsid | `steps_variants` | dbSNP b157 VCF via `bcftools query -T` on those positions | `variants_by_position/chr=*/`, `variants_by_rsid.parquet`, with an exact / position / none match flag (allele-less rows can only match by position). The two `_tmp/dbsnp_*` caches are rebuilt when older than `variants_raw.parquet` |
 | permutation_tables | `steps_tables` | cis permutation files, SuSiE, trans, annotation | `genes.parquet`, `splice_phenotypes.parquet` (sorted chr, tss; stats for range reads), `search_index.parquet` (the one table the browser loads whole) |
 | credible_sets | `steps_tables` | SuSiE files | `credible_sets.parquet` |
 | nominal | `steps_nominal` | cis nominal files, one process per chromosome | `cis_eqtl_nominal/chr=*/bin=*/`, `cis_sqtl_nominal/chr=*/bin=*/`: one file per `nominal_bin_genes` tested genes (by TSS rank, the `bin` column of `genes`), one row group per gene, delta/byte-stream-split encodings, rsIDs as `rs_number`. With `sqtl_nominal: significant` the sQTL side keeps only introns flagged `is_sqtl` |

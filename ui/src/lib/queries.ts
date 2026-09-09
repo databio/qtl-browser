@@ -179,8 +179,12 @@ export const manifest = () => fetch(`${(import.meta.env.VITE_DATA_BASE as string
 
 // ---- variant page ---------------------------------------------------------------------------
 
+/** `in_cis` false marks a variant seen only in the genome-wide trans scan, outside every cis
+ *  window. Alleles are null when the variant appears only in the trans eQTL file, which has no
+ *  allele columns; such rows match dbSNP by position only. */
 export interface VariantRow extends Row {
-  chr: string; position: number; A1: string; A2: string; rsid: string | null; rs_number: number | null; match: string
+  chr: string; position: number; A1: string | null; A2: string | null; rsid: string | null; rs_number: number | null
+  match: string; in_cis: boolean
 }
 
 export const variantByRsid = (rsNumber: number) =>

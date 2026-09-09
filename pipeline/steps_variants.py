@@ -9,6 +9,11 @@ from .common import CHROMS, Config, connect, log, write_parquet
 
 
 def collect(cfg: Config) -> None:
+    """Distinct tested variants with an `in_cis` flag. Cis files carry alleles and define the
+    cis set. The trans scan is genome-wide, so trans files add positions outside every cis
+    window: trans_sQTL has A1/A2, trans_eQTL has only a chr:pos variant_id, so its positions
+    get null alleles unless the same position appears in trans_sQTL. A position never gets
+    both an allele-bearing and a null-allele row."""
     con = connect(cfg)
     srcs = ["cis_eQTL_nominal", "cis_sQTL_nominal", "cis_eQTL_permutation", "cis_sQTL_permutation",
             "cis_eQTL_SuSiE", "cis_sQTL_SuSiE"]
@@ -16,12 +21,32 @@ def collect(cfg: Config) -> None:
         f"SELECT chr, position, A1, A2 FROM read_parquet('{cfg.raw_glob(s)}')" for s in srcs
     )
     out = cfg.tmp / "variants_raw.parquet"
-    log("variants_collect: scanning all cis files for distinct (chr, position, A1, A2)")
+    log("variants_collect: scanning cis files for distinct (chr, position, A1, A2), then trans files for positions outside cis")
     con.execute(f"""
-        COPY (SELECT DISTINCT chr, position::INTEGER AS position, A1, A2 FROM ({union})
-              ORDER BY chr, position, A1, A2)
+        COPY (
+            WITH cis AS (SELECT DISTINCT chr, position::INTEGER AS position, A1, A2 FROM ({union})),
+            cispos AS (SELECT DISTINCT chr, position FROM cis),
+            ts AS (SELECT DISTINCT chr, position::INTEGER AS position, A1, A2
+                   FROM read_parquet('{cfg.raw_glob('trans_sQTL')}')),
+            te AS (SELECT DISTINCT split_part(variant_id, ':', 1) AS chr, split_part(variant_id, ':', 2)::INTEGER AS position
+                   FROM read_parquet('{cfg.raw_glob('trans_eQTL')}')),
+            trans_alleles AS (SELECT * FROM ts ANTI JOIN cispos USING (chr, position)),
+            trans_noallele AS (
+                SELECT chr, position, NULL::VARCHAR AS A1, NULL::VARCHAR AS A2
+                FROM te ANTI JOIN cispos USING (chr, position)
+                ANTI JOIN (SELECT DISTINCT chr, position FROM ts) tsp USING (chr, position)
+            )
+            SELECT *, true AS in_cis FROM cis
+            UNION ALL SELECT *, false FROM trans_alleles
+            UNION ALL SELECT *, false FROM trans_noallele
+            ORDER BY chr, position, A1, A2
+        )
         TO '{out}' (FORMAT PARQUET, COMPRESSION ZSTD)
     """)
+    for in_cis, alleles, n in con.execute(
+        f"SELECT in_cis, A1 IS NOT NULL, count(*) FROM '{out}' GROUP BY 1, 2 ORDER BY 1 DESC, 2 DESC"
+    ).fetchall():
+        log(f"variants_collect: {'cis' if in_cis else 'trans-only'}, {'alleles' if alleles else 'no alleles'}: {n:>12,}")
     n = con.execute(f"SELECT count(*) FROM '{out}'").fetchone()[0]
     log(f"variants_collect: {n:,} distinct variants -> {out}")
 
@@ -47,8 +72,15 @@ def rsid(cfg: Config) -> None:
     chr_to_acc = {v: k for k, v in acc.items()}
     raw = cfg.tmp / "variants_raw.parquet"
 
-    # 1. targets file for bcftools: RefSeq accession + position, sorted in VCF order
+    # 1. targets file for bcftools: RefSeq accession + position, sorted in VCF order. Both
+    #    cached files are rebuilt when the variant list is newer than they are; an existence
+    #    check alone would silently reuse a cache built from a shorter list.
     targets = cfg.tmp / "dbsnp_targets.tsv"
+    matched = cfg.tmp / "dbsnp_matched.tsv.gz"
+    for cache in (targets, matched):
+        if cache.exists() and cache.stat().st_mtime < raw.stat().st_mtime:
+            log(f"variants_rsid: {cache.name} is older than {raw.name}, rebuilding it")
+            cache.unlink()
     if not targets.exists():
         log("variants_rsid: writing targets file")
         with open(targets, "w") as fh:
@@ -59,7 +91,6 @@ def rsid(cfg: Config) -> None:
                     fh.write(f"{a}\t{p}\n")
 
     # 2. stream dbSNP once, keep only records at tested positions
-    matched = cfg.tmp / "dbsnp_matched.tsv.gz"
     if not matched.exists():
         log("variants_rsid: streaming dbSNP VCF through bcftools (this is the long step)")
         with gzip.open(matched, "wt") as out:
@@ -102,19 +133,23 @@ def rsid(cfg: Config) -> None:
         SELECT chr, position, arg_min(rsid, rs_number) AS rsid, min(rs_number) AS rs_number
         FROM dbsnp GROUP BY 1,2
     """)
+    # null alleles (trans eQTL-only positions) never satisfy the exact join and fall through
+    # to the position match
     con.execute("""
         CREATE TABLE variants AS
         SELECT v.chr, v.position, v.A1, v.A2,
                coalesce(e.rsid, b.rsid) AS rsid,
                coalesce(e.rs_number, b.rs_number) AS rs_number,
-               CASE WHEN e.rsid IS NOT NULL THEN 'exact' WHEN b.rsid IS NOT NULL THEN 'position' ELSE 'none' END AS match
+               CASE WHEN e.rsid IS NOT NULL THEN 'exact' WHEN b.rsid IS NOT NULL THEN 'position' ELSE 'none' END AS match,
+               v.in_cis
         FROM v LEFT JOIN exact e USING (chr, position, A1, A2)
                LEFT JOIN bypos b USING (chr, position)
     """)
-    stats = con.execute("SELECT match, count(*) FROM variants GROUP BY 1 ORDER BY 1").fetchall()
-    total = sum(n for _, n in stats)
-    for m, n in stats:
-        log(f"variants_rsid: {m:9s} {n:>12,} ({100 * n / total:.2f}%)")
+    for in_cis in (True, False):
+        stats = con.execute("SELECT match, count(*) FROM variants WHERE in_cis = ? GROUP BY 1 ORDER BY 1", [in_cis]).fetchall()
+        total = sum(n for _, n in stats)
+        for m, n in stats:
+            log(f"variants_rsid: {'cis       ' if in_cis else 'trans-only'} {m:9s} {n:>12,} ({100 * n / total:.2f}%)")
 
     rg = cfg["row_group_sizes"]["variants"]
     for c in CHROMS:

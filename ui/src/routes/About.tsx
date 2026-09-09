@@ -66,7 +66,8 @@ export default function About() {
               { label: 'eGenes', value: counts.egenes?.toLocaleString() },
               { label: 'Splice phenotypes tested', value: (tables.splice_phenotypes?.rows ?? 0).toLocaleString() },
               { label: 'Significant sQTL introns', value: `${counts.sqtl_sig_phenotypes?.toLocaleString()} in ${counts.sqtl_sig_genes?.toLocaleString()} genes` },
-              { label: 'Variants in cis windows', value: (tables.variants_by_position?.rows ?? 0).toLocaleString() },
+              { label: 'Variants in cis windows', value: (counts.variants_cis ?? tables.variants_by_position?.rows ?? 0).toLocaleString() },
+              { label: 'Variants seen only in trans', value: (counts.variants_trans_only ?? 0).toLocaleString() },
               { label: 'DCM GWAS variants', value: (tables.gwas_dcm?.rows ?? 0).toLocaleString() },
             ]} />
           )}
