@@ -45,7 +45,7 @@ export interface SplicePhenotype extends Row {
 
 export interface TransRow extends Row {
   qtl_type: string; phenotype_id: string; gene_id: string; symbol: string | null
-  gene_chr: string; variant_chr: string; position: number; rsid: string | null; af: number
+  gene_chr: string; gene_tss: number; variant_chr: string; position: number; rsid: string | null; af: number
   pval: number; beta: number; beta_se: number; r2: number
 }
 
@@ -88,6 +88,11 @@ export const geneDetail = async (hit: SearchHit): Promise<GeneDetail | null> => 
  *  per-chromosome file; 65k rows for the busiest gene). */
 export const transSQL = (hit: SearchHit) =>
   `SELECT * FROM ${parquet(`trans_pairs/chr=${hit.chr}/data.parquet`)} WHERE gene_id = ${lit(hit.gene_id)}`
+
+/** Same for one variant's trans rows, from the variant-keyed copy (position-sorted, so one
+ *  position is one or two row groups). */
+export const transAtSQL = (chr: string, pos: number) =>
+  `SELECT * FROM ${parquet(`trans_by_variant/chr=${chr}/data.parquet`)} WHERE position = ${pos}`
 
 interface PagedQuery {
   table: string                 // materialized table to page off
@@ -141,19 +146,32 @@ export const cisCount = async (q: CisQuery) =>
 export const cisAll = (q: CisQuery) =>
   rows<CisRow>(`SELECT ${CIS_COLS} ${cisWhere({ ...q, maxP: undefined, search: undefined })} ORDER BY position`)
 
-export interface TransQuery extends PagedQuery { qtlType: 'e' | 's' }
+/** A trans table is keyed by the gene (gene page: rows are variants, one QTL type per tab) or by
+ *  the variant (variant page: rows are genes, both types together). The key decides what the
+ *  search box matches: variant rsID or position, or gene symbol or Ensembl ID. */
+export interface TransQuery extends PagedQuery { qtlType?: 'e' | 's'; keyedBy?: 'gene' | 'variant' }
+
+function geneSearchWhere(s: string | undefined): string | null {
+  const t = s?.trim()
+  if (!t) return null
+  return `(symbol ILIKE ${lit(t + '%')} OR gene_id ILIKE ${lit(t + '%')})`
+}
 
 function transWhere(q: TransQuery): string {
-  const parts = [`qtl_type = ${lit(q.qtlType)}`]
+  const parts = ['true']
+  if (q.qtlType) parts.push(`qtl_type = ${lit(q.qtlType)}`)
   if (q.maxP != null) parts.push(`pval <= ${q.maxP}`)
-  const s = searchWhere(q.search, 'substr(rsid, 3)')
+  const s = q.keyedBy === 'variant' ? geneSearchWhere(q.search) : searchWhere(q.search, 'substr(rsid, 3)')
   if (s) parts.push(s)
   return `FROM ${q.table} WHERE ${parts.join(' AND ')}`
 }
 
+// chromosome order then position, so chr2 sorts before chr10
+const chromOrder = (col: string) => `CASE WHEN ${col} = 'chrX' THEN 23 WHEN ${col} = 'chrY' THEN 24 ELSE TRY_CAST(substr(${col}, 4) AS INTEGER) END`
 const TRANS_SORTABLE: Record<string, string[]> = {
-  // chromosome order then position, so chr2 sorts before chr10
-  position: [`CASE WHEN variant_chr = 'chrX' THEN 23 WHEN variant_chr = 'chrY' THEN 24 ELSE TRY_CAST(substr(variant_chr, 4) AS INTEGER) END`, 'position'],
+  position: [chromOrder('variant_chr'), 'position'],
+  gene: [chromOrder('gene_chr'), 'gene_tss'],
+  type: ['qtl_type', 'pval'],
   af: ['af'], pval: ['pval'], beta: ['beta'], r2: ['r2'],
 }
 
@@ -174,8 +192,6 @@ export const transAll = (q: TransQuery) =>
 
 export const genesInRegion = (chr: string, start: number, end: number) =>
   rows<SearchHit>(`SELECT * FROM search_index WHERE chr = ${lit(chr)} AND tss BETWEEN ${start} AND ${end} ORDER BY tss`)
-
-export const manifest = () => fetch(`${(import.meta.env.VITE_DATA_BASE as string | undefined) ?? '/data'}/manifest.json`).then(r => r.json())
 
 // ---- variant page ---------------------------------------------------------------------------
 
@@ -208,9 +224,6 @@ export const credibleSetsAt = (chr: string, pos: number) =>
   rows<CredibleSetHit>(`SELECT * FROM ${parquet('credible_sets.parquet')}
     WHERE chr = ${lit(chr)} AND tss BETWEEN ${pos - 1_000_000} AND ${pos + 1_000_000} AND position = ${pos} ORDER BY pip DESC`)
 
-/** Trans associations of one variant, from the variant-keyed copy of the trans table. */
-export const transAt = (chr: string, pos: number) =>
-  rows<TransRow>(`SELECT * FROM ${parquet(`trans_by_variant/chr=${chr}/data.parquet`)} WHERE position = ${pos} ORDER BY pval LIMIT 2000`)
 
 export interface CisHit extends Row {
   gene_id: string; symbol: string | null; phenotype_id?: string; tss_distance: number

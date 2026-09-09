@@ -1,4 +1,3 @@
-import { useEffect, useState } from 'react'
 import { Link } from 'react-router'
 import Search from '@/components/Search'
 import ExternalLink from '@/components/ExternalLink'
@@ -7,15 +6,11 @@ import SentenceLines from '@/components/SentenceLines'
 import { Page } from '@/components/page'
 import { COLOC_EQTL_GENES, COLOC_SQTL_GENES } from '@/lib/coloc'
 import { PREPRINT, ZENODO } from '@/lib/links'
-import { manifest } from '@/lib/queries'
+import { useManifest } from '@/contexts/manifest-context'
 import { fmtInt } from '@/lib/format'
 
 export default function Home() {
-  const [counts, setCounts] = useState<Record<string, number> | null>(null)
-
-  useEffect(() => {
-    manifest().then(m => setCounts(m.counts)).catch(() => {})
-  }, [])
+  const counts = useManifest()?.counts ?? null
 
   return (
     <Page>
@@ -43,7 +38,7 @@ export default function Home() {
         </p>
       </div>
 
-      <div className="mt-10">
+      <div className="mt-10 pb-4">
         <ColocLoci />
       </div>
     </Page>

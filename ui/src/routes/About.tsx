@@ -1,10 +1,9 @@
-import { useEffect, useState } from 'react'
 import ExternalLink from '@/components/ExternalLink'
 import { Page } from '@/components/page'
 import { PageHeader } from '@/components/page-header'
 import { KvTable } from '@/components/kv-table'
 import { PIPELINE, PREPRINT, ZENODO } from '@/lib/links'
-import { manifest } from '@/lib/queries'
+import { useManifest } from '@/contexts/manifest-context'
 
 const GWAS_PAPER = 'https://doi.org/10.1038/s41588-024-01975-5'
 const CVDKP = 'https://kp4cd.org/dataset_downloads/mi'
@@ -12,12 +11,11 @@ const SEQCOL = 'https://seqcolapi.databio.org'
 const REPO = 'https://github.com/sanghoonio/qtl-browser'
 
 export default function About() {
-  const [m, setM] = useState<Record<string, unknown> | null>(null)
-  useEffect(() => { manifest().then(setM).catch(() => {}) }, [])
-  const sources = (m?.sources ?? {}) as Record<string, { version: string; description: string }>
-  const tables = (m?.tables ?? {}) as Record<string, { rows: number; bytes: number; load: string }>
-  const counts = (m?.counts ?? {}) as Record<string, number>
-  const gwas = (m?.gwas_dcm ?? null) as { file: string; n_cases: number; n_controls: number; variants: number } | null
+  const m = useManifest()
+  const sources = m?.sources ?? {}
+  const tables = m?.tables ?? {}
+  const counts = m?.counts ?? {}
+  const gwas = m?.gwas_dcm ?? null
   const gwasSet = gwas?.file.includes('BiobanksOnly') ? 'biobank-only meta-analysis' : gwas?.file.includes('MTAG') ? 'MTAG analysis' : 'meta-analysis'
   return (
     <Page>

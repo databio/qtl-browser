@@ -6,11 +6,12 @@ import { PageHeader } from '@/components/page-header'
 import { KvTable } from '@/components/kv-table'
 import { SectionPanel } from '@/components/section-panel'
 import { DetailSkeleton, Empty, TableSkeleton } from '@/components/states'
-import { Pager } from '@/components/pager'
+import TransTable from '@/components/TransTable'
 import { dbsnp, ucsc } from '@/lib/links'
 import { fmtBp, fmtInt, fmtNum, fmtP, fmtPhenotype, fmtSlopeSE } from '@/lib/format'
-import { cisHitsAt, credibleSetsAt, leadGenesAt, leadPhenotypesAt, transAt, variantByPosition, variantByRsid,
-  type CisHit, type CredibleSetHit, type Gene, type SplicePhenotype, type TransRow, type VariantRow } from '@/lib/queries'
+import { dropTable, materialize } from '@/lib/db'
+import { cisHitsAt, credibleSetsAt, leadGenesAt, leadPhenotypesAt, transAtSQL, variantByPosition, variantByRsid,
+  type CisHit, type CredibleSetHit, type Gene, type SplicePhenotype, type VariantRow } from '@/lib/queries'
 import { ROW_LINK, ROW_LINK_TEXT, useRowLink } from '@/lib/row-link'
 
 const gnomad = (v: VariantRow) => `https://gnomad.broadinstitute.org/variant/${v.chr.replace('chr', '')}-${v.position}-${v.A2}-${v.A1}?dataset=gnomad_r4`
@@ -51,16 +52,21 @@ function VariantBody({ vars }: { vars: VariantRow[] }) {
   const v = vars[0]
   const rowLink = useRowLink()
   const [leads, setLeads] = useState<{ genes: Gene[]; phens: SplicePhenotype[]; cs: CredibleSetHit[] } | null>(null)
-  const [trans, setTrans] = useState<TransRow[] | null>(null)
-  const [transOffset, setTransOffset] = useState(0)
-  const [transPageSize, setTransPageSize] = useState(10)
+  // the variant's trans rows as an in-memory table, materialized once per variant and dropped
+  // when it changes; the trans table pages off it like the gene page's does
+  const [transTable, setTransTable] = useState<string | null>(null)
   const [scan, setScan] = useState<{ e: CisHit[]; s: CisHit[] } | null | 'running'>(null)
 
   useEffect(() => {
-    setLeads(null); setTrans(null); setTransOffset(0); setScan(null)
+    let alive = true
+    let table: string | null = null
+    setLeads(null); setTransTable(null); setScan(null)
     Promise.all([leadGenesAt(v.chr, v.position), leadPhenotypesAt(v.chr, v.position), credibleSetsAt(v.chr, v.position)])
-      .then(([genes, phens, cs]) => setLeads({ genes, phens, cs }))
-    transAt(v.chr, v.position).then(setTrans).catch(() => setTrans([]))
+      .then(([genes, phens, cs]) => { if (alive) setLeads({ genes, phens, cs }) })
+    materialize(transAtSQL(v.chr, v.position), 'trans')
+      .then(t => { if (!alive) { dropTable(t); return } table = t; setTransTable(t) })
+      .catch(e => console.error(e))
+    return () => { alive = false; if (table) dropTable(table) }
   }, [v.chr, v.position])
 
   async function runScan() {
@@ -150,30 +156,7 @@ function VariantBody({ vars }: { vars: VariantRow[] }) {
       </SectionPanel>
 
       <SectionPanel title="trans associations" description="Genes and splice phenotypes anywhere in the genome whose expression or splicing this variant associates with, outside their cis windows.">
-        {trans === null ? <TableSkeleton columns={[{ w: 'w-10' }, { w: 'w-16' }, { w: 'w-40' }, { w: 'w-20' }, { w: 'w-14', align: 'right' }, { w: 'w-20', align: 'right' }, { w: 'w-10', align: 'right' }]} rows={3} /> :
-          trans.length === 0 ? <Empty label="No significant trans associations." /> : (
-          <>
-            <div className="overflow-x-auto rounded-lg border border-base-300">
-              <table className="table table-sm">
-                <thead><tr><th>Type</th><th>Gene</th><th>Phenotype</th><th>Gene location</th><th className="text-right">p</th><th className="text-right">Beta ± SE</th><th className="text-right">r²</th></tr></thead>
-                <tbody>
-                  {trans.slice(transOffset, transOffset + transPageSize).map((r, i) => (
-                    <tr key={i} className={`${ROW_LINK} hover:bg-base-200/60`} {...rowLink(`/gene/${r.gene_id}${r.qtl_type === 's' ? '?tab=sqtl' : ''}`)}>
-                      <td><span className={`badge badge-xs ${r.qtl_type === 'e' ? 'badge-primary' : 'badge-secondary'}`}>{r.qtl_type === 'e' ? 'eQTL' : 'sQTL'}</span></td>
-                      <td className="font-medium"><span className={ROW_LINK_TEXT}>{r.symbol ?? r.gene_id}</span></td>
-                      <td className="tabular-nums text-base-content/60">{r.qtl_type === 'e' ? r.gene_id : fmtPhenotype(r.phenotype_id)}</td>
-                      <td className="tabular-nums text-base-content/60">{r.gene_chr}</td>
-                      <td className="text-right tabular-nums">{fmtP(r.pval)}</td>
-                      <td className="text-right tabular-nums">{fmtSlopeSE(r.beta, r.beta_se)}</td>
-                      <td className="text-right tabular-nums text-base-content/60">{fmtNum(r.r2)}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-            <Pager total={trans.length} offset={transOffset} pageSize={transPageSize} onPage={setTransOffset} onPageSize={n => { setTransPageSize(n); setTransOffset(0) }} />
-          </>
-          )}
+        <TransTable table={transTable} keyedBy="variant" fileStem={`${v.rsid ?? `${v.chr}_${v.position}`}_trans`} />
       </SectionPanel>
 
       <SectionPanel title="All cis associations" description="Nominal statistics for every gene and splice phenotype whose window covers this variant. Reads every gene window overlapping the position, so it runs on request."

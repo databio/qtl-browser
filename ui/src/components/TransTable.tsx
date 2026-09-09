@@ -8,12 +8,21 @@ import { transAll, transCount, transRows, type TransQuery, type TransRow } from 
 import { downloadCSV } from '@/lib/csv'
 import { ROW_LINK, ROW_LINK_TEXT, useRowLink } from '@/lib/row-link'
 
-/** Sortable, filterable page through one gene's trans rows of one QTL type, off the trans
- *  table the gene page materialized. Each change is one local query plus a count, like
- *  CisTable. `table` null means the gene's rows are still loading. */
-export default function TransTable({ table, qtlType, fileStem }: { table: string | null; qtlType: 'e' | 's'; fileStem: string }) {
+/** Sortable, filterable page through a materialized trans table. Each change is one local
+ *  query plus a count, like CisTable. `table` null means the rows are still loading.
+ *
+ *  Keyed by gene (the gene page): rows are the variants of one QTL type, linking to the
+ *  variant. Keyed by variant (the variant page): rows are the genes and introns of both
+ *  types, linking to the gene, with a type badge and the gene's location instead of the
+ *  variant's. */
+export default function TransTable({ table, qtlType, keyedBy = 'gene', fileStem }: {
+  table: string | null; qtlType?: 'e' | 's'; keyedBy?: 'gene' | 'variant'; fileStem: string
+}) {
+  const byVariant = keyedBy === 'variant'
   const rowLink = useRowLink()
-  const variantPath = (r: TransRow) => `/variant/${r.rsid ?? `${r.variant_chr}:${r.position}`}`
+  const rowPath = (r: TransRow) => byVariant
+    ? `/gene/${r.gene_id}${r.qtl_type === 's' ? '?tab=sqtl' : ''}`
+    : `/variant/${r.rsid ?? `${r.variant_chr}:${r.position}`}`
   const [sort, setSort] = useState<SortState>({ by: 'pval', order: 'asc' })
   const [maxP, setMaxP] = useState('')
   const [search, setSearch] = useState('')
@@ -29,7 +38,7 @@ export default function TransTable({ table, qtlType, fileStem }: { table: string
 
   const query = (): TransQuery => {
     const p = maxP === '' ? undefined : Number(maxP)
-    return { table: table!, qtlType, maxP: Number.isFinite(p) ? p : undefined, search: search || undefined,
+    return { table: table!, qtlType, keyedBy, maxP: Number.isFinite(p) ? p : undefined, search: search || undefined,
       orderBy: sort.by || 'pval', desc: sort.by ? sort.order === 'desc' : false, limit: pageSize, offset }
   }
 
@@ -39,7 +48,7 @@ export default function TransTable({ table, qtlType, fileStem }: { table: string
     setBusy(true)
     const q = query()
     const t = setTimeout(() => {
-      Promise.all([transRows(q), transCount(q), all ?? transCount({ table, qtlType })])
+      Promise.all([transRows(q), transCount(q), all ?? transCount({ table, qtlType, keyedBy })])
         .then(([r, n, a]) => { if (alive) { setData(r); setTotal(n); setAll(a) } })
         .catch(() => {})   // the table was dropped under us (gene changed): the next effect run replaces it
         .finally(() => { if (alive) setBusy(false) })
@@ -48,19 +57,24 @@ export default function TransTable({ table, qtlType, fileStem }: { table: string
   }, [table, sort, maxP, search, offset, pageSize]) // eslint-disable-line react-hooks/exhaustive-deps
 
   async function exportCSV() {
-    const cols = ['variant_chr', 'position', 'rsid', 'af', 'pval', 'beta', 'beta_se', 'r2']
-    downloadCSV(`${fileStem}.csv`, await transAll(query()), qtlType === 's' ? ['phenotype_id', ...cols] : cols)
+    const stats = ['pval', 'beta', 'beta_se', 'r2']
+    const cols = byVariant
+      ? ['qtl_type', 'gene_id', 'symbol', 'phenotype_id', 'gene_chr', 'gene_tss', ...stats]
+      : [...(qtlType === 's' ? ['phenotype_id'] : []), 'variant_chr', 'position', 'rsid', 'af', ...stats]
+    downloadCSV(`${fileStem}.csv`, await transAll(query()), cols)
   }
 
-  const skel = [...(qtlType === 's' ? [{ w: 'w-40' }] : []), { w: 'w-24' }, { w: 'w-20' }, { w: 'w-10', align: 'right' as const },
-    { w: 'w-14', align: 'right' as const }, { w: 'w-20', align: 'right' as const }, { w: 'w-10', align: 'right' as const }]
+  const R = { align: 'right' as const }
+  const skel = byVariant
+    ? [{ w: 'w-10' }, { w: 'w-16' }, { w: 'w-40' }, { w: 'w-24' }, { w: 'w-14', ...R }, { w: 'w-20', ...R }, { w: 'w-10', ...R }]
+    : [...(qtlType === 's' ? [{ w: 'w-40' }] : []), { w: 'w-24' }, { w: 'w-20' }, { w: 'w-10', ...R }, { w: 'w-14', ...R }, { w: 'w-20', ...R }, { w: 'w-10', ...R }]
 
   return (
     <div className="space-y-2">
       <div className="flex flex-wrap items-center gap-2">
         <label className="input input-bordered input-sm flex h-8 w-56 items-center gap-2 rounded-lg">
           <SearchIcon className="size-4 shrink-0 opacity-50" />
-          <input type="search" className="grow bg-transparent outline-none" placeholder="rsID or position" value={search} onChange={e => setSearch(e.target.value)} />
+          <input type="search" className="grow bg-transparent outline-none" placeholder={byVariant ? 'Gene symbol or Ensembl ID' : 'rsID or position'} value={search} onChange={e => setSearch(e.target.value)} />
         </label>
         {busy && data && <span className="loading loading-spinner loading-xs text-base-content/40" />}
         <div className="flex-1" />
@@ -72,16 +86,23 @@ export default function TransTable({ table, qtlType, fileStem }: { table: string
         </select>
         <button className="btn btn-sm h-8 gap-1.5 rounded-lg border-base-300 font-medium" onClick={exportCSV} disabled={!table || total === 0}><Download className="size-3.5" /> CSV</button>
       </div>
-      {data === null ? <TableSkeleton columns={skel} rows={3} /> : all === 0 ? <Empty label="No trans associations." /> : total === 0 ? <Empty label="No variants match." /> : (
+      {data === null ? <TableSkeleton columns={skel} rows={3} /> : all === 0 ? <Empty label="No trans associations." /> : total === 0 ? <Empty label={byVariant ? 'No genes match.' : 'No variants match.'} /> : (
         <>
           <div className="overflow-x-auto rounded-lg border border-base-300">
             <table className="table table-sm">
               <thead>
                 <tr>
-                  {qtlType === 's' && <th>Intron</th>}
-                  <SortableTh sortKey="position" label="Variant" sort={sort} onSort={setSort} defaultOrder="asc" />
-                  <th>rsID</th>
-                  <SortableTh sortKey="af" label="AF" sort={sort} onSort={setSort} className="text-right" align="right" />
+                  {byVariant ? <>
+                    <SortableTh sortKey="type" label="Type" sort={sort} onSort={setSort} defaultOrder="asc" />
+                    <th>Gene</th>
+                    <th>Phenotype</th>
+                    <SortableTh sortKey="gene" label="Gene location" sort={sort} onSort={setSort} defaultOrder="asc" />
+                  </> : <>
+                    {qtlType === 's' && <th>Intron</th>}
+                    <SortableTh sortKey="position" label="Variant" sort={sort} onSort={setSort} defaultOrder="asc" />
+                    <th>rsID</th>
+                    <SortableTh sortKey="af" label="AF" sort={sort} onSort={setSort} className="text-right" align="right" />
+                  </>}
                   <SortableTh sortKey="pval" label="p" sort={sort} onSort={setSort} defaultOrder="asc" className="text-right" align="right" />
                   <SortableTh sortKey="beta" label="Beta ± SE" sort={sort} onSort={setSort} className="text-right" align="right" />
                   <SortableTh sortKey="r2" label="r²" sort={sort} onSort={setSort} className="text-right" align="right" />
@@ -89,11 +110,18 @@ export default function TransTable({ table, qtlType, fileStem }: { table: string
               </thead>
               <tbody>
                 {data.map((r, i) => (
-                  <tr key={i} className={`${ROW_LINK} hover:bg-base-200/60`} {...rowLink(variantPath(r))}>
-                    {qtlType === 's' && <td className="tabular-nums text-base-content/60">{fmtPhenotype(r.phenotype_id)}</td>}
-                    <td className="tabular-nums">{r.variant_chr}:{fmtInt(r.position)}</td>
-                    <td><span className={`${ROW_LINK_TEXT} ${r.rsid ? '' : 'text-base-content/40'}`}>{r.rsid ?? `${r.variant_chr}:${r.position}`}</span></td>
-                    <td className="text-right tabular-nums text-base-content/60">{fmtNum(r.af)}</td>
+                  <tr key={i} className={`${ROW_LINK} hover:bg-base-200/60`} {...rowLink(rowPath(r))}>
+                    {byVariant ? <>
+                      <td><span className={`badge badge-xs ${r.qtl_type === 'e' ? 'badge-primary' : 'badge-secondary'}`}>{r.qtl_type === 'e' ? 'eQTL' : 'sQTL'}</span></td>
+                      <td className="font-medium"><span className={ROW_LINK_TEXT}>{r.symbol ?? r.gene_id}</span></td>
+                      <td className="tabular-nums text-base-content/60">{r.qtl_type === 'e' ? r.gene_id : fmtPhenotype(r.phenotype_id)}</td>
+                      <td className="tabular-nums text-base-content/60">{r.gene_chr}:{fmtInt(r.gene_tss)}</td>
+                    </> : <>
+                      {qtlType === 's' && <td className="tabular-nums text-base-content/60">{fmtPhenotype(r.phenotype_id)}</td>}
+                      <td className="tabular-nums">{r.variant_chr}:{fmtInt(r.position)}</td>
+                      <td><span className={`${ROW_LINK_TEXT} ${r.rsid ? '' : 'text-base-content/40'}`}>{r.rsid ?? `${r.variant_chr}:${r.position}`}</span></td>
+                      <td className="text-right tabular-nums text-base-content/60">{fmtNum(r.af)}</td>
+                    </>}
                     <td className="text-right tabular-nums">{fmtP(r.pval)}</td>
                     <td className="text-right tabular-nums">{fmtSlopeSE(r.beta, r.beta_se)}</td>
                     <td className="text-right tabular-nums text-base-content/60">{fmtNum(r.r2)}</td>
