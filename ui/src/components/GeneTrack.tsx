@@ -33,7 +33,11 @@ function packLanes(genes: WindowGene[], bpPerPx: number): Lane[] {
 /** Genes in the plotted window on a shared x axis: thin bars for neighbors, the collapsed
  *  exon model for the gene of interest, and the selected intron shaded. Carries the x axis
  *  for the locus plot above it. */
-export default function GeneTrack({ spec, width, marginLeft, dark }: { spec: TrackSpec; width: number; marginLeft: number; dark: boolean }) {
+export default function GeneTrack({ spec, width, marginLeft, dark, shade }: {
+  spec: TrackSpec; width: number; marginLeft: number; dark: boolean
+  /** the locus plot's brushed interval, shaded across every lane so the reader sees which slice the detail shows */
+  shade?: [number, number] | null
+}) {
   const host = useRef<HTMLDivElement>(null)
   const [data, setData] = useState<{ genes: WindowGene[]; exons: Exon[] } | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -78,6 +82,10 @@ export default function GeneTrack({ spec, width, marginLeft, dark }: { spec: Tra
       label: `${me.symbol ?? me.gene_id}${me.strand === '+' ? ' →' : ' ←'}` }] : []
     const exons = data.exons.map(x => ({ start: x.start, end: x.end, y1: -0.3, y2: 0.3 }))
     const marks: unknown[] = []
+    if (shade) {
+      marks.push(vg.rect([{ start: shade[0], end: shade[1], y1: yMin, y2: 0.9 }],
+        { x1: 'start', x2: 'end', y1: 'y1', y2: 'y2', fill: ink, fillOpacity: 0.08 }))
+    }
     if (spec.intron) {
       marks.push(vg.rect([{ start: spec.intron.start, end: spec.intron.end, y1: yMin, y2: 0.9 }],
         { x1: 'start', x2: 'end', y1: 'y1', y2: 'y2', fill: accent, fillOpacity: 0.12 }))
@@ -104,7 +112,7 @@ export default function GeneTrack({ spec, width, marginLeft, dark }: { spec: Tra
       console.error(e)
       setError(`gene track render failed: ${(e as Error).message}`)
     }
-  }, [data, width, marginLeft, dark, spec.intron?.start, spec.intron?.end]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [data, width, marginLeft, dark, spec.intron?.start, spec.intron?.end, shade?.[0], shade?.[1]]) // eslint-disable-line react-hooks/exhaustive-deps
 
   return (
     <div>

@@ -13,7 +13,11 @@ import { Empty } from '@/components/states'
  * shape encoding as the locus scatter, hover tooltips only. A colocalized locus streaks along
  * the diagonal; independent signals form an L.
  */
-export default function LocusCompare({ table, dark, size = 320, yDomain, link }: { table: string; dark: boolean; size?: number; yDomain: [number, number]; link: Selection }) {
+export default function LocusCompare({ table, dark, size = 320, yDomain, link, brush }: {
+  table: string; dark: boolean; size?: number; yDomain: [number, number]; link: Selection
+  /** the locus plot's brush: the panel shows only the brushed slice while one is drawn */
+  brush: Selection
+}) {
   const host = useRef<HTMLDivElement>(null)
   const [n, setN] = useState<number | null>(null)
 
@@ -31,7 +35,7 @@ export default function LocusCompare({ table, dark, size = 320, yDomain, link }:
       const colors = dark ? CS_COLORS.dark : CS_COLORS.light
       const ink = dark ? '#c3c2b7' : '#52514e'
       const plot = vg.plot(
-        vg.dot(vg.from(table), {
+        vg.dot(vg.from(table, { filterBy: brush }), {
           x: 'gwas_nlp', y: 'nlp', fill: 'cs', symbol: 'cs', r: 3.5,
           fillOpacity: vg.sql`CASE WHEN cs = 'none' THEN 0.35 ELSE 0.45 + 0.4 * pip END`,
           channels: { position: 'position' },
@@ -40,6 +44,7 @@ export default function LocusCompare({ table, dark, size = 320, yDomain, link }:
         vg.xLabel('DCM GWAS −log₁₀ p'), vg.yLabel('QTL −log₁₀ p'),
         vg.colorDomain([...CS_DOMAIN]), vg.colorRange(colors),
         vg.symbolDomain([...CS_DOMAIN]), vg.symbolRange(CS_SYMBOLS),
+        vg.opacityDomain([0, 1]),   // see LocusPlot: fillOpacity is scaled, pin the domain
         // y axis identical to the locus scatter: same domain, height, margins, insets
         vg.xZero(true), vg.yDomain(yDomain), vg.xGrid(true), vg.yGrid(true), vg.xInset(8),
         vg.width(size), vg.height(size), vg.marginLeft(48), vg.marginBottom(PLOT_MARGIN_BOTTOM), vg.marginRight(20), vg.marginTop(PLOT_MARGIN_TOP),
@@ -49,7 +54,7 @@ export default function LocusCompare({ table, dark, size = 320, yDomain, link }:
       el.replaceChildren(plot)
     })().catch(e => console.error(e))
     return () => { alive = false; el.replaceChildren() }
-  }, [table, dark, size, yDomain[0], yDomain[1], link]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [table, dark, size, yDomain[0], yDomain[1], link, brush]) // eslint-disable-line react-hooks/exhaustive-deps
 
   return (
     <div>
