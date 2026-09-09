@@ -11,7 +11,8 @@ const LABEL_HOVER = 14
 /**
  * Downward triangles sitting on the chromosome bar. Colors are theme tokens: the series
  * color comes from `traitColors` (CSS color strings, e.g. `var(--color-primary)`); the
- * selected marker uses the text color; mixed clusters use a muted tint.
+ * selected marker uses the text color. A cluster takes the union of its members' traits, so
+ * mixed eQTL and sQTL members read as 'both'; only a cluster with no resolvable trait is muted.
  */
 export function LocusMarkers({ items, layout, barY, selectedLocusId, hoveredLocusId, traitColors, showLabels = false, onLabelClick }: {
   items: TrackItem[]; layout: TrackLayout; barY: number
@@ -61,15 +62,19 @@ export function LocusMarkers({ items, layout, barY, selectedLocusId, hoveredLocu
       {items.map((item, i) => {
         if (isCluster(item)) {
           const cx = item.centerPixel
+          // a cluster's trait is the union of its members': one shared trait keeps it, and members
+          // that cover eQTL and sQTL between them (or include 'both') make the cluster 'both'
           const traits = new Set(item.loci.map(l => l.trait).filter(Boolean))
-          const color = traits.size === 1 ? seriesColor(traits.values().next().value) : 'var(--color-base-content)'
+          const trait = traits.size === 1 ? traits.values().next().value
+            : traits.has('both') || (traits.has('eQTL') && traits.has('sQTL')) ? 'both' : undefined
+          const color = trait ? seriesColor(trait) : 'var(--color-base-content)'
           const hovered = hov ? item.loci.find(l => l.id === hov) : undefined
           const grow = !!hovered && !showLabels   // static track: markers keep their size, only labels react
           const w = grow ? 9 : TRI_WIDTH, h = grow ? 8 : TRI_HEIGHT
           const tipY = barY - 2, topY = tipY - h
           return (
             <g key={`cluster-${i}`}>
-              <path d={`M ${cx - w / 2} ${topY} L ${cx + w / 2} ${topY} L ${cx} ${tipY} Z`} fill={color} opacity={hovered ? 0.9 : traits.size === 1 ? 0.5 : 0.3} />
+              <path d={`M ${cx - w / 2} ${topY} L ${cx + w / 2} ${topY} L ${cx} ${tipY} Z`} fill={color} opacity={hovered ? 0.9 : trait ? 0.5 : 0.3} />
               {showLabels ? (() => {
                 const hi = item.loci.findIndex(l => l.id === hov)
                 const xOf = (j: number) => cx + (j - (item.loci.length - 1) / 2) * LABEL_STEP
