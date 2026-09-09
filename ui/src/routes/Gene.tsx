@@ -13,7 +13,8 @@ import CisTable from '@/components/CisTable'
 import TransTable from '@/components/TransTable'
 import LocusPlot, { LocusLegend } from '@/components/LocusPlot'
 import { COLOC_EQTL_GENES, COLOC_SQTL_GENES } from '@/lib/coloc'
-import { ensemblGene, gtexGene, ucsc } from '@/lib/links'
+import { ensemblGene, geneCards, gtexGene, openTargetsGene, ucsc } from '@/lib/links'
+import { useManifest } from '@/contexts/manifest-context'
 import { fmtBp, fmtInt, fmtNum, fmtP, fmtPhenotype, fmtSlopeSE } from '@/lib/format'
 import { dropTable, materialize } from '@/lib/db'
 import { geneDetail, resolveGene, transSQL, type GeneDetail,
@@ -94,22 +95,27 @@ function Chip({ cls, tip, children }: { cls: string; tip: string; children: Reac
   return <Tooltip tip={tip}><span className={`badge badge-sm cursor-help ${cls}`}>{children}</span></Tooltip>
 }
 
-function geneRows(g: GeneRow) {
+function geneRows(g: GeneRow, annotation: string | undefined) {
   return [
     { label: 'Location', value: <span className="tabular-nums">{g.chr}:{fmtInt(g.start)}-{fmtInt(g.end)} ({g.strand})</span> },
     { label: 'TSS', value: <span className="tabular-nums">{g.chr}:{fmtInt(g.tss)}</span> },
     { label: 'Biotype', value: g.biotype.replace(/_/g, ' ') },
-    { label: 'Ensembl ID', value: g.gene_id_version },
+    // the version is the study annotation's; the link resolves the unversioned ID to Ensembl's current model
+    { label: 'Ensembl ID', value: <ExternalLink icon href={ensemblGene(g.gene_id)}
+        title={`Open in Ensembl. The version shown is from ${annotation ? `GENCODE ${annotation}` : 'the study annotation'}.`}>
+      {g.gene_id_version}</ExternalLink> },
     { label: 'Links', value: <span className="flex flex-wrap gap-x-4">
       <ExternalLink icon href={ucsc(g.chr, g.start, g.end)}>UCSC</ExternalLink>
-      <ExternalLink icon href={ensemblGene(g.gene_id)}>Ensembl</ExternalLink>
       {g.symbol && <ExternalLink icon href={gtexGene(g.symbol)}>GTEx</ExternalLink>}
+      <ExternalLink icon href={openTargetsGene(g.gene_id)}>Open Targets</ExternalLink>
+      {g.symbol && <ExternalLink icon href={geneCards(g.symbol)}>GeneCards</ExternalLink>}
     </span> },
   ]
 }
 
 function GeneTable({ g }: { g: GeneRow }) {
-  return <div className="mb-8 grid items-start gap-4 md:grid-cols-2"><KvTable rows={geneRows(g)} /></div>
+  const annotation = useManifest()?.sources.gencode?.version
+  return <div className="mb-8 grid items-start gap-4 md:grid-cols-2"><KvTable rows={geneRows(g, annotation)} /></div>
 }
 
 /** Reserved slot for the coloc results (PP.H4, sentinel) against the Jurgens 2024 DCM GWAS.
@@ -135,6 +141,7 @@ function EqtlTab({ hit, d, transTable }: { hit: SearchHit; d: GeneDetail; transT
   const [legend, setLegend] = useState<string[] | null>(null)
   const [actions, setActions] = useState<ReactNode>(null)
   const [locus, setLocus] = useState<LocusTable>(NO_TABLE)
+  const annotation = useManifest()?.sources.gencode?.version
   useEffect(() => { setCs(null); setNVar(null) }, [hit])
   const sym = hit.symbol ?? hit.gene_id
   if (!g.tested) return <><GeneTable g={g} /><Empty label={`${sym} was not tested for cis-eQTL (filtered out by expression or mappability); see the sQTL tab.`} /></>
@@ -142,7 +149,7 @@ function EqtlTab({ hit, d, transTable }: { hit: SearchHit; d: GeneDetail; transT
     <div className="space-y-8">
       <div className="grid items-start gap-4 md:grid-cols-2">
         <KvTable rows={[
-          ...geneRows(g),
+          ...geneRows(g, annotation),
           { label: 'Lead variant', value: <Link className="link-quiet" to={`/variant/${g.lead_rsid ?? `${g.chr}:${g.lead_position}`}`}>{g.lead_rsid ?? `${g.chr}:${fmtInt(g.lead_position)}`}</Link> },
           { label: 'Lead position', value: <span className="tabular-nums">{g.chr}:{fmtInt(g.lead_position)}</span> },
           { label: 'A1 / A2', value: `${g.lead_A1} / ${g.lead_A2}` },
