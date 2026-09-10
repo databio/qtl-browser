@@ -78,11 +78,12 @@ export default function TransTable({ table, qtlType, keyedBy = 'gene', fileStem 
         </label>
         {busy && data && <span className="loading loading-spinner loading-xs text-base-content/40" />}
         <div className="flex-1" />
+        {/* TensorQTL only wrote trans pairs with p < 1e-5, so the unfiltered option is labeled with that floor */}
         <select className="select select-bordered select-sm h-8 rounded-lg" value={maxP} onChange={e => setMaxP(e.target.value)} title="p-value threshold">
-          <option value="">All p</option>
-          <option value="1e-6">p &lt; 1e-6</option>
-          <option value="1e-8">p &lt; 1e-8</option>
-          <option value="1e-10">p &lt; 1e-10</option>
+          <option value="">p ≤ 1e-5</option>
+          <option value="1e-6">p ≤ 1e-6</option>
+          <option value="1e-8">p ≤ 1e-8</option>
+          <option value="1e-10">p ≤ 1e-10</option>
         </select>
         <button className="btn btn-sm h-8 gap-1.5 rounded-lg border-base-300 font-medium" onClick={exportCSV} disabled={!table || total === 0}><Download className="size-3.5" /> CSV</button>
       </div>

@@ -20,7 +20,7 @@ export default function Home() {
           'Expression and splicing QTL mapped in left-ventricle tissue from failing and non-failing human hearts.',
           // the counts come from the manifest fetch; hold the line's height until then so the
           // search bar and track do not move down when it lands
-          counts ? `${fmtInt(counts.egenes)} eGenes and ${fmtInt(counts.sqtl_sig_phenotypes)} sQTL introns across ${fmtInt(counts.genes_tested)} tested genes; ${COLOC_EQTL_GENES.length} eGenes and ${COLOC_SQTL_GENES.length} sGenes colocalize with dilated cardiomyopathy (DCM) risk.` : ' ',
+          counts ? `${fmtInt(counts.egenes)} eGenes and ${fmtInt(counts.sqtl_sig_phenotypes)} significant sQTL introns across ${fmtInt(counts.genes_tested)} tested genes; ${COLOC_EQTL_GENES.length} eGenes and ${COLOC_SQTL_GENES.length} sGenes colocalize with dilated cardiomyopathy (DCM) risk.` : ' ',
           <>
             Search a gene, variant, or region for summary statistics, fine-mapping, and locus views.
             <span className="ml-3 inline-flex gap-x-3">

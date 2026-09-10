@@ -70,10 +70,10 @@ export default function CisTable({ table, failed, chr, qtlType, phenotypeId, fil
         {busy && data && <span className="loading loading-spinner loading-xs text-base-content/40" />}
         <div className="flex-1" />
         <select className="select select-bordered select-sm h-8 rounded-lg" value={maxP} onChange={e => setMaxP(e.target.value)} title="Nominal p-value threshold">
-          <option value="">All p</option>
-          <option value="1e-3">p &lt; 1e-3</option>
-          <option value="1e-5">p &lt; 1e-5</option>
-          <option value="5e-8">p &lt; 5e-8</option>
+          <option value="">p ≤ 1</option>
+          <option value="1e-3">p ≤ 1e-3</option>
+          <option value="1e-5">p ≤ 1e-5</option>
+          <option value="5e-8">p ≤ 5e-8</option>
         </select>
         <button className="btn btn-sm h-8 gap-1.5 rounded-lg border-base-300 font-medium" onClick={exportCSV} disabled={!table}><Download className="size-3.5" /> CSV</button>
       </div>

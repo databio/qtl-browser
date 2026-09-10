@@ -22,7 +22,9 @@ export interface LocusSpec {
 }
 const MARGIN_LEFT = 48
 const SCATTER_H = 290    // height of the locus scatter; the LocusCompare square matches it
-const TRACK_KEY = 'topchef-gene-track'   // localStorage: 'hidden' when the gene track is toggled off
+// localStorage: 'shown' when the gene track is toggled on; off by default. The key was renamed
+// when the default flipped, so browsers that had 'shown' written under the old key start off.
+const TRACK_KEY = 'topchef-gene-track-v2'
 export const PLOT_MARGIN_TOP = 20
 export const PLOT_MARGIN_BOTTOM = 36
 // Brush magnifier (plans/2026-09-08-locus-brush-zoom.md), parked: with this off no brush
@@ -115,8 +117,8 @@ export default function LocusPlot({ spec, onCount, onLegend, onActions, onCredib
   const anchor = useRef<DOMRect | null>(null)
   const [yMax, setYMax] = useState(1)
   const [dark, setDark] = useState(isDark)
-  // the gene track under the scatter can be hidden; the choice is kept across pages
-  const [showTrack, setShowTrack] = useState(() => localStorage.getItem(TRACK_KEY) !== 'hidden')
+  // the gene track under the scatter is off by default; the choice is kept across pages
+  const [showTrack, setShowTrack] = useState(() => localStorage.getItem(TRACK_KEY) === 'shown')
   useEffect(() => { localStorage.setItem(TRACK_KEY, showTrack ? 'shown' : 'hidden') }, [showTrack])
 
   // colors are baked into the SVG, so redraw when the theme flips

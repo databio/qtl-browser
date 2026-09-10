@@ -33,7 +33,7 @@ export default function About() {
             </p>
             <h2>Definitions</h2>
             <ul>
-              <li><strong>eGene, sQTL intron</strong>: permutation p-value below 0.05. A Benjamini-Hochberg q-value on the beta-approximated permutation p is listed alongside.</li>
+              <li><strong>eGene, sQTL intron</strong>: permutation p-value below 0.05. An sGene has at least one significant intron. A Benjamini-Hochberg q-value on the beta-approximated permutation p is listed alongside.</li>
               <li><strong>Lead variant</strong>: the variant with the smallest nominal p-value in the cis window, ±1 Mb of the transcription start site.</li>
               <li><strong>Credible sets and PIP</strong>: SuSiE 95% credible sets; PIP is the posterior inclusion probability. A variant in two sets of one phenotype is shown with its higher-PIP membership.</li>
               <li><strong>A1 and A2</strong>: A1 is the effect allele, the minor allele in TOPCHeF; A2 is the reference allele. Slopes are in standard-deviation units of the phenotype per A1 allele.</li>
