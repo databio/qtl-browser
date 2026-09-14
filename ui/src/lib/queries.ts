@@ -13,6 +13,14 @@ export interface SearchHit extends Row {
 export const nominalFile = (hit: SearchHit, qtlType: 'e' | 's') =>
   `${qtlType === 'e' ? 'cis_eqtl_nominal' : 'cis_sqtl_nominal'}/chr=${hit.chr}/bin=${hit.bin}/data.parquet`
 
+/** The nominal cis rows of one or more partition files as a SQL relation. Every read of the
+ *  nominal tables goes through here, so this is where rows with no p-value are dropped:
+ *  TensorQTL leaves p, slope, and SE undefined for a variant that is heterozygous in every
+ *  sample (a constant genotype, nothing to fit), and those rows are not test results. Filters
+ *  on gene_id and position still push down into the parquet scan through the subquery. */
+export const nominalRows = (files: string[]) =>
+  `(SELECT * FROM read_parquet([${files.map(f => `'${f}'`).join(', ')}], hive_partitioning=false) WHERE pval_nominal IS NOT NULL)`
+
 export interface Gene extends Row {
   gene_id: string; gene_id_version: string; symbol: string | null; chr: string
   start: number; end: number; strand: string; tss: number; biotype: string; tested: boolean
@@ -240,10 +248,10 @@ export const cisHitsAt = async (chr: string, pos: number, qtlType: 'e' | 's') =>
     WHERE chr = ${lit(chr)} AND bin IS NOT NULL AND tss BETWEEN ${pos - 1_000_000} AND ${pos + 1_000_000}
       ${qtlType === 's' ? 'AND n_sqtl_sig > 0' : ''} ORDER BY bin`)
   if (!bins.length) return [] as CisHit[]
-  const files = bins.map(b => `'${table}/chr=${chr}/bin=${b.bin}/data.parquet'`).join(', ')
+  const files = bins.map(b => `${table}/chr=${chr}/bin=${b.bin}/data.parquet`)
   return rows<CisHit>(`
     SELECT n.gene_id, s.symbol, ${qtlType === 's' ? 'n.phenotype_id,' : ''} n.tss_distance, n.pval_nominal, n.slope, n.slope_se, n.af, n.pip, n.cs_id
-    FROM read_parquet([${files}], hive_partitioning=false) n
+    FROM ${nominalRows(files)} n
     LEFT JOIN search_index s USING (gene_id)
     WHERE n.position = ${pos}
     ORDER BY n.pval_nominal`)

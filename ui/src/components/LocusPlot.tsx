@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type ReactNode } from 'react'
+import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import * as vg from '@uwdata/vgplot'
 import { Selection } from '@uwdata/mosaic-core'
@@ -6,10 +6,12 @@ import { dropTable, getCoordinator, getDB, lit, materialize, parquet } from '@/l
 import { CS_COLORS, CS_DOMAIN, CS_SWATCH_CLIP, CS_SYMBOLS, isDark } from '@/lib/plot-theme'
 import type { SearchHit } from '@/lib/queries'
 import { CompareSkeleton, LocusSkeleton } from '@/components/plot-skeleton'
-import { nominalFile, type CredibleSetRow, type Exon } from '@/lib/queries'
+import { nominalFile, nominalRows, type CredibleSetRow, type Exon } from '@/lib/queries'
 import GeneTrack from '@/components/GeneTrack'
 import LocusCompare from '@/components/LocusCompare'
-import { clearPlotHover, onPlotPointerMove } from '@/lib/plot-hover'
+import { clearPlotHover, onPlotPointerMove, useHoverOverlay, type HoverLookup, type HoverRow } from '@/lib/plot-hover'
+import { useOpenPath } from '@/lib/row-link'
+import { rsFromNumber } from '@/lib/format'
 import ExportMenu from '@/components/ExportMenu'
 
 export interface LocusSpec {
@@ -34,19 +36,65 @@ const BRUSH_MAGNIFIER = false
 
 /**
  * Linked hover for the locus scatter and the LocusCompare panel. A `nearest` interactor on
- * each plot publishes the hovered variant's position into one shared selection; both plots
- * draw a ring and a label for whatever the selection holds, so hovering a point in either
+ * each plot publishes the hovered variant's position into one shared selection. No Mosaic mark
+ * reads that selection: the ring and label are drawn by `useHoverOverlay` from the selection's
+ * value event, so a hover issues no query and rebuilds no plot, and hovering a point in either
  * panel highlights and labels the same variant in both. Replaces Plot's built-in tip.
  */
-export function linkedHoverMarks(table: string, link: Selection, x: string, y: string, ink: string, surface: string) {
-  return [
-    vg.nearest({ as: link, channels: ['position'], fields: ['position'], maxRadius: 24 }),
-    vg.dot(vg.from(table, { filterBy: link }), { x, y, r: 5.5, fill: 'none', stroke: ink, strokeWidth: 3, pointerEvents: 'none' }),
-    vg.text(vg.from(table, { filterBy: link }), { x, y, text: 'label', dy: -12, textAnchor: 'middle', lineAnchor: 'bottom',
-      fontSize: 10, fill: ink, stroke: surface, strokeWidth: 5, strokeLinejoin: 'round', pointerEvents: 'none' }),
-  ]
+export function hoverInteractor(link: Selection) {
+  return vg.nearest({ as: link, channels: ['position'], fields: ['position'], maxRadius: 24 })
 }
+export const INK = { light: '#52514e', dark: '#c3c2b7' }
 export const SURFACE = { light: '#ffffff', dark: '#1b1a1a' }
+
+/** The position the linked hover selection currently holds (the `nearest` interactor's single
+ *  field), mirrored into React state: null when no variant is under the pointer. */
+export function useHoveredVariant(link: Selection | null): number | null {
+  const [pos, setPos] = useState<number | null>(null)
+  useEffect(() => {
+    setPos(null)
+    if (!link) return
+    const read = () => { const v = link.value; setPos(typeof v === 'number' && Number.isFinite(v) ? v : null) }
+    link.addEventListener('value', read)
+    return () => link.removeEventListener('value', read)
+  }, [link])
+  return pos
+}
+
+/** Handlers and cursor class that make a plot host open the hovered variant's page on click:
+ *  plain click navigates, cmd/ctrl/shift or middle click opens a tab, like the table rows.
+ *
+ *  The click is assembled from pointerdown and pointerup on the host rather than from the
+ *  browser's click event: Mosaic swaps the whole SVG whenever it redraws (resize, theme, and
+ *  the nearest interactor re-publishes on the first pointer event of each new SVG, pointerdown
+ *  included), and a mousedown whose element is detached by mouseup never becomes a click. */
+export interface VariantClick {
+  className: string
+  onPointerDown: (e: React.PointerEvent) => void
+  onPointerUp: (e: React.PointerEvent) => void
+}
+const CLICK_SLOP = 4   // px of pointer travel between down and up beyond which it is a drag, not a click
+export function useVariantClick(link: Selection | null, href: (position: number) => string | null): VariantClick {
+  const open = useOpenPath()
+  const hovered = useHoveredVariant(link)
+  const press = useRef<{ x: number; y: number; pos: number; button: number } | null>(null)
+  return {
+    className: hovered !== null ? 'cursor-pointer' : '',
+    onPointerDown: e => {
+      const pos = link?.value
+      press.current = typeof pos === 'number' ? { x: e.clientX, y: e.clientY, pos, button: e.button } : null
+    },
+    onPointerUp: e => {
+      const p = press.current
+      press.current = null
+      if (!p || p.button !== e.button || Math.hypot(e.clientX - p.x, e.clientY - p.y) > CLICK_SLOP) return
+      const to = href(p.pos)
+      if (!to) return
+      e.preventDefault()
+      open(to, e)
+    },
+  }
+}
 
 /** One cis window as a table for the plots: -log10 p, credible-set class, a tooltip label, and
  *  the DCM GWAS statistics for variants present there (matched on position and alleles in
@@ -59,7 +107,7 @@ function locusSQL(spec: LocusSpec): string {
   return `
     SELECT q.position,
            -- p underflows to 0 for a few extreme variants: place them just above the largest finite value
-           coalesce(-log10(nullif(q.pval_nominal, 0)), max(-log10(nullif(q.pval_nominal, 0))) OVER () * 1.05) AS nlp,
+           CASE WHEN q.pval_nominal = 0 THEN max(-log10(nullif(q.pval_nominal, 0))) OVER () * 1.05 ELSE -log10(q.pval_nominal) END AS nlp,
            q.pval_nominal = 0 AS clipped,
            q.pval_nominal, q.slope, q.slope_se, q.af, q.pip, q.cs_id, q.rs_number, q.A1, q.A2,
            q.tss_distance, q.ma_samples, q.ma_count,
@@ -72,7 +120,7 @@ function locusSQL(spec: LocusSpec): string {
              || chr(10) || 'AF ' || format('{:.3f}', q.af)
              || CASE WHEN q.pip IS NULL THEN '' ELSE chr(10) || 'PIP ' || format('{:.3f}', q.pip) || ' (set ' || q.cs_id || ')' END
              || CASE WHEN g.p IS NULL THEN '' ELSE chr(10) || 'DCM GWAS p = ' || format('{:.2e}', g.p) || ', beta ' || format('{:+.3f}', CASE WHEN g.ea = q.A1 THEN g.beta ELSE -g.beta END) || ' (A1 as effect allele)' END AS label
-    FROM ${parquet(nominalFile(spec.hit, spec.qtlType))} q
+    FROM ${nominalRows([nominalFile(spec.hit, spec.qtlType)])} q
     LEFT JOIN (SELECT * FROM ${parquet(`gwas_dcm/chr=${spec.hit.chr}/data.parquet`)} WHERE position BETWEEN ${lo} AND ${hi}) g
       ON g.position = q.position AND ((g.ea = q.A1 AND g.nea = q.A2) OR (g.ea = q.A2 AND g.nea = q.A1))
     WHERE ${where}
@@ -117,6 +165,17 @@ export default function LocusPlot({ spec, onCount, onLegend, onActions, onCredib
   const anchor = useRef<DOMRect | null>(null)
   const [yMax, setYMax] = useState(1)
   const [dark, setDark] = useState(isDark)
+  // the window by position: what the hover overlay draws and what a click on a hovered dot
+  // needs to resolve its page synchronously (a query at click time would fall outside the
+  // user gesture for new tabs). Loaded once with the locus table.
+  const hoverIndex = useRef<Map<number, HoverRow>>(new Map())
+  const lookup = useCallback<HoverLookup>(pos => hoverIndex.current.get(pos), [])
+  const variantHref = (pos: number) => {
+    const row = hoverIndex.current.get(pos)
+    return row ? `/variant/${row.rs_number != null ? rsFromNumber(row.rs_number) : `${spec.hit.chr}:${pos}`}` : null
+  }
+  const click = useVariantClick(link, variantHref)
+  useHoverOverlay(host, link, lookup, 'position', dark ? INK.dark : INK.light, dark ? SURFACE.dark : SURFACE.light)
   // the gene track under the scatter is off by default; the choice is kept across pages
   const [showTrack, setShowTrack] = useState(() => localStorage.getItem(TRACK_KEY) === 'shown')
   useEffect(() => { localStorage.setItem(TRACK_KEY, showTrack ? 'shown' : 'hidden') }, [showTrack])
@@ -154,6 +213,7 @@ export default function LocusPlot({ spec, onCount, onLegend, onActions, onCredib
     setTableName(null)
     setLink(null)
     setBrushSel(null)
+    hoverIndex.current = new Map()
     onLegend?.(null)
     onCredibleSets?.(null)
     onTable?.(null)
@@ -169,6 +229,12 @@ export default function LocusPlot({ spec, onCount, onLegend, onActions, onCredib
         if (!alive) return
         onCount?.(Number(agg.n))
         onLegend?.(sets)
+        hoverIndex.current = new Map((await con.query(`SELECT position, rs_number, nlp, gwas_nlp, label FROM ${table}`)).toArray()
+          .map(r => [Number(r.position), {
+            rs_number: r.rs_number == null ? null : Number(r.rs_number),
+            nlp: Number(r.nlp), gwas_nlp: r.gwas_nlp == null ? null : Number(r.gwas_nlp), label: String(r.label),
+          }]))
+        if (!alive) return
         if (onCredibleSets) {
           // the window already holds every variant's set and PIP: the credible-set table comes
           // from it instead of a second range read of credible_sets.parquet
@@ -233,7 +299,7 @@ export default function LocusPlot({ spec, onCount, onLegend, onActions, onCredib
     const el = host.current
     if (!el || !tableName || !link || !brushSel || width === 0) return
     const colors = dark ? CS_COLORS.dark : CS_COLORS.light
-    const ink = dark ? '#c3c2b7' : '#52514e'
+    const ink = dark ? INK.dark : INK.light
     try {
       const plot = vg.plot(
         // drawn first so it sits under the dots and the hover label
@@ -246,7 +312,7 @@ export default function LocusPlot({ spec, onCount, onLegend, onActions, onCredib
         // interactors bind to the mark added just before them: both the brush and the nearest
         // interactor below take their x field from the data dots
         ...(BRUSH_MAGNIFIER ? [vg.intervalX({ as: brushSel, brush: { fill: ink, fillOpacity: 0.08, stroke: ink, strokeOpacity: 0.5 } })] : []),
-        ...linkedHoverMarks(tableName, link, 'position', 'nlp', ink, dark ? SURFACE.dark : SURFACE.light),
+        hoverInteractor(link),
         vg.xDomain([spec.tss - 1_000_000, spec.tss + 1_000_000]), vg.yLabel('QTL −log₁₀ p'),
         vg.xLabel(`${spec.hit.chr} position (Mb)`), vg.xTickFormat((d: number) => (d / 1e6).toFixed(2)),
         vg.colorDomain([...CS_DOMAIN]), vg.colorRange(colors),
@@ -306,9 +372,10 @@ export default function LocusPlot({ spec, onCount, onLegend, onActions, onCredib
       <div ref={column} className={`relative min-w-0 flex-1 ${state === 'loading' ? 'min-h-[340px]' : ''}`}>
         {state === 'loading' && <LocusSkeleton chr={spec.hit.chr} />}
         {state === 'error' && <div className="p-4 text-sm text-error">Could not draw the locus.</div>}
-        <div ref={host} className={`plot-host ${state === 'ready' ? '' : 'invisible'}`}
+        <div ref={host} className={`plot-host ${state === 'ready' ? '' : 'invisible'} ${click.className}`}
           onPointerMove={onPlotPointerMove} onPointerLeave={clearPlotHover}
-          onPointerDown={() => { anchor.current = host.current?.getBoundingClientRect() ?? null }} />
+          onPointerUp={click.onPointerUp}
+          onPointerDown={e => { anchor.current = host.current?.getBoundingClientRect() ?? null; click.onPointerDown(e) }} />
         {BRUSH_MAGNIFIER && brushed && brushSel && tableName && state === 'ready' && readyFor === key && popupStyle && createPortal(
           <div className="pointer-events-none fixed z-50 rounded-lg border border-base-300 bg-base-100 p-1 shadow-lg" style={popupStyle}>
             <LocusDetail table={tableName} brush={brushSel} dark={dark} width={popupStyle.width - 8} yMax={yMax} tss={spec.tss} chr={spec.hit.chr} />
@@ -324,7 +391,7 @@ export default function LocusPlot({ spec, onCount, onLegend, onActions, onCredib
           the panel is a square the height of the scatter so the two plots share a top and bottom */}
       <div ref={compareCol} className="shrink-0" style={{ width: SCATTER_H }}>
         {state === 'ready' && tableName && link && brushSel
-          ? <LocusCompare table={tableName} dark={dark} size={Math.min(SCATTER_H, Math.max(width, 200))} yDomain={[0, yMax]} link={link} brush={brushSel} />
+          ? <LocusCompare table={tableName} dark={dark} size={Math.min(SCATTER_H, Math.max(width, 200))} yDomain={[0, yMax]} link={link} brush={brushSel} click={click} lookup={lookup} />
           : <CompareSkeleton />}
       </div>
     </div>
