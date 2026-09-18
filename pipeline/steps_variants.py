@@ -121,9 +121,12 @@ def rsid(cfg: Config) -> None:
         JOIN acc_map m ON m.acc = d.acc
     """)
     con.execute(f"CREATE TABLE v AS SELECT * FROM '{raw}'")
+    # arg_min, not min: two separate min()s take the text of one dbSNP record and the number of
+    # another, so the rsID text stops matching its own rs_number (14,803 variants before this fix).
+    # `bypos` below already used arg_min.
     con.execute("""
         CREATE TABLE exact AS
-        SELECT v.chr, v.position, v.A1, v.A2, min(d.rsid) AS rsid, min(d.rs_number) AS rs_number
+        SELECT v.chr, v.position, v.A1, v.A2, arg_min(d.rsid, d.rs_number) AS rsid, min(d.rs_number) AS rs_number
         FROM v JOIN dbsnp d ON d.chr = v.chr AND d.position = v.position
          AND ((v.A2 = d.ref AND v.A1 = d.alt) OR (v.A1 = d.ref AND v.A2 = d.alt))
         GROUP BY 1,2,3,4
@@ -151,10 +154,9 @@ def rsid(cfg: Config) -> None:
         for m, n in stats:
             log(f"variants_rsid: {'cis       ' if in_cis else 'trans-only'} {m:9s} {n:>12,} ({100 * n / total:.2f}%)")
 
-    rg = cfg["row_group_sizes"]["variants"]
-    for c in CHROMS:
-        t = con.execute("SELECT * FROM variants WHERE chr = ? ORDER BY position, A1, A2", [c]).fetch_arrow_table()
-        write_parquet(t, cfg.derived / "variants_by_position" / f"chr={c}" / "data.parquet", rg, stats_columns=["position"])
-    t = con.execute("SELECT * FROM variants WHERE rs_number IS NOT NULL ORDER BY rs_number").fetch_arrow_table()
-    write_parquet(t, cfg.derived / "variants_by_rsid.parquet", rg, stats_columns=["rs_number", "rsid"])
-    log("variants_rsid: wrote variants_by_position/ and variants_by_rsid.parquet")
+    # one build intermediate, in the order the packs read it. The browser gets the variants files
+    # and the rsID index instead (SPEC sections 4 and 14), so no per-chromosome or rsID-keyed copy
+    # is written any more.
+    t = con.execute("SELECT * FROM variants ORDER BY chr, position, A1, A2").fetch_arrow_table()
+    write_parquet(t, cfg.tables / "variants.parquet", 200_000, stats_columns=["chr", "position"])
+    log(f"variants_rsid: wrote _tables/variants.parquet, {t.num_rows:,} variants")

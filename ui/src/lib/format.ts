@@ -44,3 +44,10 @@ export function fmtPhenotype(id: string): string {
   if (!m) return id
   return `${m[1]}:${Number(m[2]).toLocaleString('en-US')}–${Number(m[3]).toLocaleString('en-US')} (${m[5]})`
 }
+
+/** Byte counts for the cis-scan button: the span a click will download. */
+export function fmtBytes(n: number): string {
+  if (n >= 1e6) return `${(n / 1e6).toFixed(1)} MB`
+  if (n >= 1e3) return `${Math.round(n / 1e3)} KB`
+  return `${n} B`
+}

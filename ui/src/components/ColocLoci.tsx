@@ -5,7 +5,7 @@ import type { TrackBin, TrackLocus } from '@/components/genome-track/types'
 import { SectionPanel } from '@/components/section-panel'
 import { fetchChromSizes, type ChromSizes } from '@/lib/chrom-sizes'
 import { fmtInt, fmtP } from '@/lib/format'
-import { DATA_BASE } from '@/lib/db'
+import { DATA_BASE } from '@/lib/manifest'
 
 /** The pipeline's coloc_loci.json and gwas_dcm_bins.json: plain fetches, no query engine. */
 interface ColocLocus { gene_id: string; symbol: string; chr: string; tss: number; trait: 'eQTL' | 'sQTL' | 'both' }

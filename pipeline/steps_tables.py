@@ -1,7 +1,5 @@
 """Steps 5-6, 8-9: small tables (genes, splice_phenotypes, credible_sets), trans pairs, coloc stub."""
-import pyarrow as pa
-
-from .common import CHROMS, Config, connect, log, write_parquet, write_parquet_grouped
+from .common import Config, connect, log, write_parquet
 
 SPLICE_PARSE = """
     split_part(phenotype_id, ':', 1)                          AS s_chr,
@@ -15,8 +13,8 @@ SPLICE_PARSE = """
 
 def _setup(cfg: Config):
     con = connect(cfg)
-    con.execute(f"CREATE VIEW ann AS SELECT * FROM '{cfg.derived / 'gene_annotation.parquet'}'")
-    con.execute(f"CREATE VIEW vpos AS SELECT * FROM read_parquet('{cfg.derived}/variants_by_position/*/*.parquet', hive_partitioning=true)")
+    con.execute(f"CREATE VIEW ann AS SELECT * FROM '{cfg.tables / 'gene_annotation.parquet'}'")
+    con.execute(f"CREATE VIEW vpos AS SELECT * FROM '{cfg.tables / 'variants.parquet'}'")
     return con
 
 
@@ -63,7 +61,7 @@ def permutation_tables(cfg: Config) -> None:
                CASE WHEN p.phenotype_id IS NULL THEN NULL ELSE p.{sig_col} < {thr} END AS is_egene,
                coalesce(c.n_credible_sets, 0)::INTEGER AS n_credible_sets,
                coalesce(t.n_trans_pairs, 0)::INTEGER AS n_trans_pairs,
-               -- partition file of the gene's nominal rows and gene_detail row: TSS rank among
+               -- partition file of the gene's nominal rows: TSS rank among
                -- genes tested for eQTL or sQTL on the chromosome, {cfg['nominal_bin_genes']} genes per bin
                CASE WHEN p.phenotype_id IS NULL AND sg.gene_id IS NULL THEN NULL ELSE
                  ((row_number() OVER (PARTITION BY a.chr, p.phenotype_id IS NOT NULL OR sg.gene_id IS NOT NULL ORDER BY a.tss, a.gene_id) - 1)
@@ -78,19 +76,7 @@ def permutation_tables(cfg: Config) -> None:
     """).fetch_arrow_table()
     # small row groups + chr/tss statistics so a page can range-read one gene's row:
     # the app knows chr and tss from search_index and filters on them, not on gene_id alone
-    write_parquet(genes, cfg.derived / "genes.parquet", 1_000, stats_columns=["chr", "tss", "gene_id"])
-    con.register("genes_out", genes)
-    idx = con.execute(f"""
-        SELECT g.gene_id, g.symbol, g.chr, g.tss, g.tested, g.is_egene,
-               coalesce(s.n, 0)::SMALLINT AS n_sqtl_sig,
-               g.bin, g.start, g."end", g.strand, g.biotype
-        FROM genes_out g
-        LEFT JOIN (SELECT split_part(split_part(phenotype_id, ':', 5), '.', 1) AS gene_id, count(*) AS n
-                   FROM sperm WHERE {sig_col} < {thr} GROUP BY 1) s USING (gene_id)
-        ORDER BY g.chr, g.tss, g.gene_id
-    """).fetch_arrow_table()
-    write_parquet(idx, cfg.derived / "search_index.parquet", 100_000)
-    log(f"search_index: {idx.num_rows} rows")
+    write_parquet(genes, cfg.tables / "genes.parquet", 1_000, stats_columns=["chr", "tss", "gene_id"])
     missing = con.execute("SELECT count(*) FROM perm p LEFT JOIN ann a ON a.gene_id = p.phenotype_id WHERE a.gene_id IS NULL").fetchone()[0]
     n_e = con.execute(f"SELECT count(*) FROM perm WHERE {sig_col} < {thr}").fetchone()[0]
     log(f"genes: {genes.num_rows} rows, {n_e} eGenes by {sig_col} < {thr}, {missing} tested genes missing from GTF")
@@ -114,7 +100,7 @@ def permutation_tables(cfg: Config) -> None:
         LEFT JOIN sncs c ON c.phenotype_id = p.phenotype_id
         ORDER BY p.chr, a.tss, p.gene_id, p.phenotype_id
     """).fetch_arrow_table()
-    write_parquet(sp, cfg.derived / "splice_phenotypes.parquet", 1_000, stats_columns=["chr", "tss", "gene_id", "lead_position"])
+    write_parquet(sp, cfg.tables / "splice_phenotypes.parquet", 1_000, stats_columns=["chr", "tss", "gene_id", "lead_position"])
     n_s = con.execute(f"SELECT count(*) FROM sperm WHERE {sig_col} < {thr}").fetchone()[0]
     nogene = con.execute("SELECT count(*) FROM sperm p LEFT JOIN ann a ON a.gene_id = p.gene_id WHERE a.gene_id IS NULL").fetchone()[0]
     log(f"splice_phenotypes: {sp.num_rows} rows, {n_s} significant, {nogene} with gene not in GTF")
@@ -137,7 +123,7 @@ def credible_sets(cfg: Config) -> None:
                LEFT JOIN vpos v ON v.chr = u.chr AND v.position = u.position AND v.A1 = u.A1 AND v.A2 = u.A2
         ORDER BY u.chr, a.tss, u.gene_id, u.phenotype_id, u.cs_id, u.pip DESC
     """).fetch_arrow_table()
-    write_parquet(t, cfg.derived / "credible_sets.parquet", 2_000, stats_columns=["chr", "tss", "gene_id", "position"])
+    write_parquet(t, cfg.tables / "credible_sets.parquet", 2_000, stats_columns=["chr", "tss", "gene_id", "position"])
     log(f"credible_sets: {t.num_rows} rows")
 
 
@@ -162,40 +148,38 @@ def trans(cfg: Config) -> None:
     """)
     n = con.execute("SELECT count(*) FROM tp").fetchone()[0]
     nochr = con.execute("SELECT count(*) FROM tp WHERE gene_chr IS NULL").fetchone()[0]
+    # every trans phenotype is a gene the GTF holds, so a row without a gene chromosome means the
+    # annotation and the trans files disagree and the gene-keyed pack would silently lose rows
+    if nochr:
+        raise ValueError(f"trans: {nochr:,} rows have no gene chromosome; every trans phenotype must be in gene_annotation")
     rg = cfg["row_group_sizes"]["trans"]
-    chroms = [r[0] for r in con.execute("SELECT DISTINCT gene_chr FROM tp WHERE gene_chr IS NOT NULL ORDER BY 1").fetchall()]
-    # sorted by gene_id (not TSS) so the per-gene query prunes on gene_id statistics: in TSS
-    # order every row group spans nearly the full gene_id range and a gene page read the whole
-    # partition (21 MB for chr7)
+    chroms = [r[0] for r in con.execute("SELECT DISTINCT gene_chr FROM tp ORDER BY 1").fetchall()]
+    # sorted by gene_id (not TSS) so the per-gene read prunes on gene_id statistics: in TSS order
+    # every row group spans nearly the full gene_id range. `pack_trans` reads this copy.
     for c in chroms:
         t = con.execute("SELECT * FROM tp WHERE gene_chr = ? ORDER BY gene_id, phenotype_id, pval", [c]).fetch_arrow_table()
-        write_parquet(t, cfg.derived / "trans_pairs" / f"chr={c}" / "data.parquet", rg, stats_columns=["gene_id", "phenotype_id", "position"])
-    if nochr:
-        t = con.execute("SELECT * FROM tp WHERE gene_chr IS NULL ORDER BY gene_id, pval").fetch_arrow_table()
-        write_parquet(t, cfg.derived / "trans_pairs" / "chr=unknown" / "data.parquet", rg, stats_columns=["gene_id", "phenotype_id", "position"])
-    # second copy keyed by the variant, for the variant page: partitioned by the variant's
-    # chromosome, sorted by position, so "what does this variant affect in trans" is one read
+        write_parquet(t, cfg.tables / "trans" / f"chr={c}" / "data.parquet", rg, stats_columns=["gene_id", "phenotype_id", "position"])
+    # a second copy keyed by the variant's chromosome. The browser no longer reads it -- the hits
+    # pack answers "what does this variant affect in trans" (SPEC section 13) -- but `pack_hits` is
+    # variant-keyed too, and reading one file per chromosome here instead of filtering all 24
+    # gene-keyed files on variant_chr is what makes that step take 1.4 minutes. Both copies are
+    # build intermediates under `_tables/`, which is never uploaded.
     vchroms = [r[0] for r in con.execute("SELECT DISTINCT variant_chr FROM tp ORDER BY 1").fetchall()]
     for c in vchroms:
         t = con.execute("SELECT * FROM tp WHERE variant_chr = ? ORDER BY position, pval", [c]).fetch_arrow_table()
-        write_parquet(t, cfg.derived / "trans_by_variant" / f"chr={c}" / "data.parquet", rg, stats_columns=["position", "gene_id"])
-    log(f"trans: {n:,} pairs across {len(chroms)} gene chromosomes ({nochr} with gene not in GTF); variant-keyed copy in {len(vchroms)} partitions")
+        write_parquet(t, cfg.tables / "trans_by_variant" / f"chr={c}" / "data.parquet", rg, stats_columns=["position", "gene_id"])
+    log(f"trans: {n:,} pairs across {len(chroms)} gene chromosomes; variant-keyed copy in {len(vchroms)} partitions")
 
 
 def coloc_stub(cfg: Config) -> None:
-    schema = pa.schema([
-        ("qtl_type", pa.string()), ("gene_id", pa.string()), ("symbol", pa.string()), ("phenotype_id", pa.string()),
-        ("sentinel_rsid", pa.string()), ("sentinel_chr", pa.string()), ("sentinel_position", pa.int32()),
-        ("pp_h4", pa.float64()), ("gwas_beta", pa.float64()), ("qtl_beta", pa.float64()), ("source", pa.string()),
-    ])
-    write_parquet(schema.empty_table(), cfg.derived / "coloc.parquet", 1000)
-    log("coloc: empty stub written (awaiting authors' tables)")
+    # only the JSON now: the empty coloc.parquet stub was registered by the browser and never read,
+    # and the browser reads no parquet at all any more.
     # the landing track's loci as a tiny JSON, fetched with one plain request before the query
     # engine exists: gene, symbol, chromosome, TSS, and which analyses colocalized
     import json
     e, s = set(cfg["coloc_genes"]["eqtl"]), set(cfg["coloc_genes"]["sqtl"])
     con = connect(cfg)
-    rows = con.execute(f"""SELECT gene_id, symbol, chr, tss FROM '{cfg.derived / 'genes.parquet'}'
+    rows = con.execute(f"""SELECT gene_id, symbol, chr, tss FROM '{cfg.tables / 'genes.parquet'}'
         WHERE symbol IN ({', '.join(repr(x) for x in sorted(e | s))}) ORDER BY chr, tss""").fetchall()
     loci = [{"gene_id": g, "symbol": sym, "chr": c, "tss": t,
              "trait": "both" if sym in e and sym in s else "sQTL" if sym in s else "eQTL"} for g, sym, c, t in rows]
@@ -203,40 +187,3 @@ def coloc_stub(cfg: Config) -> None:
     missing = (e | s) - {r[1] for r in rows}
     log(f"coloc_loci.json: {len(loci)} loci" + (f"; not in genes: {sorted(missing)}" if missing else ""))
 
-
-def gene_detail(cfg: Config) -> None:
-    """One row per tested gene with everything the gene page needs besides the locus: the
-    genes row, the collapsed exon model as a list, and every tested intron as a list.
-    Partitioned chr=/bin= like the nominal tables, one row group per gene, so a gene page
-    reads one small footer and one row group."""
-    con = connect(cfg)
-    d = cfg.derived
-    # every gene with a bin: tested for eQTL, for sQTL, or both
-    con.execute(f"CREATE TABLE g AS SELECT * FROM '{d / 'genes.parquet'}' WHERE bin IS NOT NULL")
-    con.execute(f"""
-        CREATE TABLE ex AS
-        WITH e AS (SELECT gene_id, start, "end" FROM '{d / 'exons.parquet'}' WHERE gene_id IN (SELECT gene_id FROM g)),
-        o AS (SELECT gene_id, start, "end",
-                     max("end") OVER (PARTITION BY gene_id ORDER BY start, "end" ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING) AS prev_max
-              FROM e),
-        grp AS (SELECT gene_id, start, "end",
-                       sum(CASE WHEN prev_max IS NULL OR start > prev_max THEN 1 ELSE 0 END) OVER (PARTITION BY gene_id ORDER BY start, "end") AS k
-                FROM o),
-        m AS (SELECT gene_id, min(start)::INTEGER AS start, max("end")::INTEGER AS "end" FROM grp GROUP BY gene_id, k)
-        SELECT gene_id, list(struct_pack(start := start, "end" := "end") ORDER BY start) AS exons FROM m GROUP BY gene_id
-    """)
-    con.execute(f"""
-        CREATE TABLE spl AS
-        SELECT gene_id, list(struct_pack(*COLUMNS(* EXCLUDE (gene_id, symbol, chr, tss))) ORDER BY cluster_id, intron_start, intron_end) AS splice
-        FROM '{d / 'splice_phenotypes.parquet'}' GROUP BY gene_id
-    """)
-    con.execute("CREATE TABLE detail AS SELECT g.*, ex.exons, spl.splice FROM g LEFT JOIN ex USING (gene_id) LEFT JOIN spl USING (gene_id)")
-    bins = con.execute("SELECT DISTINCT chr, bin FROM detail ORDER BY 1, 2").fetchall()
-    n = 0
-    for chrom, b in bins:
-        t = con.execute("SELECT * FROM detail WHERE chr = ? AND bin = ? ORDER BY gene_id", [chrom, b]).fetch_arrow_table()
-        # ten genes per row group: one group per gene made a 380 KB footer for an 0.8 MB file
-        # (30 columns x 100 groups); ten per group is a 40 KB footer and an ~80 KB read
-        write_parquet(t, d / "gene_detail" / f"chr={chrom}" / f"bin={b}" / "data.parquet", 10, stats_columns=["gene_id"])
-        n += t.num_rows
-    log(f"gene_detail: {n:,} genes in {len(bins)} files -> gene_detail/chr=*/bin=*/data.parquet")

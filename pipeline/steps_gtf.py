@@ -39,10 +39,10 @@ def run(cfg: Config) -> None:
                     "exon_number": int(a.get("exon_number", 0)), "chr": f[0], "start": start, "end": end, "strand": strand,
                 })
     gt = pa.Table.from_pylist(genes)
-    # exons are read per gene by the browser (WHERE gene_id = ? AND chr = ?): sort by gene so
-    # each row group's gene_id range is tight and one gene is one or two small reads. GTF
-    # order (by position) leaves gene_id statistics spanning most of the file.
+    # exons are read per gene by the eQTL pack builder, which puts them in the gene's details
+    # JSON: sort by gene so each row group's gene_id range is tight and one gene is one or two
+    # small reads. GTF order (by position) leaves gene_id statistics spanning most of the file.
     et = pa.Table.from_pylist(sorted(exons, key=lambda e: (e["chr"], e["gene_id"], e["start"], e["end"])))
-    write_parquet(gt, cfg.derived / "gene_annotation.parquet", row_group_size=100_000)
-    write_parquet(et, cfg.derived / "exons.parquet", row_group_size=5_000, stats_columns=["gene_id", "chr", "start", "end"])
+    write_parquet(gt, cfg.tables / "gene_annotation.parquet", row_group_size=100_000)
+    write_parquet(et, cfg.tables / "exons.parquet", row_group_size=5_000, stats_columns=["gene_id", "chr", "start", "end"])
     log(f"gtf: {gt.num_rows} genes, {et.num_rows} exons")

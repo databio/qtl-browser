@@ -9,80 +9,137 @@ import { DetailSkeleton, Empty, TableSkeleton } from '@/components/states'
 import TransTable from '@/components/TransTable'
 import { CopyButton } from '@/components/copy-button'
 import { dbsnp, ucsc } from '@/lib/links'
-import { fmtBp, fmtInt, fmtNum, fmtP, fmtPhenotype, fmtSlopeSE } from '@/lib/format'
-import { dropTable, materialize } from '@/lib/db'
-import { cisHitsAt, credibleSetsAt, leadGenesAt, leadPhenotypesAt, transAtSQL, variantByPosition, variantByRsid,
-  type CisHit, type CredibleSetHit, type Gene, type SplicePhenotype, type VariantRow } from '@/lib/queries'
+import { fmtBp, fmtBytes, fmtInt, fmtNum, fmtP, fmtPhenotype, fmtSlopeSE } from '@/lib/format'
+import { dropTable, rows, type Row } from '@/lib/db'
+import { planScan, runScan, type CisHit, type ScanPlan } from '@/lib/cis-scan'
+import type { VariantRecord } from '@/lib/pack-decode'
+import { csValues, hitsPhenotypeId, leadValues, loadHits, lookupRsid, variantAt, variantAtPosition, type Hits } from '@/lib/variant-pack'
+import { variantTransTable } from '@/lib/trans-pack'
 import { ROW_LINK, ROW_LINK_TEXT, useRowLink } from '@/lib/row-link'
 
-const gnomad = (v: VariantRow) => `https://gnomad.broadinstitute.org/variant/${v.chr.replace('chr', '')}-${v.position}-${v.A2}-${v.A1}?dataset=gnomad_r4`
+const gnomad = (v: VariantRecord) => `https://gnomad.broadinstitute.org/variant/${v.chr.replace('chr', '')}-${v.position}-${v.A2}-${v.A1}?dataset=gnomad_r4`
 const ensemblVar = (rsid: string) => `https://www.ensembl.org/Homo_sapiens/Variation/Explore?v=${rsid}`
-const openTargets = (v: VariantRow) => `https://platform.opentargets.org/variant/${v.chr.replace('chr', '')}_${v.position}_${v.A2}_${v.A1}`
+const openTargets = (v: VariantRecord) => `https://platform.opentargets.org/variant/${v.chr.replace('chr', '')}_${v.position}_${v.A2}_${v.A1}`
 /** Shown in place of the three cis sections for a variant seen only in the genome-wide trans scan. */
 const OUTSIDE_CIS = 'This variant is more than 1 Mb from every tested gene, so it is outside every cis window.'
 
+const rsidOf = (v: VariantRecord) => (v.rsNumber ? `rs${v.rsNumber}` : null)
+
+/** The variant and its hits frame: two range requests once the variant is located (SPEC section 7). */
+async function resolve(id: string): Promise<{ v: VariantRecord; hits: Hits } | null> {
+  const rs = /^rs(\d+)$/i.exec(id)
+  const pos = /^(chr[0-9XYM]+):(\d+)$/i.exec(id)
+  if (rs) {
+    const ref = await lookupRsid(Number(rs[1]))
+    if (!ref) return null
+    // both need only (chr, vidx), so the page and the frame go out together
+    const hitsP = loadHits(ref.chr, ref.vidx)
+    const v = await variantAt(ref.chr, ref.vidx)
+    return { v, hits: await hitsP }
+  }
+  if (pos) {
+    const v = await variantAtPosition(pos[1], Number(pos[2]))
+    if (!v) return null
+    return { v, hits: await loadHits(v.chr, v.vidx) }
+  }
+  return null
+}
+
 export default function Variant() {
   const { id = '' } = useParams()
-  const [vars, setVars] = useState<VariantRow[] | null | undefined>(undefined)
+  const [found, setFound] = useState<{ v: VariantRecord; hits: Hits } | null | undefined>(undefined)
 
   useEffect(() => {
-    setVars(undefined)
-    const rs = /^rs(\d+)$/i.exec(id)
-    const pos = /^(chr[0-9XY]+):(\d+)$/i.exec(id)
-    const q = rs ? variantByRsid(Number(rs[1])) : pos ? variantByPosition(pos[1], Number(pos[2])) : Promise.resolve([])
-    q.then(v => setVars(v.length ? v : null))
+    let alive = true
+    setFound(undefined)
+    resolve(id).then(r => { if (alive) setFound(r) }, e => { console.error(e); if (alive) setFound(null) })
+    return () => { alive = false }
   }, [id])
 
-  if (vars === undefined) return <Page><DetailSkeleton kvRows={4} /></Page>
-  const v = vars?.[0]
+  if (found === undefined) return <Page><DetailSkeleton kvRows={4} /></Page>
   return (
     <Page>
-      <PageHeader crumbs={[{ label: 'Variants' }, { label: id }]} title={v?.rsid ?? id}
-        meta={v ? <span className="tabular-nums">{v.chr}:{fmtInt(v.position)}</span> : undefined} />
-      {!v ? (
+      <PageHeader crumbs={[{ label: 'Variants' }, { label: id }]} title={found ? (rsidOf(found.v) ?? id) : id}
+        meta={found ? <span className="tabular-nums">{found.v.chr}:{fmtInt(found.v.position)}</span> : undefined} />
+      {!found ? (
         <div className="space-y-2">
           <Empty label={`${id} is not among the variants tested in TOPCHeF (MAF ≥ 0.01; cis windows within 1 Mb of a tested gene, or the genome-wide trans scan).`} />
           {/^rs\d+$/i.test(id) && <p className="px-4 text-sm"><ExternalLink icon href={dbsnp(id.toLowerCase())}>Look it up in dbSNP</ExternalLink></p>}
         </div>
-      ) : <VariantBody vars={vars!} />}
+      ) : <VariantBody v={found.v} hits={found.hits} />}
     </Page>
   )
 }
 
-function VariantBody({ vars }: { vars: VariantRow[] }) {
-  const v = vars[0]
+/** A `search_index` row named by a hits row's `ord`. */
+interface GeneRow extends Row { ord: number; gene_id: string; symbol: string | null; chr: string; gene_version: number | null }
+
+interface LeadRow { row: number; gene: GeneRow; qtlType: 'e' | 's'; phenotypeId: string | null }
+interface CsRow { row: number; gene: GeneRow; qtlType: 'e' | 's'; phenotypeId: string | null }
+
+/** The two list sections, built from the hits frame plus one local `search_index` query. */
+async function buildLists(hits: Hits): Promise<{ leads: LeadRow[]; cs: CsRow[] }> {
+  const wanted = [...hits.leads, ...hits.cs]
+  if (!wanted.length) return { leads: [], cs: [] }
+  const ords = [...new Set(wanted.map(r => hits.frame.ord[r]))]
+  const genes = await rows<GeneRow>(`SELECT ord, gene_id, symbol, chr, gene_version FROM search_index
+    WHERE ord IN (${ords.join(',')})`)
+  const byOrd = new Map(genes.map(g => [g.ord, g]))
+  const of = (r: number) => {
+    const g = byOrd.get(hits.frame.ord[r])
+    if (!g) throw new Error(`search_index has no gene with ord ${hits.frame.ord[r]}`)
+    const qtlType: 'e' | 's' = hits.frame.kind[r] & 1 ? 's' : 'e'
+    return { row: r, gene: g, qtlType, phenotypeId: qtlType === 's' ? hitsPhenotypeId(hits.frame, r, g) : null }
+  }
+  return { leads: hits.leads.map(of), cs: hits.cs.map(of) }
+}
+
+function VariantBody({ v, hits }: { v: VariantRecord; hits: Hits }) {
   const rowLink = useRowLink()
-  const [leads, setLeads] = useState<{ genes: Gene[]; phens: SplicePhenotype[]; cs: CredibleSetHit[] } | null>(null)
-  // the variant's trans rows as an in-memory table, materialized once per variant and dropped
-  // when it changes; the trans table pages off it like the gene page's does
+  const [lists, setLists] = useState<{ leads: LeadRow[]; cs: CsRow[] } | null>(null)
+  // the variant's trans rows as an in-memory table, built once per variant from its hits frame and
+  // dropped when the variant changes; the trans table pages off it like the gene page's does
   const [transTable, setTransTable] = useState<string | null>(null)
+  const [plan, setPlan] = useState<ScanPlan | null>(null)
   const [scan, setScan] = useState<{ e: CisHit[]; s: CisHit[] } | null | 'running'>(null)
+  const [allIntrons, setAllIntrons] = useState(false)
 
   useEffect(() => {
     let alive = true
     let table: string | null = null
-    setLeads(null); setTransTable(null); setScan(null)
-    Promise.all([leadGenesAt(v.chr, v.position), leadPhenotypesAt(v.chr, v.position), credibleSetsAt(v.chr, v.position)])
-      .then(([genes, phens, cs]) => { if (alive) setLeads({ genes, phens, cs }) })
-    materialize(transAtSQL(v.chr, v.position), 'trans')
+    setLists(null); setTransTable(null); setScan(null); setPlan(null); setAllIntrons(false)
+    buildLists(hits).then(l => { if (alive) setLists(l) }, e => console.error(e))
+    variantTransTable(v, hits)
       .then(t => { if (!alive) { dropTable(t); return } table = t; setTransTable(t) })
       .catch(e => console.error(e))
+    if (v.inCis) planScan(v).then(p => { if (alive) setPlan(p) }, e => console.error(e))
     return () => { alive = false; if (table) dropTable(table) }
-  }, [v.chr, v.position])
+  }, [v, hits])
 
-  async function runScan() {
+  async function doScan() {
+    if (!plan) return
     setScan('running')
-    const [e, s] = await Promise.all([cisHitsAt(v.chr, v.position, 'e'), cisHitsAt(v.chr, v.position, 's')])
-    setScan({ e, s })
+    try {
+      setScan(await runScan(plan, v))
+    } catch (e) {
+      console.error(e)
+      setScan({ e: [], s: [] })
+    }
   }
 
+  const rsid = rsidOf(v)
+  // harness hooks (bench/README.md): the lists are "ready" once they have their data, or once the
+  // outside-cis message stands in for them
+  const listsReady = !v.inCis || lists !== null
+  const sig = scan && scan !== 'running' ? scan.s.filter(h => h.is_sqtl) : []
+  const shown = scan && scan !== 'running' ? (allIntrons ? scan.s : sig) : []
   return (
-    <div className="space-y-8">
+    <div className="space-y-8" {...(listsReady ? { 'data-variant-lists': '1' } : {})}>
       <div className="grid items-start gap-4 md:grid-cols-2">
         <KvTable rows={[
-          { label: 'rsID', value: v.rsid ? <span className="flex items-center justify-between gap-2">
-            <ExternalLink icon href={dbsnp(v.rsid)} title="Open in dbSNP">{v.rsid}</ExternalLink>
-            <CopyButton text={v.rsid} className="-my-1 -mr-1" />
+          { label: 'rsID', value: rsid ? <span className="flex items-center justify-between gap-2">
+            <ExternalLink icon href={dbsnp(rsid)} title="Open in dbSNP">{rsid}</ExternalLink>
+            <CopyButton text={rsid} className="-my-1 -mr-1" />
           </span> : '—' },
           { label: 'Position', value: <span className="tabular-nums">{v.chr}:{fmtInt(v.position)} (GRCh38)</span> },
           { label: 'Links', value: <span className="flex flex-wrap gap-x-4">
@@ -90,47 +147,40 @@ function VariantBody({ vars }: { vars: VariantRow[] }) {
             {/* both URLs embed ref and alt, so they need the alleles */}
             {v.A1 && <ExternalLink icon href={gnomad(v)}>gnomAD</ExternalLink>}
             {v.A1 && <ExternalLink icon href={openTargets(v)}>Open Targets</ExternalLink>}
-            {v.rsid && <ExternalLink icon href={ensemblVar(v.rsid)}>Ensembl</ExternalLink>}
+            {rsid && <ExternalLink icon href={ensemblVar(rsid)}>Ensembl</ExternalLink>}
           </span> },
           { label: 'rsID match', value: v.match === 'exact' ? 'alleles match dbSNP'
             : v.match === 'position' ? (v.A1 ? 'position only (alleles differ from dbSNP record)' : 'by position (alleles not reported)')
             : 'no dbSNP record' },
         ]} />
         <KvTable rows={[
-          { label: vars.length > 1 ? 'Alleles (A1 / A2)' : 'A1 / A2',
-            value: v.A1 ? vars.map(x => `${x.A1} / ${x.A2}`).join(', ') : 'not reported (the trans eQTL file has no allele columns)' },
+          { label: 'A1 / A2',
+            value: v.A1 ? `${v.A1} / ${v.A2}` : 'not reported (the trans eQTL file has no allele columns)' },
           { label: 'A1', value: 'effect allele (minor allele in TOPCHeF)' },
           { label: 'A2', value: 'reference allele' },
         ]} />
       </div>
 
       <SectionPanel title="Lead variant for" description="Genes and splice phenotypes where this is the top cis association.">
-        {!v.in_cis ? <Empty label={OUTSIDE_CIS} /> : leads === null ? <TableSkeleton columns={[{ w: 'w-10' }, { w: 'w-16' }, { w: 'w-40' }, { w: 'w-20', align: 'right' }, { w: 'w-14', align: 'right' }, { w: 'w-12', align: 'right' }]} rows={2} /> :
-          leads.genes.length + leads.phens.length === 0 ? <Empty label="Not the lead variant for any gene or splice phenotype." /> : (
+        {!v.inCis ? <Empty label={OUTSIDE_CIS} /> : lists === null ? <TableSkeleton columns={[{ w: 'w-10' }, { w: 'w-16' }, { w: 'w-40' }, { w: 'w-20', align: 'right' }, { w: 'w-14', align: 'right' }, { w: 'w-12', align: 'right' }]} rows={2} /> :
+          lists.leads.length === 0 ? <Empty label="Not the lead variant for any gene or splice phenotype." /> : (
             <div className="overflow-x-auto rounded-lg border border-base-300">
               <table className="table table-sm">
                 <thead><tr><th>Type</th><th>Gene</th><th>Phenotype</th><th className="text-right">Slope ± SE</th><th className="text-right">Perm p</th><th className="text-right">Status</th></tr></thead>
                 <tbody>
-                  {leads.genes.map(g => (
-                    <tr key={g.gene_id} className={`${ROW_LINK} hover:bg-base-200`} {...rowLink(`/gene/${g.gene_id}`)}>
-                      <td><span className="badge badge-primary badge-xs">eQTL</span></td>
-                      <td className="font-medium"><span className={ROW_LINK_TEXT}>{g.symbol ?? g.gene_id}</span></td>
-                      <td className="tabular-nums text-base-content/60">{g.gene_id}</td>
-                      <td className="text-right tabular-nums">{fmtSlopeSE(g.slope, g.slope_se)}</td>
-                      <td className="text-right tabular-nums">{fmtP(g.pval_perm)}</td>
-                      <td className="text-right">{g.is_egene ? <span className="badge badge-primary badge-xs">eGene</span> : ''}</td>
-                    </tr>
-                  ))}
-                  {leads.phens.map(p => (
-                    <tr key={p.phenotype_id} className={`${ROW_LINK} hover:bg-base-200`} {...rowLink(`/gene/${p.gene_id}?tab=sqtl`)}>
-                      <td><span className="badge badge-secondary badge-xs">sQTL</span></td>
-                      <td className="font-medium"><span className={ROW_LINK_TEXT}>{p.symbol ?? p.gene_id}</span></td>
-                      <td className="tabular-nums text-base-content/60">{fmtPhenotype(p.phenotype_id)}</td>
-                      <td className="text-right tabular-nums">{fmtSlopeSE(p.slope, p.slope_se)}</td>
-                      <td className="text-right tabular-nums">{fmtP(p.pval_perm)}</td>
-                      <td className="text-right">{p.is_sqtl ? <span className="badge badge-secondary badge-xs">sQTL</span> : ''}</td>
-                    </tr>
-                  ))}
+                  {lists.leads.map(l => {
+                    const val = leadValues(hits.frame, l.row)
+                    return (
+                      <tr key={l.row} className={`${ROW_LINK} hover:bg-base-200`} {...rowLink(`/gene/${l.gene.gene_id}${l.qtlType === 's' ? '?tab=sqtl' : ''}`)}>
+                        <td><span className={`badge badge-xs ${l.qtlType === 'e' ? 'badge-primary' : 'badge-secondary'}`}>{l.qtlType === 'e' ? 'eQTL' : 'sQTL'}</span></td>
+                        <td className="font-medium"><span className={ROW_LINK_TEXT}>{l.gene.symbol ?? l.gene.gene_id}</span></td>
+                        <td className="tabular-nums text-base-content/60">{l.phenotypeId ? fmtPhenotype(l.phenotypeId) : l.gene.gene_id}</td>
+                        <td className="text-right tabular-nums">{fmtSlopeSE(val.slope, val.slopeSe)}</td>
+                        <td className="text-right tabular-nums">{fmtP(val.pvalPerm)}</td>
+                        <td className="text-right">{val.significant ? <span className={`badge badge-xs ${l.qtlType === 'e' ? 'badge-primary' : 'badge-secondary'}`}>{l.qtlType === 'e' ? 'eGene' : 'sQTL'}</span> : ''}</td>
+                      </tr>
+                    )
+                  })}
                 </tbody>
               </table>
             </div>
@@ -138,21 +188,24 @@ function VariantBody({ vars }: { vars: VariantRow[] }) {
       </SectionPanel>
 
       <SectionPanel title="Credible-set membership" description="SuSiE 95% credible sets containing this variant.">
-        {!v.in_cis ? <Empty label={OUTSIDE_CIS} /> : leads === null ? <TableSkeleton columns={[{ w: 'w-10' }, { w: 'w-16' }, { w: 'w-40' }, { w: 'w-6' }, { w: 'w-10', align: 'right' }]} rows={2} /> :
-          leads.cs.length === 0 ? <Empty label="Not in any credible set." /> : (
+        {!v.inCis ? <Empty label={OUTSIDE_CIS} /> : lists === null ? <TableSkeleton columns={[{ w: 'w-10' }, { w: 'w-16' }, { w: 'w-40' }, { w: 'w-6' }, { w: 'w-10', align: 'right' }]} rows={2} /> :
+          lists.cs.length === 0 ? <Empty label="Not in any credible set." /> : (
             <div className="overflow-x-auto rounded-lg border border-base-300">
               <table className="table table-sm">
                 <thead><tr><th>Type</th><th>Gene</th><th>Phenotype</th><th>Set</th><th className="text-right">PIP</th></tr></thead>
                 <tbody>
-                  {leads.cs.map((c, i) => (
-                    <tr key={i} className={`${ROW_LINK} hover:bg-base-200`} {...rowLink(`/gene/${c.gene_id}${c.qtl_type === 's' ? '?tab=sqtl' : ''}`)}>
-                      <td><span className={`badge badge-xs ${c.qtl_type === 'e' ? 'badge-primary' : 'badge-secondary'}`}>{c.qtl_type === 'e' ? 'eQTL' : 'sQTL'}</span></td>
-                      <td className="font-medium"><span className={ROW_LINK_TEXT}>{c.symbol ?? c.gene_id}</span></td>
-                      <td className="tabular-nums text-base-content/60">{c.qtl_type === 'e' ? c.gene_id : fmtPhenotype(c.phenotype_id)}</td>
-                      <td><span className="badge badge-ghost badge-sm">{c.cs_id}</span></td>
-                      <td className="text-right tabular-nums font-medium">{fmtNum(c.pip)}</td>
-                    </tr>
-                  ))}
+                  {lists.cs.map(c => {
+                    const val = csValues(hits.frame, c.row)
+                    return (
+                      <tr key={c.row} className={`${ROW_LINK} hover:bg-base-200`} {...rowLink(`/gene/${c.gene.gene_id}${c.qtlType === 's' ? '?tab=sqtl' : ''}`)}>
+                        <td><span className={`badge badge-xs ${c.qtlType === 'e' ? 'badge-primary' : 'badge-secondary'}`}>{c.qtlType === 'e' ? 'eQTL' : 'sQTL'}</span></td>
+                        <td className="font-medium"><span className={ROW_LINK_TEXT}>{c.gene.symbol ?? c.gene.gene_id}</span></td>
+                        <td className="tabular-nums text-base-content/60">{c.phenotypeId ? fmtPhenotype(c.phenotypeId) : c.gene.gene_id}</td>
+                        <td><span className="badge badge-ghost badge-sm">{val.csId}</span></td>
+                        <td className="text-right tabular-nums font-medium">{fmtNum(val.pip)}</td>
+                      </tr>
+                    )
+                  })}
                 </tbody>
               </table>
             </div>
@@ -160,15 +213,18 @@ function VariantBody({ vars }: { vars: VariantRow[] }) {
       </SectionPanel>
 
       <SectionPanel title="trans associations" description="Genes and splice phenotypes anywhere in the genome whose expression or splicing this variant associates with, outside their cis windows.">
-        <TransTable table={transTable} keyedBy="variant" fileStem={`${v.rsid ?? `${v.chr}_${v.position}`}_trans`} />
+        <TransTable table={transTable} keyedBy="variant" fileStem={`${rsid ?? `${v.chr}_${v.position}`}_trans`} />
       </SectionPanel>
 
-      <SectionPanel title="All cis associations" description="Nominal statistics for every gene and splice phenotype whose window covers this variant. Reads every gene window overlapping the position, so it runs on request."
-        action={v.in_cis && scan === null && <button className="btn btn-sm h-8 rounded-lg border-base-300 font-medium" onClick={runScan}>Scan cis windows</button>}>
-        {!v.in_cis ? <Empty label={OUTSIDE_CIS} /> : scan === null ? <Empty label="Not scanned yet." /> : scan === 'running' ? <TableSkeleton columns={[{ w: 'w-16' }, { w: 'w-14', align: 'right' }, { w: 'w-10', align: 'right' }, { w: 'w-14', align: 'right' }, { w: 'w-20', align: 'right' }, { w: 'w-16', align: 'right' }]} rows={6} /> : (
-          <div className="space-y-4">
+      <SectionPanel title="All cis associations" description="Nominal statistics for every gene and splice phenotype whose window covers this variant. It runs on request."
+        action={v.inCis && scan === null && plan && <button data-scan-button className="btn btn-sm h-8 rounded-lg border-base-300 font-medium" onClick={doScan}>
+          Scan cis windows ({fmtBytes(plan.bytes)}{plan.sPending ? ' + splicing' : ''})
+        </button>}>
+        {!v.inCis ? <Empty label={OUTSIDE_CIS} /> : scan === null ? <Empty label="Not scanned yet." /> : scan === 'running' ? <TableSkeleton columns={[{ w: 'w-16' }, { w: 'w-14', align: 'right' }, { w: 'w-10', align: 'right' }, { w: 'w-14', align: 'right' }, { w: 'w-20', align: 'right' }, { w: 'w-16', align: 'right' }]} rows={6} /> : (
+          <div className="space-y-4" data-scan-ready="1">
             <HitTable title={`Expression (${scan.e.length})`} hits={scan.e} qtlType="e" />
-            <HitTable title={`Splicing (${scan.s.length})`} hits={scan.s} qtlType="s" />
+            <HitTable title={`Splicing (${shown.length})`} hits={shown} qtlType="s"
+              toggle={scan.s.length > sig.length ? { allIntrons, total: scan.s.length, onToggle: () => setAllIntrons(x => !x) } : undefined} />
           </div>
         )}
       </SectionPanel>
@@ -176,11 +232,19 @@ function VariantBody({ vars }: { vars: VariantRow[] }) {
   )
 }
 
-function HitTable({ title, hits, qtlType }: { title: string; hits: CisHit[]; qtlType: 'e' | 's' }) {
+function HitTable({ title, hits, qtlType, toggle }: {
+  title: string; hits: CisHit[]; qtlType: 'e' | 's'
+  toggle?: { allIntrons: boolean; total: number; onToggle: () => void }
+}) {
   const rowLink = useRowLink()
   return (
     <div className="space-y-2">
-      <h3 className="text-sm font-medium">{title}</h3>
+      <div className="flex items-baseline justify-between gap-4">
+        <h3 className="text-sm font-medium">{title}</h3>
+        {toggle && <button className="link text-sm" onClick={toggle.onToggle}>
+          {toggle.allIntrons ? 'Show significant introns only' : `Show all ${toggle.total} tested introns`}
+        </button>}
+      </div>
       {hits.length === 0 ? <Empty label="No windows cover this variant." /> : (
         <div className="overflow-x-auto rounded-lg border border-base-300">
           <table className="table table-sm">

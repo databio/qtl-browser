@@ -25,7 +25,22 @@ function serveDerivedData(): Plugin {
     const type = file.endsWith('.json') ? 'application/json' : 'application/octet-stream'
     res.setHeader('Accept-Ranges', 'bytes')
     res.setHeader('Content-Type', type)
+    // R2 answers every object with an ETag and a Last-Modified. Chromium stores a 206 only when the
+    // response carries a strong validator, so without one `warm` re-downloads every pack range here
+    // while it reads them from cache against the bucket. Size and mtime identify a local file as
+    // well as the bucket's MD5 identifies a bucket object.
+    const st = statSync(file)
+    res.setHeader('ETag', `"${st.size.toString(16)}-${Math.floor(st.mtimeMs).toString(16)}"`)
+    res.setHeader('Last-Modified', new Date(st.mtimeMs).toUTCString())
+    // the production headers (SPEC section 3, set on R2 by pipeline/upload.py): an immutable/ name
+    // carries the file's content hash, so a rebuilt file is a new URL and the old one can be cached
+    // forever; everything else revalidates. Harness cold runs use a fresh browser context.
+    res.setHeader('Cache-Control', rel.startsWith('immutable/') ? 'public, max-age=31536000, immutable' : 'no-cache')
     const range = /^bytes=(\d*)-(\d*)$/.exec(req.headers.range ?? '')
+    if (req.headers.range !== undefined && !range) {
+      // multi-range or malformed: refuse rather than fall through to the whole file
+      res.statusCode = 416; res.setHeader('Content-Range', `bytes */${size}`); return res.end()
+    }
     if (range) {
       const start = range[1] ? Number(range[1]) : Math.max(0, size - Number(range[2]))
       const end = range[1] && range[2] ? Math.min(Number(range[2]), size - 1) : range[1] ? size - 1 : size - 1

@@ -70,7 +70,7 @@ export default function TransTable({ table, qtlType, keyedBy = 'gene', fileStem 
     : [...(qtlType === 's' ? [{ w: 'w-40' }] : []), { w: 'w-24' }, { w: 'w-20' }, { w: 'w-10', ...R }, { w: 'w-14', ...R }, { w: 'w-20', ...R }, { w: 'w-10', ...R }]
 
   return (
-    <div className="space-y-2">
+    <div className="space-y-2" data-trans-total={data !== null ? (all ?? undefined) : undefined}>
       <div className="flex flex-wrap items-center gap-2">
         <label className="input input-bordered input-sm flex h-8 w-56 items-center gap-2 rounded-lg">
           <SearchIcon className="size-4 shrink-0 opacity-50" />

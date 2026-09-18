@@ -21,17 +21,16 @@ workers: 3
 duckdb_memory_limit: 6GB
 duckdb_threads: 4
 
-# tested genes per nominal / gene_detail partition file: bin = rank of the gene's TSS within its
-# chromosome, integer-divided by this; stored in genes and search_index (plan 2026-09-04-gene-bins)
+# tested genes per nominal build-intermediate file, by TSS rank (the `bin` column of genes). Only
+# the eQTL pack builder reads those files now, so this is a build-time knob, not a browser one.
 nominal_bin_genes: 100
 
 row_group_sizes:
-  trans: 5000      # a gene's trans rows span 1-2 groups (~350 KB) instead of one 1.4 MB group; per-chr footers ~150 KB
-  variants: 10000  # a one-row rsID / position lookup reads ~340 KB instead of 1.8-4.4 MB; rsid footer ~550 KB (one file)
-  gwas: 10000      # ~3 Mb per group, so a 2 Mb cis window reads one or two groups for LocusCompare
+  trans: 5000      # a gene's trans rows span 1-2 groups instead of one 1.4 MB group; `pack_trans` reads it per gene
 
-# which introns get nominal cis-sQTL rows: `all` (10.8 GB) or `significant` (1.8 GB, the
-# 13,540 introns with pval_perm < 0.05). Every intron keeps its permutation row regardless.
+# which introns get rows in the _tables/cis_sqtl_nominal build intermediate: `all` (10.8 GB) or
+# `significant` (1.8 GB, the 13,540 introns with pval_perm < 0.05). The browser reads neither: the
+# sQTL pack carries every intron. Every intron keeps its permutation row regardless.
 sqtl_nominal: significant
 
 # Cloudflare R2 bucket the browser reads from (pipeline/upload.py). Credentials come from
@@ -44,11 +43,43 @@ r2:
     - https://qtl-browser.topchef.workers.dev
     - http://localhost:5173
     - http://localhost:4173
-  exclude:                    # relative to data/derived; everything else is uploaded
-    - "_*/*"
-    - ".done/*"
-    - "*.log"
-    - "*.tmp.parquet"
+  # uploads follow manifest.json, never a directory walk, so there is no exclude list
+  immutable_prefix: immutable/
+  cache_control:
+    immutable: "public, max-age=31536000, immutable"   # every key under immutable_prefix
+    mutable: "no-cache"                                # manifest.json and the plain-path files upload.py writes
+  free_tier:                                           # R2 Standard, per month (developers.cloudflare.com/r2/pricing)
+    storage_bytes: 10000000000                         # 10 GB-month, decimal: the conservative reading
+    class_a_ops: 1000000
+    class_b_ops: 10000000
+  single_put_max_bytes: 4000000000                     # stage refuses larger files; R2's single PUT limit is 5 GiB
+  multipart_threshold_bytes: 8388608                   # aws s3 sync's part size: files at or under it have ETag = MD5
+
+# old bucket paths each content-addressed file takes over; the manifest's `replaces` and
+# `upload.py prune` read this. A prefix is listed only when nothing in ui/src reads it, which is now
+# every one of them: the browser reads no parquet at all.
+replaces:
+  search_index: ["search_index.parquet"]
+  eqtl: ["gene_detail/chr={chr}/", "cis_eqtl_nominal/chr={chr}/"]
+  sqtl: ["cis_sqtl_nominal/chr={chr}/"]
+  gwas: ["gwas_dcm/chr={chr}/"]
+  variants: ["variants_by_position/chr={chr}/"]
+  trans: []
+  hits: []
+  rsid_index: ["variants_by_rsid.parquet"]
+  variant_index: []
+  gwas_index: []
+  # whole-bucket keys no single file takes over, retired with the tables above
+  _retired:
+    - "trans_pairs/"
+    - "trans_by_variant/"
+    - "credible_sets.parquet"
+    - "splice_phenotypes.parquet"
+    - "genes.parquet"
+    - "exons.parquet"
+    - "gene_annotation.parquet"
+    - "coloc.parquet"
+    - "gwas_dcm_bins.parquet"
 
 # genes the preprint reports as colocalized with the DCM GWAS (coloc PP.H4 > 0.8), from the
 # authors; the landing track draws them from coloc_loci.json. The same list is in ui/src/lib/coloc.ts
@@ -72,3 +103,50 @@ paper_variants:
   chr10:73661450: rs10824026   # MYOZ1 / SYNPO2L (paper eQTL text says 73,646,383, a typo; that is rs3740293. sQTL text and dbSNP agree on 73,661,450)
   chr4:113537246: rs734348     # CAMK2D
   chr16:918717: rs9889137      # LMF1
+
+# Binary pack format (SPEC.md). Values confirmed by `python -m pipeline packcheck`.
+packs:
+  duckdb_memory_limit: 4GB
+  duckdb_threads: 4
+  dof: {eqtl: 435, sqtl: 480}      # Student-t degrees of freedom; readers derive slope from slope_se and p
+  sqtl_workers: 2                  # pack_sqtl processes; each streams one chromosome's raw file (1 when under 12 GB free)
+  sqtl_duckdb_memory_limit: 1GB    # per worker; DuckDB reads only the small tables there
+  sqtl_duckdb_threads: 2
+  gwas_block_rows: 2048            # rows per GWAS block: about 6,100 blocks and a ~50 KB index
+  gwas_duckdb_memory_limit: 2GB    # pack_gwas and validate: the one DuckDB read of the GWAS TSV
+  gwas_duckdb_threads: 4
+  variant_page_size: 512            # variants per page in the variants file (chosen by `packcheck measure`, SPEC section 4)
+  variant_page_codec: zstd          # raw | zstd for variant pages (chosen by `packcheck measure`, SPEC section 4)
+  hits_frame_variants: 1024         # variants per frame in the hits pack (SPEC section 13)
+  rsid_block_records: 4096          # records per uncompressed block in the rsID index (SPEC section 14)
+  zstd_level: 19                    # gene details frames, and variant pages if codec is zstd
+  checks_dir: _checks/packcheck     # under data/derived; underscore dirs are never uploaded
+  # every pack publishes to data/derived/<r2.immutable_prefix> as <kind>.<chr>.<sha16>.<ext>
+  # (SPEC section 3); there is no fixed pack directory any more.
+  # round-trip sample genes for validate; every gene in FLNC's bin is added automatically
+  check_genes:
+    - ENSG00000128591       # FLNC, bin 7, 6,050 variants
+    - ENSG00000229618       # AC011287.1, largest chr7 window, 10,419 variants
+    - ENSG00000121716       # PILRB, smallest chr7 p (8e-133), large-step case
+    - ENSG00000286192       # AC069288.1, sQTL-only, zero pairs
+    - ENSG00000157933       # SKI, chr1
+    - ENSG00000077522       # ACTN2, chr1
+    - ENSG00000142798       # HSPG2, chr1
+    - ENSG00000268575       # AL031282.2, chr1, sQTL only
+    - ENSG00000131374       # TBC1D5, chr3, wider intron run
+    - ENSG00000145349       # CAMK2D, chr4
+    - ENSG00000049656       # CLPTM1L, chr5
+    - ENSG00000204314       # PRRT1, chr6
+    - ENSG00000177791       # MYOZ1, chr10
+    - ENSG00000166317       # SYNPO2L, chr10
+    - ENSG00000103227       # LMF1, chr16
+    - ENSG00000238039       # AC244197.2, chrX
+  # sQTL round trip in validate: every intron of these genes, plus on every chromosome the intron with
+  # the most rows (PPT2 on chr6, 19,452), introns with a variant in two credible sets (LINC01954), and
+  # 5 seeded random introns
+  sqtl_check_genes:
+    - ENSG00000145349       # CAMK2D, chr4, 14 introns
+    - ENSG00000166317       # SYNPO2L, chr10, 7 introns
+    - ENSG00000103227       # LMF1, chr16, 9 introns
+    - ENSG00000142798       # HSPG2, chr1, 40 introns (the most for one gene)
+    - ENSG00000268575       # AL031282.2, chr1, sQTL only, 27 introns

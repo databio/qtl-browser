@@ -6,7 +6,9 @@ import { Empty, TableSkeleton } from '@/components/states'
 import { fmtBp, fmtNum, fmtP, rsFromNumber } from '@/lib/format'
 import { cisAll, cisCount, cisRows, type CisQuery, type CisRow } from '@/lib/queries'
 import { csTint, useIsDark } from '@/lib/plot-theme'
-import { downloadCSV } from '@/lib/csv'
+import { downloadCSV, roundedCsvName } from '@/lib/csv'
+import RoundingNote from '@/components/rounding-note'
+import { roundingText, useRoundingFacts } from '@/lib/rounding'
 import { ROW_LINK, ROW_LINK_TEXT, useRowLink } from '@/lib/row-link'
 
 const SKEL = [{ w: 'w-24' }, { w: 'w-20' }, { w: 'w-10' }, { w: 'w-14', align: 'right' as const }, { w: 'w-10', align: 'right' as const },
@@ -50,13 +52,14 @@ export default function CisTable({ table, failed, chr, qtlType, phenotypeId, fil
   }, [table, sort, maxP, search, offset, pageSize]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const dark = useIsDark()
+  const rounding = useRoundingFacts()
   const rowLink = useRowLink()
   const variantPath = (r: CisRow) => `/variant/${r.rs_number != null ? rsFromNumber(r.rs_number) : `${chr}:${r.position}`}`
 
   async function exportCSV() {
     const all = await cisAll(query())
     const cols = ['position', 'rsid', 'A1', 'A2', 'tss_distance', 'af', 'ma_samples', 'ma_count', 'pval_nominal', 'slope', 'slope_se', 'pip', 'cs_id']
-    downloadCSV(`${fileStem}.csv`, all.map(r => ({ ...r, rsid: rsFromNumber(r.rs_number), phenotype_id: phenotypeId })), qtlType === 's' ? ['phenotype_id', ...cols] : cols)
+    downloadCSV(roundedCsvName(fileStem), all.map(r => ({ ...r, rsid: rsFromNumber(r.rs_number), phenotype_id: phenotypeId })), qtlType === 's' ? ['phenotype_id', ...cols] : cols)
   }
 
   if (failed) return <Empty label="Could not load the cis window." />
@@ -75,7 +78,9 @@ export default function CisTable({ table, failed, chr, qtlType, phenotypeId, fil
           <option value="1e-5">p ≤ 1e-5</option>
           <option value="5e-8">p ≤ 5e-8</option>
         </select>
-        <button className="btn btn-sm h-8 gap-1.5 rounded-lg border-base-300 font-medium" onClick={exportCSV} disabled={!table}><Download className="size-3.5" /> CSV</button>
+        <RoundingNote className="max-w-md text-right" />
+        <button className="btn btn-sm h-8 gap-1.5 rounded-lg border-base-300 font-medium" title={rounding ? roundingText(rounding) : undefined}
+          onClick={exportCSV} disabled={!table}><Download className="size-3.5" /> CSV</button>
       </div>
       {data === null ? <TableSkeleton columns={SKEL} rows={10} /> : total === 0 ? <Empty label="No variants match." /> : (
         <>

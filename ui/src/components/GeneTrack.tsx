@@ -46,7 +46,7 @@ export default function GeneTrack({ spec, width, marginLeft, dark, shade }: {
   useEffect(() => {
     let alive = true
     setData(null); setError(null)
-    // neighbours come from the in-memory index; the gene's own exons arrive with gene_detail
+    // neighbours come from the in-memory index; the gene's own exons come with the pack details
     genesInWindow(spec.chr, spec.domain[0], spec.domain[1])
       .then(genes => { if (alive) setData({ genes, exons: spec.exons }) })
       .catch((e: Error) => { console.error(e); if (alive) setError(`gene track query failed: ${e.message}`) })
