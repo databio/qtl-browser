@@ -32,7 +32,7 @@ import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from . import packfmt
+from . import packfmt_v0 as packfmt
 from . import packtool as pt
 from .common import (CHROMS, Config, connect, log, publish_file, read_search_index, register_search_index, stage,
                      variants_sql, write_parquet)

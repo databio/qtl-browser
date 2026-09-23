@@ -11,7 +11,7 @@ import sys
 import time
 
 from . import (steps_extract, steps_finish, steps_gtf, steps_gwas, steps_nominal, steps_pack, steps_pack_trans,
-               steps_pack_variant, steps_tables,
+               steps_pack_variant, steps_refget, steps_tables,
                steps_variants)
 from .common import Config, log
 
@@ -20,6 +20,8 @@ STEPS = [
     ("gtf", steps_gtf.run),
     ("variants_collect", steps_variants.collect),
     ("variants_rsid", steps_variants.rsid),
+    ("refget_store", steps_refget.refget_store),
+    ("variants_refcheck", steps_refget.variants_refcheck),
     ("permutation_tables", steps_tables.permutation_tables),
     ("credible_sets", steps_tables.credible_sets),
     ("trans", steps_tables.trans),

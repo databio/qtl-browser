@@ -27,8 +27,9 @@ import pyarrow as pa
 import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
+from .adapters import topchef
+from .adapters.topchef import SPLICE_PARSE
 from .common import CHROMS, Config, connect, log, variants_sql
-from .steps_tables import SPLICE_PARSE
 
 STATS = {"e": ["gene_id", "position"], "s": ["gene_id", "phenotype_id", "position"]}
 FLOATS = ("af", "slope", "slope_se", "pval_nominal", "pip")
@@ -108,8 +109,7 @@ def _one(args) -> tuple[str, str, int, int]:
     con.execute("SET preserve_insertion_order = true")
     genes = cfg.tables / "genes.parquet"
     vpos = variants_sql(cfg, chrom)
-    susie = cfg.raw_dir("cis_eQTL_SuSiE" if qtl_type == "e" else "cis_sQTL_SuSiE") / (
-        f"topchef_{chrom}_MaxPC70.SuSiE_summary.parquet" if qtl_type == "e" else f"topchefSplice_{chrom}_MaxPC25.SuSiE_summary.parquet")
+    susie = topchef.source_file(cfg, qtl_type, "susie", chrom)
     con.execute(f"CREATE TABLE v AS SELECT position, A1, A2, rs_number FROM {vpos}")
     # a variant can belong to two credible sets of one phenotype: keep the higher-PIP membership
     con.execute(f"""CREATE TABLE s AS
@@ -158,13 +158,10 @@ def _one(args) -> tuple[str, str, int, int]:
 
 def run(cfg: Config, force: bool = False) -> None:
     jobs = []
-    for qtl_type, src_dir, out_dir, pat in [
-        ("e", "cis_eQTL_nominal", "cis_eqtl_nominal", "topchef_{c}_MaxPC70.cis_qtl_pairs.{c}.parquet"),
-        ("s", "cis_sQTL_nominal", "cis_sqtl_nominal", "topchefSplice_{c}_MaxPC25.cis_qtl_pairs.{c}.parquet"),
-    ]:
+    for qtl_type, out_dir in [("e", "cis_eqtl_nominal"), ("s", "cis_sqtl_nominal")]:
         for c in CHROMS:
-            src = cfg.raw_dir(src_dir) / pat.format(c=c)
-            out = cfg.derived / out_dir / f"chr={c}"          # bin=<n>/data.parquet files go inside
+            src = topchef.source_file(cfg, qtl_type, "nominal", c)
+            out = cfg.tables / out_dir / f"chr={c}"           # bin=<n>/data.parquet files go inside
             if not src.exists():
                 log(f"nominal: missing raw file {src.name}, skipping")
                 continue

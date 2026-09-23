@@ -6,7 +6,7 @@ import subprocess
 
 import yaml
 
-from . import packfmt, steps_pack, steps_pack_trans, steps_pack_variant
+from . import packfmt_v0 as packfmt, steps_pack, steps_pack_trans, steps_pack_variant, steps_refget
 from .common import (NAME, PACKS_METADATA_KEY, ROOT, SEARCH_INDEX_NAME, Config, addressed_files, connect,
                      digests, log, search_index_packs, search_index_path, variants_sql)
 
@@ -170,6 +170,10 @@ def manifest(cfg: Config) -> None:
     pack_bytes["gwas_index"] = gwas_index.stat().st_size
     immutable = _immutable_block(cfg)
     _check_index_packs(cfg, immutable)
+    reference = steps_refget.manifest_block(cfg)
+    unnamed = sorted({c for kind in pack_files.values() for c in kind} - set(reference["sequences"]))
+    if unnamed:
+        raise ValueError(f"manifest: packs name {unnamed}, which reference.chromosomes does not; add them and re-run refget_store")
     packs = {
         "format": "qtlb", "version": 0,
         "dof": {"eqtl": int(cfg["packs"]["dof"]["eqtl"]), "sqtl": int(cfg["packs"]["dof"]["sqtl"])},
@@ -199,6 +203,8 @@ def manifest(cfg: Config) -> None:
         "counts": counts,
         "sources": {s["name"]: {"version": s.get("version"), "description": s.get("description")} for s in sources["sources"]},
         "packs": packs,
+        # the refget anchor: which sequences the positions sit on, and how well the alleles agree with them
+        "reference": reference,
         # every content-addressed file: what upload.py sends, and what it replaces in the bucket
         "immutable": immutable,
         # SPEC section 9: how far a value the browser shows can sit from the source value
@@ -418,6 +424,11 @@ def validate(cfg: Config) -> None:
     # 8.7 content addressing (SPEC section 3): every browser-read file is named by its own bytes,
     #     the manifest agrees with what is on disk, and no unhashed copy is left behind
     _validate_immutable(cfg, check)
+
+    # 8.8 refget anchor: the manifest names the store's sequences, and the alleles agree with them
+    mpath = cfg.derived / "manifest.json"
+    if mpath.exists():
+        steps_refget.validate(cfg, json.loads(mpath.read_text()), check)
 
     # 9. binary packs on every chromosome (SPEC.md): structure, round trip, reference files
     steps_pack.validate(cfg, con, check)

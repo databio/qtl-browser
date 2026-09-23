@@ -1,14 +1,12 @@
-"""Steps 5-6, 8-9: small tables (genes, splice_phenotypes, credible_sets), trans pairs, coloc stub."""
-from .common import Config, connect, log, write_parquet
+"""Steps 5-6, 8-9: small tables (genes, splice_phenotypes, credible_sets), trans pairs, coloc stub.
 
-SPLICE_PARSE = """
-    split_part(phenotype_id, ':', 1)                          AS s_chr,
-    split_part(phenotype_id, ':', 2)::INTEGER                 AS intron_start,
-    split_part(phenotype_id, ':', 3)::INTEGER                 AS intron_end,
-    split_part(phenotype_id, ':', 4)                          AS cluster_id,
-    right(split_part(phenotype_id, ':', 4), 1)                AS strand,
-    split_part(split_part(phenotype_id, ':', 5), '.', 1)      AS gene_id
+These are the v0 tables, not the contract tables; `adapters/topchef.py` writes those. What the two
+share is where the rows come from and how a leafcutter phenotype id is spelled, so both read the
+archive names and `SPLICE_PARSE` from the adapter.
 """
+from .adapters import topchef
+from .adapters.topchef import SPLICE_PARSE
+from .common import Config, connect, log, write_parquet
 
 
 def _setup(cfg: Config):
@@ -39,18 +37,18 @@ def permutation_tables(cfg: Config) -> None:
     con = _setup(cfg)
     sig_col, thr = cfg["sig_column"], cfg["sig_threshold"]
 
-    con.execute(f"CREATE TABLE sperm AS SELECT *, {SPLICE_PARSE} FROM read_parquet('{cfg.raw_glob('cis_sQTL_permutation')}')")
+    con.execute(f"CREATE TABLE sperm AS SELECT *, {SPLICE_PARSE} FROM read_parquet('{topchef.archive_glob(cfg, 's', 'permutation')}')")
 
     # ---- genes ----
-    con.execute(f"CREATE TABLE perm AS SELECT * FROM read_parquet('{cfg.raw_glob('cis_eQTL_permutation')}')")
+    con.execute(f"CREATE TABLE perm AS SELECT * FROM read_parquet('{topchef.archive_glob(cfg, 'e', 'permutation')}')")
     _bh(con, "perm", "pval_beta")
     con.execute(f"""
         CREATE TABLE ncs AS SELECT phenotype_id, count(DISTINCT cs_id) AS n_credible_sets
-        FROM read_parquet('{cfg.raw_glob('cis_eQTL_SuSiE')}') GROUP BY 1
+        FROM read_parquet('{topchef.archive_glob(cfg, 'e', 'susie')}') GROUP BY 1
     """)
     con.execute(f"""
         CREATE TABLE ntrans AS SELECT phenotype_id, count(*) AS n_trans_pairs
-        FROM read_parquet('{cfg.raw_glob('trans_eQTL')}') GROUP BY 1
+        FROM read_parquet('{topchef.archive_glob(cfg, 'e', 'trans')}') GROUP BY 1
     """)
     genes = con.execute(f"""
         SELECT a.gene_id, a.gene_id_version, a.symbol, a.chr, a.start, a.end, a.strand, a.tss, a.biotype,
@@ -85,7 +83,7 @@ def permutation_tables(cfg: Config) -> None:
     _bh(con, "sperm", "pval_beta")
     con.execute(f"""
         CREATE TABLE sncs AS SELECT phenotype_id, count(DISTINCT cs_id) AS n_credible_sets
-        FROM read_parquet('{cfg.raw_glob('cis_sQTL_SuSiE')}') GROUP BY 1
+        FROM read_parquet('{topchef.archive_glob(cfg, 's', 'susie')}') GROUP BY 1
     """)
     sp = con.execute(f"""
         SELECT p.phenotype_id, p.gene_id, a.symbol, p.chr, p.intron_start, p.intron_end, p.cluster_id, p.strand, a.tss,
@@ -111,11 +109,11 @@ def credible_sets(cfg: Config) -> None:
     t = con.execute(f"""
         WITH e AS (
             SELECT 'e' AS qtl_type, phenotype_id, phenotype_id AS gene_id, chr, position, A1, A2, af, cs_id::TINYINT AS cs_id, pip
-            FROM read_parquet('{cfg.raw_glob('cis_eQTL_SuSiE')}')
+            FROM read_parquet('{topchef.archive_glob(cfg, 'e', 'susie')}')
         ), s AS (
             SELECT 's' AS qtl_type, phenotype_id, split_part(split_part(phenotype_id, ':', 5), '.', 1) AS gene_id,
                    chr, position, A1, A2, af, cs_id::TINYINT AS cs_id, pip
-            FROM read_parquet('{cfg.raw_glob('cis_sQTL_SuSiE')}')
+            FROM read_parquet('{topchef.archive_glob(cfg, 's', 'susie')}')
         ), u AS (SELECT * FROM e UNION ALL SELECT * FROM s)
         SELECT u.qtl_type, u.phenotype_id, u.gene_id, a.symbol, u.chr, a.tss, u.position, u.A1, u.A2, v.rsid,
                u.af::FLOAT AS af, u.cs_id, u.pip::FLOAT AS pip
@@ -133,11 +131,11 @@ def trans(cfg: Config) -> None:
         CREATE TABLE tp AS
         WITH e AS (
             SELECT 'e' AS qtl_type, phenotype_id, phenotype_id AS gene_id, variant_id, pval, b, b_se, r2, af
-            FROM read_parquet('{cfg.raw_glob('trans_eQTL')}')
+            FROM read_parquet('{topchef.archive_glob(cfg, 'e', 'trans')}')
         ), s AS (
             SELECT 's' AS qtl_type, phenotype_id, split_part(split_part(phenotype_id, ':', 5), '.', 1) AS gene_id,
                    variant_id, pval, b, b_se, r2, af
-            FROM read_parquet('{cfg.raw_glob('trans_sQTL')}')
+            FROM read_parquet('{topchef.archive_glob(cfg, 's', 'trans')}')
         ), u AS (SELECT * FROM e UNION ALL SELECT * FROM s),
         p AS (SELECT chr, position, arg_min(rsid, rs_number) AS rsid FROM vpos GROUP BY 1, 2)
         SELECT u.qtl_type, u.phenotype_id, u.gene_id, a.symbol, a.chr AS gene_chr, a.tss AS gene_tss,

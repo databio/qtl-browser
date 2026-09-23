@@ -24,7 +24,7 @@ import pyarrow.compute as pc
 import pyarrow.parquet as pq
 from scipy.special import stdtr, stdtrit
 
-from . import packfmt as pf
+from . import packfmt_v0 as pf
 from . import packtool as pt
 from .common import Config, addressed_files
 

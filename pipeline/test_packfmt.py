@@ -15,7 +15,7 @@ import time
 import numpy as np
 import pyarrow as pa
 
-from . import packfmt as pf
+from . import packfmt_v0 as pf
 from .common import variants_sql
 
 CASES = []

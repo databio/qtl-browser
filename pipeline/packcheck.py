@@ -33,7 +33,7 @@ import pyarrow.parquet as pq
 import yaml
 from scipy.special import stdtr, stdtrit
 
-from . import packfmt, steps_pack
+from . import packfmt_v0 as packfmt, steps_pack
 from .common import CHROMS, ROOT, Config, connect, die, log, phenotype_batches, register_search_index, variants_path, variants_sql
 
 TYPES = {
@@ -119,10 +119,10 @@ def resolve_source(cfg: Config, t: str, chrom: str, source: str) -> tuple[str, s
         return "raw", str(raw), pq.read_metadata(raw).num_rows, raw.stat().st_size
     if source == "raw":
         return None
-    files = sorted((cfg.derived / T["derived"] / f"chr={chrom}").glob("bin=*/data.parquet"))
+    files = sorted((cfg.tables / T["derived"] / f"chr={chrom}").glob("bin=*/data.parquet"))
     if not files:
         return None
-    return ("derived", str(cfg.derived / T["derived"] / f"chr={chrom}" / "bin=*" / "data.parquet"),
+    return ("derived", str(cfg.tables / T["derived"] / f"chr={chrom}" / "bin=*" / "data.parquet"),
             sum(pq.read_metadata(f).num_rows for f in files), sum(f.stat().st_size for f in files))
 
 
@@ -1062,7 +1062,7 @@ def cmd_report(cfg: Config, args) -> None:
                "types": {}, "cross": {}, "checks": []}
     derived_rows = {}
     for t, T in TYPES.items():
-        derived_rows[t] = {c: sum(pq.read_metadata(f).num_rows for f in (cfg.derived / T["derived"] / f"chr={c}").glob("bin=*/data.parquet"))
+        derived_rows[t] = {c: sum(pq.read_metadata(f).num_rows for f in (cfg.tables / T["derived"] / f"chr={c}").glob("bin=*/data.parquet"))
                            for c in CHROMS}
     for t, T in TYPES.items():
         rs = runs[t]
@@ -1111,7 +1111,9 @@ def cmd_report(cfg: Config, args) -> None:
                             "stream": st, "distributions": dist,
                             "dof": (dof or {}).get("types", {}).get(name), "config_dof": cfg["packs"]["dof"][name],
                             "rows_checked": sum(r["rows"]["joined"] for r in rs.values()),
-                            "manifest_rows": manifest["tables"][T["derived"]]["rows"],
+                            # 9cde62f dropped the manifest's `tables` block with the parquet tables it
+                            # described; the build's own row tally now lives with the pack it wrote
+                            "manifest_rows": manifest["packs"]["counts"][name]["rows"],
                             "seconds": sum(r["seconds"] for r in rs.values())}
     if cross:
         keys = ["both", "differ", "af_differ", "ma_samples_differ", "ma_count_differ", "only_eqtl", "only_sqtl", "neither",
@@ -1257,7 +1259,7 @@ def _report_md(R: dict) -> str:
     for name, X in R["types"].items():
         cov = X["coverage"]
         L += [f"## {name}", "",
-              f"Rows checked {X['rows_checked']:,} (manifest `{'cis_eqtl_nominal' if name == 'eqtl' else 'cis_sqtl_nominal'}` rows {X['manifest_rows']:,}); "
+              f"Rows checked {X['rows_checked']:,} (manifest `packs.counts.{name}.rows` {X['manifest_rows']:,}); "
               f"chromosomes {len(cov['chroms'])}, raw {len(cov['sources']['raw'])}, derived {len(cov['sources']['derived'])}"
               + (f", missing {cov['missing']}" if cov["missing"] else "") + f"; {X['seconds'] / 60:.1f} worker-minutes.", ""]
         L += [_table(["chr", "source", "rows checked", "derived table rows"],

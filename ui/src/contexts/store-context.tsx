@@ -1,17 +1,18 @@
 import { createContext, useContext, useEffect, useState, type ReactNode } from 'react'
-import { getManifest, type Manifest } from '@/lib/manifest'
+import { getStoreInfo, type StoreInfo } from '@/lib/store'
 
-const Ctx = createContext<Manifest | null>(null)
+const Ctx = createContext<StoreInfo | null>(null)
 
-/** Loads the manifest once at the app root (the fetch is shared with the pack reader, see
- *  lib/manifest.ts); every page reads it through `useManifest`. Without it no page can fetch
+/** Opens the store once at the app root (store.json, the experiment, catalog and annotation
+ *  pointers, and the search index for the counts; the fetches are shared with the readers, see
+ *  lib/store.ts); every page reads it through `useStoreInfo`. Without it no page can fetch
  *  anything, so a failure is shown above the app rather than only logged. */
-export function ManifestProvider({ children }: { children: ReactNode }) {
-  const [m, setM] = useState<Manifest | null>(null)
+export function StoreProvider({ children }: { children: ReactNode }) {
+  const [m, setM] = useState<StoreInfo | null>(null)
   const [error, setError] = useState<string | null>(null)
   useEffect(() => {
     let alive = true
-    getManifest()
+    getStoreInfo()
       .then(x => { if (alive) setM(x) })
       .catch((e: unknown) => {
         console.error(e)
@@ -27,5 +28,5 @@ export function ManifestProvider({ children }: { children: ReactNode }) {
   )
 }
 
-/** Null until the manifest has loaded. */
-export const useManifest = () => useContext(Ctx)
+/** Null until the store has opened. */
+export const useStoreInfo = () => useContext(Ctx)

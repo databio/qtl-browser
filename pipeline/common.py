@@ -18,6 +18,27 @@ import yaml
 ROOT = Path(__file__).resolve().parents[1]
 CHROMS = [f"chr{i}" for i in range(1, 23)] + ["chrX"]
 
+# A full build is tens of GB and most of an hour, which is a bad loop to debug in: every breakage
+# costs a full re-run to find the next one. These two variables cut a smoke build down to a couple
+# of chromosomes so the whole pipeline can be exercised end to end in minutes.
+#
+#   QTLB_CHROMS=chr21,chr22 QTLB_DERIVED=/scratch/$USER/qtl-browser/derived-smoke \
+#       uv run python -m pipeline build
+#
+# QTLB_DERIVED is what keeps a smoke run from colliding with a real one: the step markers, the
+# tables and the packs all hang off `derived`, so pointing it elsewhere gives the smoke build its
+# own everything. Never run a subset build into the real derived directory.
+#
+# A subset build is for finding breakage, not for release. Two things are deliberately wrong in it:
+# `validate` compares egene and sQTL counts against `paper_counts`, which only a genome-wide build
+# can meet; and chromosome ordinals in the variant and rsID indexes are positions in CHROMS, so a
+# subset's packs are not byte-comparable to a full release.
+if os.environ.get("QTLB_CHROMS"):
+    CHROMS = [c.strip() for c in os.environ["QTLB_CHROMS"].split(",") if c.strip()]
+    unknown = [c for c in CHROMS if not re.fullmatch(r"chr(\d{1,2}|X|Y|M)", c)]
+    if unknown:
+        sys.exit(f"QTLB_CHROMS: {unknown} are not chromosome names")
+
 
 def log(msg: str) -> None:
     print(f"[{dt.datetime.now():%H:%M:%S}] {msg}", flush=True)
@@ -28,7 +49,8 @@ class Config:
         path = path or ROOT / "pipeline" / "config.yaml"
         self.cfg = yaml.safe_load(path.read_text())
         self.raw = ROOT / self.cfg["raw"]
-        self.derived = ROOT / self.cfg["derived"]
+        # QTLB_DERIVED redirects every output (see CHROMS above); absolute or relative to ROOT
+        self.derived = Path(os.environ["QTLB_DERIVED"]) if os.environ.get("QTLB_DERIVED") else ROOT / self.cfg["derived"]
         self.zenodo = self.raw / self.cfg["zenodo_dir"]
         self.gtf = self.raw / self.cfg["gencode_gtf"]
         self.dbsnp_vcf = self.raw / self.cfg["dbsnp_vcf"]
@@ -186,7 +208,7 @@ def search_index_path(cfg) -> Path:
 
 
 def read_search_index(cfg, columns: list[str] | None = None) -> pa.Table:
-    from . import packfmt
+    from . import packfmt_v0 as packfmt
     path = search_index_path(cfg)
     raw = packfmt.zstd_unframe(path.read_bytes(), None, path.name)
     t = pa.ipc.open_stream(pa.py_buffer(raw)).read_all()
@@ -197,7 +219,7 @@ def search_index_packs(cfg) -> dict[str, str]:
     """`qtl_browser.packs` from the search index's Arrow schema metadata: the logical key of every
     pack its byte offsets reach, to that file's full SHA-256 (SPEC section 3). Empty when the index
     predates the metadata."""
-    from . import packfmt
+    from . import packfmt_v0 as packfmt
     path = search_index_path(cfg)
     raw = packfmt.zstd_unframe(path.read_bytes(), None, path.name)
     md = pa.ipc.open_stream(pa.py_buffer(raw)).schema.metadata or {}

@@ -1,14 +1,14 @@
 /**
  * How much the stored per-variant values were rounded, as text. Every number comes from the
- * manifest's `precision` block (SPEC.md section 9), which `packcheck roundtrip` measured over every
- * row, so the site can never claim more accuracy than was measured.
+ * experiment's per-results-set `precision` blocks (SPEC.md sections 8 and 11), the worst-case
+ * bounds the builder computed over every block, so the site never claims more accuracy than that.
  *
- * Each error is the worse of the eQTL and sQTL packs, rounded away from zero to two significant
- * figures. About.tsx spells them all out; components/rounding-note.tsx is the one-line version
- * beside the cis table.
+ * Each error is the worse of the eQTL and sQTL results sets, rounded away from zero to two
+ * significant figures. About.tsx spells them all out; components/rounding-note.tsx is the one-line
+ * version beside the cis table. v1 records no bound on the rebuilt slope, so `slopeSe` is null.
  */
-import { useManifest } from '@/contexts/manifest-context'
-import type { Manifest, PrecisionKind } from '@/lib/manifest'
+import { useStoreInfo } from '@/contexts/store-context'
+import type { PrecisionKind, StoreInfo } from '@/lib/store'
 
 const SIG = 2
 /** The exponent of x's leading digit: 0.0016 -> -3. */
@@ -27,14 +27,14 @@ export interface RoundingFacts {
   pPct: string
   /** relative error on the standard error, in percent */
   sePct: string
-  /** slope error, in standard errors */
-  slopeSe: string
+  /** slope error, in standard errors (null: not recorded) */
+  slopeSe: string | null
   /** absolute error on allele frequency */
   af: string
 }
 
-/** Null until the manifest has loaded, or if it carries no `precision` block. */
-export function roundingFacts(m: Manifest | null | undefined): RoundingFacts | null {
+/** Null until the store has opened, or if the experiment lacks an eQTL or sQTL `precision` block. */
+export function roundingFacts(m: StoreInfo | null | undefined): RoundingFacts | null {
   const p = m?.precision
   if (!p?.eqtl || !p.sqtl) return null
   const worst = (k: keyof PrecisionKind) => Math.max(p.eqtl[k], p.sqtl[k])
@@ -44,12 +44,12 @@ export function roundingFacts(m: Manifest | null | undefined): RoundingFacts | n
     nlp: dec(nlp),
     pPct: fig((10 ** nlp - 1) * 100),
     sePct: fig(worst('slope_se_max_rel_error') * 100),
-    slopeSe: fig(worst('slope_max_error_over_se')),
+    slopeSe: null,
     af: fig(p.af_max_error),
   }
 }
 
-export const useRoundingFacts = () => roundingFacts(useManifest())
+export const useRoundingFacts = () => roundingFacts(useStoreInfo())
 
 /** The note's own sentence without the link, for a `title` attribute. */
 export const roundingText = (f: RoundingFacts) =>

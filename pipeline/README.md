@@ -17,7 +17,7 @@ uv run python -m pipeline packcheck measure --chrom chr7 chr10 chr22
 uv run python -m pipeline packcheck roundtrip [--chrom chr7 ...] [--steepest 50] [--workers 2]
 uv run python -m pipeline.packtool header | blocks | block | variants | frames | trans | gwas | gwas-index | check ...   # inspect packs, decode rows
 uv run python -m pipeline.packtool pack-variants | pack-results | pack-trans | pack-gwas ...                           # build packs from tables
-uv run python -m pipeline.test_packfmt --synthetic && uv run python -m pipeline.test_packtool          # codec and tool round-trip tests
+uv run python -m pipeline.test_packfmt --synthetic && uv run python -m pipeline.test_packtool          # v0 codec and tool round-trip tests
 uv run python -m pipeline.packtool_example                                                             # worked example on synthetic tables
 uv run python -m pipeline.figures manhattan | density 5 10 | gwas 5 | themes
 uv run python -m pipeline.upload inventory [--public] -o FILE          # R2 (config `r2:`); read-only listing, reusable as --listing
@@ -27,8 +27,81 @@ uv run python -m pipeline.upload pointer FILE | prune [--stale] [--yes] [--listi
 uv run python -m pipeline.test_upload                                  # upload.py against a fake bucket; no network
 ```
 
+## qtlb v1 store: adapters, gate, contract check, store build, benchmark
+
+The v1 path turns each study into contract tables (`CONTRACT.md`), then builds a refget-anchored
+store (`qtlstore.py`) holding one variant catalog and one results set per experiment (cis results,
+search index, paged hits, trans results, and a GWAS when the tables have one), sharing annotations.
+The v1 modules (`qtlstore`, `catalog`, `annotation`, `results`, `gwas`) use the codec
+`packfmt_v1.py` and never `packfmt_v0.py`; `verify_v0.py` and `bench_store.py` compare the two formats
+and are the only modules that import both. Every step runs on Rivanna through Slurm from the synced checkout
+(`~/scratch/qtl-browser-live`). Each adapter writes into its own `QTLB_DERIVED` tree; nothing here
+writes into the validated v0 tree (`adapter.sbatch` refuses it). Iterate with
+`QTLB_CHROMS=chr21,chr22` first.
+
+| Step | Command | Module |
+|---|---|---|
+| Adapter + TOPCHeF gate + contract check | `QTLB_DERIVED=<tree> sbatch adapter.sbatch` | `adapters/topchef.py`, `adapters/verify_topchef.py`, `adapters/contract_check.py` |
+| eQTL Catalogue adapter + contract check | `ADAPTER=eqtl_catalogue QTLB_DERIVED=<tree> sbatch adapter.sbatch` | `adapters/eqtl_catalogue.py` |
+| One step alone | `STEPS=gate` or `STEPS=contract` (or `"adapter contract"`) with the same variables | |
+| One TOPCHeF table | `STEPS=adapter QTLB_DERIVED=<tree> sbatch adapter.sbatch --step phenotypes --step trans` (trans needs the trans-only phenotypes, so both) | `adapters/topchef.py` |
+| DCM GWAS into the TOPCHeF tables | `ADAPTER=dcm_gwas STEPS="adapter contract" QTLB_DERIVED=<tree> sbatch adapter.sbatch` | `adapters/dcm_gwas.py` |
+| Only the GWAS bin table (`gwas_bins.parquet`, v0's `gwas_dcm_bins.json` bins; seconds) | `ADAPTER=dcm_gwas STEPS="adapter contract" QTLB_DERIVED=<tree> sbatch adapter.sbatch --bins-only` | `adapters/dcm_gwas.py` |
+| Store build | `QTLB_CHROMS=all QTLB_STORE=<store> EXPERIMENTS="topchef:<tree>/_tables/topchef:gencode_v34 gtex_v8_heart_lv:<tree>/_tables/gtex_v8_heart_lv" CROSSCAT="topchef_grch38 gtex_v8_heart_lv_grch38" sbatch --time=6:00:00 --mem=64G store.sbatch` | `annotation.py`, `catalog.py`, `results.py`, `gwas.py`, `verify_v0.py` |
+| Store maintenance | `uv run python -m pipeline.qtlstore validate \| remove-experiment ID \| gc [--dry-run] \| crosscat A B --store <store>` | `qtlstore.py` |
+| Benchmark, v0 vs v1 | `QTLB_STORE=<store> sbatch bench_store.sbatch`; `EXPERIMENT=gtex_v8_heart_lv ... sbatch bench_store.sbatch --no-reads` for a study with no v0 twin | `bench_store.py` |
+
+Outside Slurm the same modules run directly, e.g.
+`uv run python -m pipeline.adapters.contract_check $QTLB_DERIVED/_tables/topchef` (prints one
+PASS/FAIL line per `CONTRACT.md` rule, exits 1 on any failure).
+
+- **Gate** (TOPCHeF only): every contract number against what v0 serves, bit for bit, slope sign
+  included. `GENES` sets the per-chromosome pack sample (default 20).
+- **Store build** (`store.sbatch`): per experiment an annotation (named in `EXPERIMENTS`, else the
+  adapter's `ingestion.json` `source.gene_annotation`, else `gencode_v34`; GTFs from
+  `ANNOTATION_GTFS`), a variant catalog `<id>_grch38` and the results (with the trans objects when
+  the tables hold `trans.parquet`, and the GWAS object when they hold `gwas.parquet`, with its bin
+  summary when they also hold `gwas_bins.parquet`); then
+  `Store.validate`, a per-experiment count of genes missing from the annotation, the cross-catalog
+  lookup check when `CROSSCAT` names two variant catalogs, and the v0 comparison for `topchef`
+  (`python -m pipeline.verify_v0`, which also compares the GWAS bin summary to v0's
+  `gwas_dcm_bins.json` field by field; `SKIP_V0=1` skips it). Each phase logs its wall time and peak RSS. `results.py` holds one chromosome's nominal rows
+  at a time as compact arrays (DuckDB join, `QTLB_DUCKDB_MEMORY`, default 12GB).
+- **Benchmark**: bytes per table type (variants, eQTL, sQTL, hits, trans, GWAS), warm random-access
+  read medians/p95 for gene and intron blocks, the gene page's trans table and GWAS window, and startup cost;
+  writes `bench_store.{json,md}` under `/scratch/ns5bc/qtl-browser/bench/`. Results are kept in the
+  `results_analysis/qtlb_format` brick under `data/`.
+
+### Experiment modularity
+
+Every object is named by its bytes, so experiments can come and go without touching each other:
+
+```bash
+uv run python -m pipeline.qtlstore remove-experiment gtex_v8_heart_lv --store <store>  # drop the pointer, rewrite store.json
+uv run python -m pipeline.qtlstore gc --store <store> [--dry-run]                      # delete objects no pointer names
+uv run python -m pipeline.qtlstore validate --store <store>
+```
+
+`remove-experiment` deletes only `experiments/<id>.json` and rewrites `store.json`; the experiment's
+variant catalog and annotation pointers stay (another experiment may use them; delete those pointer
+files by hand first if they should go too), and its objects stay until `gc`. `gc` deletes every
+`immutable/` object that no pointer file on disk names, plus leftover `*.tmp` files.
+`test_results.py::test_remove_experiment_and_gc` covers the cycle.
+
+Checked on chr21/22 scratch stores on 2026-09-24 (`store-c2122-mod`, Slurm job 20443347): build
+TOPCHeF alone (18 objects), add GTEx (31), remove GTEx (`validate` PASS), `gc` (7 GTEx experiment
+objects deleted, 28.8 MB; the GTEx variant catalog and annotation pointers stay and keep theirs),
+`validate` PASS again, and every TOPCHeF object (its experiment, variant catalog and annotation) has
+the same SHA-256 after each step. A second `gc` deletes nothing.
+
 Paths, the significance rule, window sizes, worker counts, and the paper's reference counts
 live in `config.yaml`. Nothing is hard-coded in the steps.
+
+The `reference:` block in `config.yaml` names the reference FASTA, the local refgetstore, and
+`reference.collection`, the seqcol digest that pins the assembly the positions sit on.
+`refget_store` needs the `gtars` package, which `uv sync` installs. On a machine with no store yet
+it builds one from the FASTA and prints the collection digest to paste into `reference.collection`;
+after that the digest is required to match.
 
 ## Steps
 
@@ -38,6 +111,8 @@ live in `config.yaml`. Nothing is hard-coded in the steps.
 | gtf | `steps_gtf` | GENCODE v34 GTF | `_tables/gene_annotation.parquet`, `_tables/exons.parquet` (sorted by gene, small row groups) |
 | variants_collect | `steps_variants` | every cis file, then both trans files | `_tmp/variants_raw.parquet`: distinct (chr, position, A1, A2) with `in_cis`. 8.87M cis variants plus 343k positions seen only in the genome-wide trans scan; trans_eQTL has no allele columns, so its positions get null alleles unless trans_sQTL has them |
 | variants_rsid | `steps_variants` | dbSNP b157 VCF via `bcftools query -T` on those positions | `_tables/variants.parquet`, sorted by (chr, position, A1, A2), with an exact / position / none match flag (allele-less rows can only match by position) and `rsid` always `'rs' || rs_number` (`arg_min`, not two separate `min`s). The two `_tmp/dbsnp_*` caches are rebuilt when older than `variants_raw.parquet` |
+| refget_store | `steps_refget` | the reference FASTA named by `reference.fasta`, or an existing refgetstore | `_tables/reference.json`: the seqcol collection digest, its three attribute digests, and every chromosome's sha512t24u sequence digest, length and md5. Builds the local store from the FASTA when there is none, and fails when a name in `reference.chromosomes` is not in the collection |
+| variants_refcheck | `steps_refget` | `_tables/variants.parquet`, `_tables/reference.json`, the refgetstore | `_tables/refcheck/<chr>.parquet`, one row per variant saying which allele the reference carries (`a1`, `a2`, `both`, `neither`, `unchecked`), and `_checks/refcheck/summary.json`, the counts per class and chromosome split cis against trans-only, with strand-flip and on-N diagnostics and example mismatches (EVIDENCE.md A.10). Fails when the cis match fraction is below `reference.allele_check.min_match_fraction` |
 | permutation_tables | `steps_tables` | cis permutation files, SuSiE, trans, annotation | `_tables/genes.parquet`, `_tables/splice_phenotypes.parquet` |
 | credible_sets | `steps_tables` | SuSiE files | `_tables/credible_sets.parquet` |
 | nominal | `steps_nominal` | cis nominal files, one process per chromosome | `_tables/cis_eqtl_nominal/chr=*/bin=*/`, `_tables/cis_sqtl_nominal/chr=*/bin=*/`: one file per `nominal_bin_genes` tested genes (by TSS rank, the `bin` column of `genes`), one row group per gene, delta/byte-stream-split encodings, rsIDs as `rs_number`. With `sqtl_nominal: significant` the sQTL side keeps only introns flagged `is_sqtl` |
@@ -52,7 +127,7 @@ live in `config.yaml`. Nothing is hard-coded in the steps.
 | coloc_stub | `steps_tables` | `coloc_genes` in the config, genes | `coloc_loci.json`, the landing track's 25 loci (one plain fetch, no engine) |
 | gwas_bins | `steps_gwas` | the Jurgens 2024 file named by `dcm_gwas` in the config (biobanks-only; the CVDKP zip has five) | `gwas_dcm_bins.json`: strongest p per 5 Mb window, columnar, one plain fetch |
 | pack_gwas | `steps_gwas` | same | `immutable/gwas.<chr>.<sha16>.qbg` (chr1-22) and `immutable/gwas_index.<sha16>.bin` (SPEC.md section 11): every row, lossless at the source's 4 decimals and 4 significant digits, in zstd blocks of `packs.gwas_block_rows` rows, and the startup index that turns a gene's `[w_lo, w_hi]` into one byte range. One DuckDB read of the TSV (`packs.gwas_duckdb_*`); fails on any row that breaks the lossless rules. Also `gwas_dcm.json` (file, cases, controls, variants) for the manifest and `_tmp/pack_pointers/gwas.json` (counts, sizes, window byte ranges). Reads `search_index` for the window sizes, so it runs after that step |
-| manifest | `steps_finish` | everything above | `manifest.json`: counts, source versions, the `packs` block (the published path, bytes and counts of every pack kind, the search index, the GWAS index, the rsID index, the variant index, dof), the `immutable` block (per file: logical key, bytes, sha256, md5, and the old bucket prefixes it `replaces`), and the `precision` block of rounding maximums. Refuses to write when `search_index` was built from packs that have since been rebuilt. No `tables` block: every table is a build intermediate |
+| manifest | `steps_finish` | everything above | `manifest.json`: counts, source versions, the `packs` block (the published path, bytes and counts of every pack kind, the search index, the GWAS index, the rsID index, the variant index, dof), the `immutable` block (per file: logical key, bytes, sha256, md5, and the old bucket prefixes it `replaces`), the `precision` block of rounding maximums, and the `reference` block (assembly, collection digest, per-chromosome sequence digests, allele-check counts) from the two files above. Refuses to write when `search_index` was built from packs that have since been rebuilt. No `tables` block: every table is a build intermediate |
 
 Underscore directories in `data/derived/` are never uploaded: `_tables`, `_tmp`, `_full`, `_old`,
 `_checks`, `_deploy` (rollback material) and `_retired` (local copies of pruned bucket paths).
@@ -98,13 +173,13 @@ Two whole-build checks close it out: every stored rsID text equals `'rs' || rs_n
 variant (the text columns, not just the variant table), and no `.parquet` exists anywhere in
 `data/derived/` outside an `_*` folder.
 
-`packcheck` checks, genome-wide, the facts the binary pack format in `SPEC.md` rests on: every
+`packcheck` checks, genome-wide, the facts the v0 binary pack format rests on: every
 phenotype's tested variants are one contiguous run of the chromosome's cis variant list; `af`,
 `ma_samples`, and `ma_count` never differ for a variant, within or across QTL types; one Student-t
 degrees-of-freedom value per type rebuilds `slope_se` from `slope` and `pval_nominal`; and the window
-start (`position - tss_distance`) is constant per phenotype. `roundtrip` (check 6 of SPEC Appendix
+start (`position - tss_distance`) is constant per phenotype. `roundtrip` (check 6 of EVIDENCE.md
 A.1) streams the raw nominal rows through the 16-bit codes and back, and checks `slope_se` and the
-derived slope against SPEC's per-row error bound; it is cheap (every row genome-wide in minutes, about 1 GB). `measure`
+derived slope against the v0 SPEC's per-row error bound; it is cheap (every row genome-wide in minutes, about 1 GB). `measure`
 settles the variant page size and codec. It reads the extracted Zenodo nominal files (falling back to the derived tables when a raw
 file is missing, which for sQTL means significant introns only) and writes `report.md`,
 `report.json`, `measure.md`, `roundtrip.md`, `roundtrip_<scope>.json`, `se_reference.json`, and
@@ -115,12 +190,15 @@ update `packs:` in `config.yaml` when the data disagree with it.
 
 ## Pack tooling
 
-`../PACKS.md` is the plain-language overview of the pack files (why, which file answers which
-question, glossary); `../SPEC.md` is the byte layout. The code:
+This section is the v0 pack tooling. `PACKS.md` is the plain-language overview of the v0 pack files
+(why, which file answers which question, glossary). It and the v0 byte layout live in the `analysis`
+repo at `qtlb-format/docs/` (v0 `SPEC.md` in git history at commit `fe5a606`; its measurements are
+now `EVIDENCE.md`), and every "SPEC section" cited in this file's v0 steps means that v0 document.
+The v1 store format is `SPEC.md` at this repo's root. The code here is the Python side of v0:
 
-- `packfmt.py`: the reference codec. Every pack byte is encoded and decoded here; the build steps
+- `packfmt_v0.py`: the v0 reference codec. Every v0 pack byte is encoded and decoded here; the build steps
   import its encoders and `validate` compares against its error bounds. No config, no file paths.
-- `packtool.py`: a CLI and API over `packfmt` for anyone outside the pipeline. `header`, `blocks`,
+- `packtool.py`: a CLI and API over `packfmt_v0` for anyone outside the pipeline. `header`, `blocks`,
   `block` (a gene's or an intron's rows as the SPEC section 8 table, its details, or its
   credible sets), `variants` (a run, a byte range, or a section as rows), `frames` and `trans` (a
   gene's trans frame as rows, through `search_index`), `gwas` (a window through the index),
@@ -180,9 +258,37 @@ produces wrong pages, so `validate` checks every one of them.
   one gene touch sixteen row groups. Both were fixed by sorting on the filtered column.
 - Concurrent DuckDB workers must not share a `temp_directory`; `connect()` takes one per worker.
 
+## Smoke builds
+
+A genome-wide build is tens of GB and the better part of an hour, which is a poor loop for finding
+breakage: each failure costs a full re-run to reach the next one. Two environment variables cut it
+to a couple of chromosomes:
+
+```bash
+QTLB_CHROMS=chr21,chr22 \
+QTLB_DERIVED=/scratch/$USER/qtl-browser/derived-smoke \
+  uv run python -m pipeline build
+```
+
+`QTLB_CHROMS` replaces the chromosome list every step, `packcheck` and `validate` iterate over.
+`QTLB_DERIVED` moves the whole output tree, step markers included, so a smoke run cannot collide
+with a real one. **Always set both**: a subset build into the real `data/derived/` would overwrite
+its step markers and packs. Both are unset by default and change nothing when absent.
+
+The raw inputs are shared and untouched, and `extract` skips archives it has already unpacked, so a
+smoke build costs no extra download or extraction. `variants_rsid` switches from `bcftools -T` to
+`-R` automatically when the chromosome list is a subset, which is the difference between nine
+minutes and seconds.
+
+A subset build finds breakage; it does not produce a release. Two things are deliberately wrong in
+it: `validate` checks egene and sQTL counts against `paper_counts`, which only a genome-wide build
+can satisfy, and chromosome ordinals in the variant and rsID indexes are positions in the
+chromosome list, so a subset's packs are not byte-comparable to a full release.
+
 ## Conventions
 
 - `gene_id` is an unversioned ENSG; `symbol` is the GENCODE name; `chr` is `chr1`..`chrX`.
-- `A1` is the effect (minor) allele, `A2` the reference, as in the Zenodo release.
+- `A1` is the effect (minor) allele, `A2` the reference, as in the Zenodo release. Verified
+  against GRCh38: all 8,419,594 cis SNPs read A2 at their position, none read A1.
 - sQTL `phenotype_id` is the leafcutter string `chr:start:end:clu_N_strand:ENSG.v`.
 - `pval_perm < 0.05` is the significance flag; a BH `qval` on `pval_beta` is stored alongside.

@@ -10,7 +10,7 @@
     "preview": "vite preview",
     "bench": "node bench/locus-bench.mjs",
     "bench:compare": "node bench/compare.mjs",
-    "pack-check": "node scripts/pack-check.ts"
+    "store-check": "node --experimental-strip-types --no-warnings scripts/store-check.ts"
   },
   "dependencies": {
     "@duckdb/duckdb-wasm": "^1.33.1-dev57.0",

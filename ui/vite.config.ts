@@ -6,12 +6,14 @@ import { createReadStream, statSync } from 'node:fs'
 import { join, normalize } from 'node:path'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 
-const DATA_DIR = fileURLToPath(new URL('../data/derived', import.meta.url))
+/** The local qtlstore (store.json, pointers, immutable/) served at /data. `QTL_DATA_DIR` points it
+ *  at a store anywhere on disk, e.g. a copy of a Rivanna build in /tmp. */
+const DATA_DIR = process.env.QTL_DATA_DIR || fileURLToPath(new URL('../data/store', import.meta.url))
 
 /**
- * Serve ../data/derived at /data in `vite` and `vite preview`, with HTTP Range support, the
- * way R2 will serve it in production. This replaces a public/ symlink, which `vite build`
- * would copy wholesale (15 GB) into dist/.
+ * Serve DATA_DIR at /data in `vite` and `vite preview`, with HTTP Range support, the way R2 will
+ * serve it in production. This replaces a public/ symlink, which `vite build` would copy
+ * wholesale into dist/.
  */
 function serveDerivedData(): Plugin {
   const handler = (req: IncomingMessage, res: ServerResponse, next: () => void) => {

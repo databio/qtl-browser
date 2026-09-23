@@ -1006,7 +1006,7 @@ def _reject_constant(name):
 
 
 def decode_gene_block(buf: bytes, dof: int, *, kind: int = KIND_EQTL, expect_blk_len: int | None = None,
-                      expect_n_var=UNCHECKED, expect_var_start=UNCHECKED) -> dict:
+                      expect_n_var=UNCHECKED, expect_var_start=UNCHECKED, details_version: int = VERSION) -> dict:
     """Header fields, details dict, and per-row arrays: nlp_code, se_code, nlp, pval_nominal,
     slope_se (NaN for the null code), negative (the sign bit), and slope derived with
     `slope_from_se` and `dof` (NaN where p or slope_se is null, or p = 0). tss_distance needs
@@ -1018,7 +1018,9 @@ def decode_gene_block(buf: bytes, dof: int, *, kind: int = KIND_EQTL, expect_blk
 
     Expectations from `search_index` (SPEC section 7, step 3): `expect_blk_len`; `expect_n_var`
     (None means the gene is not eQTL-tested, so n_rows must be 0); `expect_var_start` (None when
-    not eQTL-tested). Raises ValueError on the first rule that fails."""
+    not eQTL-tested). `details_version` is the `v` the details JSON must carry: 0 here, 1 for the
+    qtlb v1 results objects (`pipeline/results.py`), which reuse this block layout. Raises ValueError
+    on the first rule that fails."""
     if kind not in RESULT_KINDS:
         raise ValueError(f"block: kind {kind} is not a results kind")
     buf = bytes(buf)
@@ -1099,8 +1101,8 @@ def decode_gene_block(buf: bytes, dof: int, *, kind: int = KIND_EQTL, expect_blk
             details = json.loads(dj.decode("utf-8"), parse_constant=_reject_constant)
         except (UnicodeDecodeError, json.JSONDecodeError) as e:
             raise ValueError(f"block details: {e}") from None
-        if not isinstance(details, dict) or details.get("v") != VERSION:
-            raise ValueError(f"block details: not an object with v = {VERSION}")
+        if not isinstance(details, dict) or details.get("v") != details_version:
+            raise ValueError(f"block details: not an object with v = {details_version}")
 
     nlp = dequantize_nlp(nlp_q, nlp_max)
     pval = p_from_nlp(nlp)

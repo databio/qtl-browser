@@ -3,8 +3,9 @@ import { Page } from '@/components/page'
 import { PageHeader } from '@/components/page-header'
 import { KvTable } from '@/components/kv-table'
 import { PIPELINE, PREPRINT, ZENODO } from '@/lib/links'
-import { useManifest } from '@/contexts/manifest-context'
+import { useStoreInfo } from '@/contexts/store-context'
 import { roundingFacts } from '@/lib/rounding'
+import { NOT_YET } from '@/components/states'
 
 const GWAS_PAPER = 'https://doi.org/10.1038/s41588-024-01975-5'
 const CVDKP = 'https://kp4cd.org/dataset_downloads/mi'
@@ -12,10 +13,12 @@ const SEQCOL = 'https://seqcolapi.databio.org'
 const REPO = 'https://github.com/sanghoonio/qtl-browser'
 
 export default function About() {
-  const m = useManifest()
+  const m = useStoreInfo()
   const sources = m?.sources ?? {}
   const counts = m?.counts ?? {}
-  const gwas = m?.gwas_dcm ?? null
+  const g = m?.experiment.gwas?.source
+  const gwas = g?.file ? { file: g.file, n_cases: g.n_cases ?? 0, n_controls: g.n_controls ?? 0 } : null
+  const bins = m?.experiment.gwas?.bins ?? null
   const rounding = roundingFacts(m)
   const gwasSet = gwas?.file.includes('BiobanksOnly') ? 'biobank-only meta-analysis' : gwas?.file.includes('MTAG') ? 'MTAG analysis' : 'meta-analysis'
   return (
@@ -41,8 +44,8 @@ export default function About() {
               {rounding && <li><strong>Rounded values</strong>: to keep a gene page to a few small downloads, per-variant
                 statistics in the cis plots, tables, and CSV files are stored rounded. −log10 p is within {rounding.nlp} of the
                 exact value, so a p-value is off by at most {rounding.pPct}%. Standard errors are within {rounding.sePct}%.
-                Slopes are rebuilt from the rounded p-value and standard error, and are within {rounding.slopeSe} standard
-                errors of the exact slope. Allele frequencies are within {rounding.af}. Gene-level results (lead variant,
+                Slopes are rebuilt from the rounded p-value and standard error{rounding.slopeSe && <>, and are within {rounding.slopeSe} standard
+                errors of the exact slope</>}. Allele frequencies are within {rounding.af}. Gene-level results (lead variant,
                 permutation p, q-value) are exact, and the DCM GWAS values are stored as published.{' '}
                 <ExternalLink href={ZENODO}>Exact per-variant values are on Zenodo.</ExternalLink></li>}
               <li><strong>Splice phenotypes</strong>: leafcutter intron excision ratios, shown as intron coordinates and strand. Introns sharing a splice site share a cluster. Every tested intron has its permutation result and its per-variant nominal statistics.</li>
@@ -60,9 +63,10 @@ export default function About() {
               <ExternalLink href={GWAS_PAPER}>Jurgens et al. 2024</ExternalLink>
               {gwas && <> ({gwas.n_cases.toLocaleString()} cases, {gwas.n_controls.toLocaleString()} controls)</>} from the{' '}
               <ExternalLink href={CVDKP}>Cardiovascular Disease Knowledge Portal</ExternalLink>. Variants are matched on GRCh38
-              position and alleles in either orientation, and the GWAS effect is signed to the QTL effect allele. The landing
-              track shows the strongest GWAS p-value per 5 Mb window, red where the window holds a genome-wide significant
-              variant; the gene page panel plots every shared variant in the cis window.
+              position and alleles in either orientation, and the GWAS effect is signed to the QTL effect allele.{' '}
+              {bins ? <>The landing track shows the strongest GWAS p-value per {bins.bin_bp / 1e6} Mb window, red where the
+                window holds a genome-wide significant variant; the gene page panel plots every shared variant in the cis window.</>
+                : <>The gene page panel plots every shared variant in the cis window.</>}
             </p>
           </div>
 
@@ -74,15 +78,13 @@ export default function About() {
               { label: 'Significant sQTL introns', value: `${counts.sqtl_sig_phenotypes?.toLocaleString()} in ${counts.sqtl_sig_genes?.toLocaleString()} genes` },
               { label: 'Variants in cis windows', value: counts.variants_cis?.toLocaleString() },
               { label: 'Variants seen only in trans', value: (counts.variants_trans_only ?? 0).toLocaleString() },
-              { label: 'DCM GWAS variants', value: counts.gwas_variants?.toLocaleString() },
-              { label: 'trans pairs', value: counts.trans_pairs?.toLocaleString() },
+              { label: 'DCM GWAS variants', value: counts.gwas_variants?.toLocaleString() ?? NOT_YET },
+              { label: 'trans pairs', value: counts.trans_pairs?.toLocaleString() ?? NOT_YET },
             ]} />
           )}
 
-          {/* file sizes and counts stay in manifest.json next to the data; only the build date is shown */}
           <KvTable
-            title={<>Data versions{m?.built && <span className="ml-1.5 font-normal normal-case tracking-normal text-base-content/50">
-              (updated {String(m.built).slice(0, 10)})</span>}</>}
+            title="Data versions"
             rows={Object.entries(sources).map(([k, v]) => ({ label: k, value: <span><span className="font-medium text-base-content">{v.version}</span> · {v.description}</span> }))} />
 
           <div className="flex flex-wrap gap-x-4 text-sm">

@@ -5,18 +5,15 @@ import type { TrackBin, TrackLocus } from '@/components/genome-track/types'
 import { SectionPanel } from '@/components/section-panel'
 import { fetchChromSizes, type ChromSizes } from '@/lib/chrom-sizes'
 import { fmtInt, fmtP } from '@/lib/format'
-import { DATA_BASE } from '@/lib/manifest'
+import { genesIPC, getStore, gwasBins } from '@/lib/store'
+import type { GwasBin } from '@/lib/store-decode'
+import { tableFromIPC } from 'apache-arrow'
+import { COLOC_EQTL_GENES, COLOC_SQTL_GENES } from '@/lib/coloc'
+import { Unavailable } from '@/components/states'
+import { useStoreInfo } from '@/contexts/store-context'
 
-/** The pipeline's coloc_loci.json and gwas_dcm_bins.json: plain fetches, no query engine. */
+/** A coloc locus. */
 interface ColocLocus { gene_id: string; symbol: string; chr: string; tss: number; trait: 'eQTL' | 'sQTL' | 'both' }
-interface GwasBin {
-  chr: string; bin_start: number; bin_end: number; min_p: number; lead_position: number; lead_rsid: string | null
-  lead_beta: number; lead_ea: string; n_gws: number; n_variants: number
-}
-const getJSON = <T,>(name: string) => fetch(`${DATA_BASE}/${name}`).then(r => { if (!r.ok) throw new Error(`${name}: ${r.status}`); return r.json() as Promise<T> })
-/** gwas_dcm_bins.json is columnar (keys once, one array per column); turn it back into rows */
-const fromColumns = <T,>(d: { n: number; columns: Record<string, unknown[]> }): T[] =>
-  Array.from({ length: d.n }, (_, i) => Object.fromEntries(Object.entries(d.columns).map(([k, v]) => [k, v[i]])) as T)
 
 const BIN_CAP = 20   // -log10 p; BAG3 and a couple of others exceed it and are drawn clipped
 
@@ -29,9 +26,41 @@ const TRAIT_COLORS: Record<string, string> = {
 
 /**
  * The paper's DCM-colocalized loci on a static whole-genome track. Every marker is labeled;
- * clicking one opens the gene page.
+ * clicking one opens the gene page. The loci are the authors' gene list (lib/coloc.ts) placed at
+ * each gene's TSS from the store's annotation, shown when the experiment carries the DCM GWAS. The
+ * bars are the GWAS's strongest p per 5 Mb bin, from the bin summary the experiment's `gwas.bins`
+ * names (v0's `gwas_dcm_bins.json`, same bins and values): one small whole-object read.
  */
 export default function ColocLoci() {
+  const s = useStoreInfo()
+  if (s && !s.hasGwas) return (
+    <SectionPanel title="Loci colocalized with dilated cardiomyopathy risk" description="Single-locus coloc with the Jurgens et al. 2024 DCM GWAS, PP.H4 > 0.8.">
+      <Unavailable what="Colocalization and DCM GWAS data" />
+    </SectionPanel>
+  )
+  if (!s) return <div className="h-[268px]" aria-busy="true" />
+  return <ColocTrack />
+}
+
+/** The coloc genes at their annotated TSS, on the store's chromosomes (plain JS over the gene table
+ *  the app already fetched at boot; no query engine needed). */
+async function colocLoci(): Promise<ColocLocus[]> {
+  const [s, ipc] = await Promise.all([getStore(), genesIPC()])
+  const t = tableFromIPC(ipc)
+  const name = t.getChild('name')!, id = t.getChild('gene_id')!, chr = t.getChild('chr')!, tss = t.getChild('tss')!
+  const e = new Set(COLOC_EQTL_GENES), q = new Set(COLOC_SQTL_GENES)
+  const out: ColocLocus[] = []
+  for (let i = 0; i < t.numRows; i++) {
+    const sym = name.get(i) as string | null
+    if (!sym || !(e.has(sym) || q.has(sym)) || !s.chroms.has(chr.get(i))) continue
+    out.push({ gene_id: id.get(i), symbol: sym, chr: chr.get(i), tss: Number(tss.get(i)),
+      trait: e.has(sym) && q.has(sym) ? 'both' : q.has(sym) ? 'sQTL' : 'eQTL' })
+  }
+  return out
+}
+
+/** The track itself. */
+function ColocTrack() {
   const [chrom, setChrom] = useState<ChromSizes | null>(null)
   const [chromError, setChromError] = useState<string | null>(null)
   const [hits, setHits] = useState<ColocLocus[] | null>(null)
@@ -46,8 +75,8 @@ export default function ColocLoci() {
       .then(c => { const keep = c.names.map((n, i) => [n, c.lengths[i]!] as const).filter(([n]) => n !== 'chrX' && n !== 'chrY')
         setChrom({ names: keep.map(k => k[0]), lengths: keep.map(k => k[1]) }) })
       .catch((e: Error) => setChromError(e.message))
-    getJSON<ColocLocus[]>('coloc_loci.json').then(setHits).catch(() => setHits([]))
-    getJSON<{ n: number; columns: Record<string, unknown[]> }>('gwas_dcm_bins.json').then(d => setGwas(fromColumns<GwasBin>(d))).catch(() => setGwas([]))
+    colocLoci().then(setHits).catch(e => { console.error(e); setHits([]) })
+    gwasBins().then(b => setGwas(b ?? [])).catch(e => { console.error(e); setGwas([]) })
   }, [])
 
   const bins: TrackBin[] = useMemo(() => (gwas ?? []).map(b => ({

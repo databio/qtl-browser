@@ -7,28 +7,31 @@ import { SectionPanel } from '@/components/section-panel'
 import { KvTable } from '@/components/kv-table'
 import { Tooltip } from '@/components/tooltip'
 import { Segmented } from '@/components/segmented'
-import { DetailSkeleton, Empty, TableSkeleton, TabSkeleton } from '@/components/states'
+import { DetailSkeleton, Empty, TableSkeleton, TabSkeleton, Unavailable } from '@/components/states'
 import CredibleSetTable from '@/components/CredibleSetTable'
 import CisTable from '@/components/CisTable'
 import TransTable from '@/components/TransTable'
 import LocusPlot, { LocusLegend } from '@/components/LocusPlot'
 import { COLOC_EQTL_GENES, COLOC_SQTL_GENES } from '@/lib/coloc'
 import { ensemblGene, geneCards, gtexGene, openTargetsGene, ucsc } from '@/lib/links'
-import { useManifest } from '@/contexts/manifest-context'
+import { useStoreInfo } from '@/contexts/store-context'
 import { CopyButton } from '@/components/copy-button'
 import { fmtBp, fmtInt, fmtNum, fmtP, fmtPhenotype, fmtSlopeSE } from '@/lib/format'
-import { dropTable } from '@/lib/db'
 import { resolveGene, type GeneDetail, type SplicePhenotype,
   type CredibleSetRow, type Gene as GeneRow, type SearchHit } from '@/lib/queries'
-import { loadGene, type GenePack } from '@/lib/pack'
-import { geneTransTable } from '@/lib/trans-pack'
+import { loadGene, type GenePack } from '@/lib/gene'
+import { geneTransTable } from '@/lib/trans'
+import { getStore } from '@/lib/store'
+
+const getStoreHasTrans = () => getStore().then(s => s.hasTrans)
+import { dropTable } from '@/lib/db'
 
 type Tab = 'eqtl' | 'sqtl'
 
 /** The intron a gene's sQTL tab opens on: its first significant intron, else the one with the smallest permutation p. */
 function defaultIntron(phens: SplicePhenotype[]): SplicePhenotype | null {
   return phens.find(p => p.is_sqtl)
-    ?? phens.reduce<SplicePhenotype | null>((best, p) => (p.pval_perm != null && (best === null || p.pval_perm < best.pval_perm) ? p : best), null)
+    ?? phens.reduce<SplicePhenotype | null>((best, p) => (p.pval_perm != null && (best === null || p.pval_perm < (best.pval_perm ?? Infinity)) ? p : best), null)
     ?? phens[0] ?? null
 }
 
@@ -38,13 +41,12 @@ export default function Gene() {
   const [hit, setHit] = useState<SearchHit | null | undefined>(undefined)
   // a gene tested for sQTL but not eQTL opens on its sQTL tab; any other tab value (old
   // `?tab=trans` links) falls back to eQTL
-  const tab: Tab = params.get('tab') === 'sqtl' ? 'sqtl' : params.get('tab') === 'eqtl' ? 'eqtl' : (hit && !hit.tested && hit.blk_off != null ? 'sqtl' : 'eqtl')
+  const tab: Tab = params.get('tab') === 'sqtl' ? 'sqtl' : params.get('tab') === 'eqtl' ? 'eqtl' : (hit && !hit.tested && hit.has_results ? 'sqtl' : 'eqtl')
   const [gp, setGp] = useState<GenePack | null>(null)
   const [detail, setDetail] = useState<GeneDetail | null>(null)
-  // the gene's trans rows as an in-memory table, read from its trans pack frame once per gene
-  // alongside the other pack reads and dropped when the gene changes; both tabs' trans tables page off it
+  // the gene's trans rows as an in-memory table, read once per gene alongside the other requests
+  // and dropped when the gene changes; both tabs' trans tables page off it
   const [transTable, setTransTable] = useState<string | null>(null)
-
   useEffect(() => {
     let alive = true
     let table: string | null = null
@@ -52,29 +54,24 @@ export default function Gene() {
     resolveGene(id).then(async h => {
       if (!alive) return
       setHit(h)
-      if (h?.blk_off == null) return
+      if (!h?.has_results) return
       performance.mark('gene:hit', { detail: h.gene_id })
-      // the eQTL block, variants range, and GWAS window requests leave together (or come from the
-      // cache), and the trans frame request leaves in the same tick
+      // the eQTL block and variants range requests leave together (or come from the cache)
       const pack = loadGene(h)
-      const trans = geneTransTable(h)
       setGp(pack)
       const tabParam = new URLSearchParams(window.location.search).get('tab')
-      const sqtlFirst = tabParam === 'sqtl' || (tabParam !== 'eqtl' && !h.tested)
+      // a page opening on its sQTL tab sends the introns' span at once
+      if (tabParam === 'sqtl' || (tabParam !== 'eqtl' && !h.tested)) pack.splice().catch(() => {})
       pack.detail
         .then(d => {
           if (!alive) return
-          // a page opening on its sQTL tab sends the default intron's block as soon as the details arrive
-          const first = defaultIntron(d.splice)
-          if (sqtlFirst && first) pack.intron(first.phenotype_id).catch(() => {})
           setDetail(d)
           performance.mark('gene:detail', { detail: h.gene_id })
         })
         .catch(e => console.error(e))
+      if (!(await getStoreHasTrans())) return
       try {
-        // the trans frame is a plain fetch decoded on the main thread; only its insert uses the
-        // DuckDB worker, which runs one request at a time alongside the GWAS and locus inserts
-        const t = await trans
+        const t = await geneTransTable(h)
         if (!alive) { dropTable(t); return }
         table = t
         setTransTable(t)
@@ -103,12 +100,12 @@ export default function Gene() {
           {hit.n_sqtl_sig > 0 && <Chip cls="badge-secondary" tip="Introns with a significant cis-sQTL (permutation p < 0.05)">{hit.n_sqtl_sig} sQTL intron{hit.n_sqtl_sig > 1 ? 's' : ''}</Chip>}
           {COLOC_EQTL_GENES.includes(sym) && <Chip cls="badge-accent" tip="eQTL colocalizes with the Jurgens et al. 2024 DCM GWAS (coloc PP.H4 > 0.8)">DCM coloc · eQTL</Chip>}
           {COLOC_SQTL_GENES.includes(sym) && <Chip cls="badge-accent badge-outline" tip="sQTL colocalizes with the Jurgens et al. 2024 DCM GWAS (coloc PP.H4 > 0.8)">DCM coloc · sQTL</Chip>}
-          {hit.blk_off == null && <Chip cls="badge-ghost" tip="Filtered out before QTL mapping (expression or mappability)">not tested</Chip>}
-          {hit.blk_off != null && !hit.tested && <Chip cls="badge-ghost" tip="Tested for splicing QTL only; filtered out of the expression analysis">no eQTL test</Chip>}
+          {!hit.has_results && <Chip cls="badge-ghost" tip="Filtered out before QTL mapping (expression or mappability)">not tested</Chip>}
+          {hit.has_results && !hit.tested && <Chip cls="badge-ghost" tip="Tested for splicing QTL only; filtered out of the expression analysis">no eQTL test</Chip>}
         </span>}
-        actions={hit.blk_off != null ? <Segmented nav value={tab} onChange={t => setParams({ tab: t })} options={tabs} /> : undefined}
+        actions={hit.has_results ? <Segmented nav value={tab} onChange={t => setParams({ tab: t })} options={tabs} /> : undefined}
       />
-      {hit.blk_off == null ? (
+      {!hit.has_results ? (
         <Empty label={`${sym} is annotated in GENCODE v34 but was not tested for QTL (filtered out by expression or mappability).`} />
       ) : (
         <>
@@ -147,7 +144,7 @@ function geneRows(g: GeneRow, annotation: string | undefined) {
 }
 
 function GeneTable({ g }: { g: GeneRow }) {
-  const annotation = useManifest()?.sources.gencode?.version
+  const annotation = useStoreInfo()?.annotationVersion ?? undefined
   return <div className="mb-8 grid items-start gap-4 md:grid-cols-2"><KvTable rows={geneRows(g, annotation)} /></div>
 }
 
@@ -174,7 +171,7 @@ function EqtlTab({ hit, gp, d, transTable }: { hit: SearchHit; gp: GenePack; d: 
   const [legend, setLegend] = useState<string[] | null>(null)
   const [actions, setActions] = useState<ReactNode>(null)
   const [locus, setLocus] = useState<LocusTable>(NO_TABLE)
-  const annotation = useManifest()?.sources.gencode?.version
+  const annotation = useStoreInfo()?.annotationVersion ?? undefined
   useEffect(() => { setCs(null); setNVar(null) }, [hit])
   const sym = hit.symbol ?? hit.gene_id
   if (!g.tested) return <><GeneTable g={g} /><Empty label={`${sym} was not tested for cis-eQTL (filtered out by expression or mappability); see the sQTL tab.`} /></>
@@ -217,8 +214,20 @@ function EqtlTab({ hit, gp, d, transTable }: { hit: SearchHit; gp: GenePack; d: 
   )
 }
 
-function SqtlTab({ hit, gp, d, transTable }: { hit: SearchHit; gp: GenePack; d: GeneDetail; transTable: string | null }) {
-  const phens = d.splice
+/** The sQTL tab: its intron list waits for the span of the gene's intron blocks (one request). */
+function SqtlTab(props: { hit: SearchHit; gp: GenePack; d: GeneDetail; transTable: string | null }) {
+  const [phens, setPhens] = useState<SplicePhenotype[] | null>(null)
+  useEffect(() => {
+    let alive = true
+    setPhens(null)
+    props.gp.splice().then(p => { if (alive) setPhens(p) }, e => { console.error(e); if (alive) setPhens([]) })
+    return () => { alive = false }
+  }, [props.gp])
+  if (phens === null) return <TabSkeleton kvRows={4} />
+  return <SqtlIntrons {...props} phens={phens} />
+}
+
+function SqtlIntrons({ hit, gp, d, transTable, phens }: { hit: SearchHit; gp: GenePack; d: GeneDetail; transTable: string | null; phens: SplicePhenotype[] }) {
   const [cs, setCs] = useState<CredibleSetRow[] | null>(null)
   const [selected, setSelected] = useState<string | null>(() => defaultIntron(phens)?.phenotype_id ?? null)
   // every tested intron has its sQTL rows in the pack; the list starts with the significant ones
@@ -294,10 +303,11 @@ function SqtlTab({ hit, gp, d, transTable }: { hit: SearchHit; gp: GenePack; d: 
  *  intron, since a gene's trans sQTL rows can hit different introns. */
 function TransSection({ table, qtlType, fileStem }: { table: string | null; qtlType: 'e' | 's'; fileStem: string }) {
   const what = qtlType === 'e' ? 'expression' : 'splicing'
+  const hasTrans = useStoreInfo()?.hasTrans ?? false
   return (
     <SectionPanel title="trans associations"
       description={<>Every variant outside the cis window associated with this gene's {what}{qtlType === 's' && <> <b className="font-medium text-base-content/80">(any intron)</b></>}. Click a row to open the variant.</>}>
-      <TransTable table={table} qtlType={qtlType} fileStem={fileStem} />
+      {hasTrans ? <TransTable table={table} qtlType={qtlType} fileStem={fileStem} /> : <Unavailable what={`trans ${qtlType === 'e' ? 'eQTL' : 'sQTL'} results`} />}
     </SectionPanel>
   )
 }

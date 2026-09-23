@@ -20,7 +20,7 @@ import time
 import numpy as np
 import pyarrow.parquet as pq
 
-from . import packfmt
+from . import packfmt_v0 as packfmt
 from .common import CHROMS, Config, connect, log, publish_file, read_search_index, stage, write_parquet
 
 COLUMNS = ("{'CHRBP_B37':'VARCHAR','CHRBP_B38':'VARCHAR','ID_B38':'VARCHAR','CHR':'VARCHAR','POS':'BIGINT','EA':'VARCHAR',"

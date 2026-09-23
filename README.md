@@ -16,10 +16,15 @@ name whose contents change.
 | `data/raw/` | `sources.yaml` lists every input (Zenodo QTL archives, GENCODE v34, dbSNP b157, DCM GWAS) with URLs, versions, and checksums; `download.py` fetches and verifies them. Everything else here is gitignored. |
 | `pipeline/` | Python build that turns `data/raw/` into the browser's pack files, `search_index.arrow.zst` and `manifest.json`. Every pack and index is published to `data/derived/immutable/` under its content-addressed name, and `manifest.json` is the only thing that names those files. The tables the build makes on the way stay in `data/derived/_tables/` and are never uploaded. `config.yaml` holds paths, the significance rule, window sizes, the `r2:` bucket settings, and the `replaces:` map of old bucket paths. `figures.py` makes quick-look PNGs. |
 | `ui/` | Vite + React + TypeScript app: Tailwind 4 and DaisyUI 5, DuckDB-WASM, Mosaic/vgplot plots. |
-| `PACKS.md` | Plain-language overview of the pack files: why they exist, which file answers which question, how a page reads them, the design choices, a glossary, and how to inspect or build packs with `pipeline/packtool.py`. Start here. |
-| `SPEC.md` | The `qtlb` binary pack format (v0), byte by byte: the variants file (cis and trans-only sections), the eQTL and sQTL results packs, the GWAS pack and index, the trans pack, the hits pack, the rsID and variant indexes, the `search_index` fields, and how a reader validates a range. Section 3 is the naming rule for `immutable/` and the `packs`, `immutable` and `precision` blocks of `manifest.json`. `pipeline/packfmt.py` is its Python reference codec; `python -m pipeline packcheck` holds the genome-wide evidence. |
+| `PACKS.md`* | Plain-language overview of the pack files: why they exist, which file answers which question, how a page reads them, the design choices, a glossary, and how to inspect or build packs with `pipeline/packtool.py`. Start here. |
+| `SPEC.md` | The qtlb v1 store format (the qtlstore), byte by byte: store layout and object names, the 64-byte v1 header, the variant catalog and its identity digest, the annotation object, allele orientation, the experiment's results, search index, paged hits, trans results and GWAS, what `Store.validate` checks, and store maintenance. `pipeline/qtlstore.py`, `catalog.py`, `annotation.py`, `results.py` and `gwas.py` write it, with the codec `packfmt_v1.py`; `pipeline/CONTRACT.md` is the input tables they read. |
 | `ui/bench/` | Playwright harness that loads fixed gene pages on the live site, a local preview, or a deploy rehearsal and records requests, bytes, and time until the locus plot is drawn; `results/` holds the committed baselines. The three browser smoke suites (`smoke_variant_page.mjs`, `smoke_gene_page.mjs`, `smoke_trans_tab.mjs`) live here too. |
 | `plans/` | Dated plans with decision ledgers and implementation logs. |
+
+\* `PACKS.md` and the v0 pack format are not in this repo. They live with the format's tests and
+benchmarks in the `analysis` repo at `qtlb-format/docs/`: the v0 `SPEC.md` is in its git history
+(commit `fe5a606`) and its measurements are `EVIDENCE.md`. The v0 build below (`manifest.json`,
+`packfmt_v0.py`, `packcheck`) follows v0; references to "v0 `SPEC.md`" below mean that copy.
 
 ## Setup
 
@@ -40,6 +45,12 @@ npm run bench:compare -- bench/results/baseline-live.json bench/results/<label>-
 
 `ui/.env.production` points production builds at the R2 bucket through `VITE_DATA_BASE`;
 `VITE_DATA_BASE= npm run build` (empty) makes a bundle that reads `/data` on its own origin.
+
+`uv sync` installs `gtars`, which the `refget_store` step uses to read a refgetstore. The
+`reference:` block in `pipeline/config.yaml` names the reference FASTA, the store, and
+`reference.collection`: the seqcol digest that pins which GRCh38 this release sits on. On a machine
+with no store built yet, the first `uv run python -m pipeline build --step refget_store` builds one
+from the FASTA and prints the collection digest to paste into `reference.collection`.
 
 ## Deploy
 
@@ -111,9 +122,14 @@ bundled; the app loads DuckDB-WASM's jsDelivr bundles, as drumbeat-viewer does.
   see. There is no `tables` block: every parquet table is a build intermediate. The About page shows
   the counts, source versions, build date, and rounding from it.
 - Coordinates GRCh38; genes GENCODE v34; rsIDs from dbSNP by position and alleles.
+- `manifest.json` also carries a `reference` block: the seqcol digest of the reference collection,
+  each chromosome's refget sequence digest and length, and the result of checking every variant's
+  alleles against those bases. It says which GRCh38 the positions are on, in a form another dataset
+  or a refgetstore can be matched against. It is data about the release, not part of the pack
+  format (v0 `SPEC.md` section 3; evidence in `EVIDENCE.md` A.10, analysis repo).
 - eGene / sQTL intron: permutation p < 0.05, the preprint's wording (10,220 eGenes vs the
   paper's 10,241; 13,540 sQTL introns, exact).
-- The gene page reads binary pack files (`immutable/`, format in `SPEC.md`) with plain Range
+- The gene page reads binary pack files (`immutable/`, format in v0 `SPEC.md`) with plain Range
   requests whose byte offsets come from `search_index`. A cold gene page sends 3 in parallel: the
   gene's eQTL block (gene row, exons, tested introns, eQTL rows, credible sets), its variants
   range, and its DCM GWAS window, plus one for its trans rows from the trans pack (none when the

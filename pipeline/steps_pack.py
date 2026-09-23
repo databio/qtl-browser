@@ -46,7 +46,7 @@ import pyarrow.parquet as pq
 import zstandard
 from scipy.special import stdtrit
 
-from . import packfmt
+from . import packfmt_v0 as packfmt
 from .common import (CHROMS, PACKS_METADATA_KEY, SEARCH_INDEX_EXT, Config, addressed_files, connect, log,
                      pack_file, phenotype_batches, publish_file, read_search_index, register_search_index,
                      search_index_path, stage, variants_path, variants_sql, write_parquet)

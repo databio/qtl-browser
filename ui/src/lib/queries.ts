@@ -1,18 +1,18 @@
-/** Every SQL string in one place. Table paths match data/derived/manifest.json. */
+/** Every SQL string over the boot tables (db.ts: `phenotypes`, `genes`, `search_index`) in one place. */
 import { lit, one, rows, type Row } from './db'
 
+/** One `search_index` row (db.ts): an annotated gene on a catalog chromosome, joined to its eQTL
+ *  phenotype. `tss`, bounds, symbol and biotype come from the annotation, never from the study. */
 export interface SearchHit extends Row {
   gene_id: string; symbol: string | null; chr: string; tss: number
-  tested: boolean; is_egene: boolean | null; n_sqtl_sig: number
-  start: number; end: number; strand: string; biotype: string
-  /** SPEC.md section 6: the gene's block in the eQTL pack, its eQTL run, the variants range covering
-   *  its eQTL and intron runs, and its GWAS window. `blk_off` null means the gene has no block:
-   *  it was filtered out before QTL mapping, and no page can show results for it. */
-  blk_off: number | null; blk_len: number | null; var_start: number | null; n_var: number | null
+  start: number; end: number; strand: string; biotype: string; gene_version: number | null
+  /** the gene's eQTL phenotype: its search-index `ord`, block in the results file, run, and the
+   *  catalog bytes of the pages covering the run (all null when the gene has no eQTL phenotype) */
+  ord: number | null; blk_off: number | null; blk_len: number | null; var_start: number | null; n_var: number | null
   var_off: number | null; var_len: number | null; w_lo: number | null; w_hi: number | null
-  /** SPEC.md section 6: the gene's frame in the trans pack (null when the gene has no trans rows), and
-   *  the number after the dot in its versioned id, which rebuilds sQTL phenotype ids */
-  trans_off: number | null; trans_len: number | null; gene_version: number | null
+  tested: boolean; is_egene: boolean | null; n_sqtl_sig: number; n_sqtl: number
+  /** any phenotype of the gene (eQTL or an intron) has a block: false means not tested at all */
+  has_results: boolean
 }
 
 export interface Gene extends Row {
@@ -39,11 +39,13 @@ export interface CisRow extends Row {
 export interface SplicePhenotype extends Row {
   phenotype_id: string; gene_id: string; symbol: string | null; chr: string
   intron_start: number; intron_end: number; cluster_id: string; strand: string; tss: number
-  num_var: number; lead_position: number; lead_A1: string; lead_A2: string; lead_rsid: string | null
-  lead_af: number; lead_tss_distance: number; slope: number; slope_se: number
-  pval_nominal: number; pval_perm: number; pval_beta: number; qval: number; is_sqtl: boolean
+  num_var: number; lead_position: number | null; lead_A1: string | null; lead_A2: string | null; lead_rsid: string | null
+  lead_af: number | null; lead_tss_distance: number | null; slope: number | null; slope_se: number | null
+  pval_nominal: number | null; pval_perm: number | null; pval_beta: number | null
+  /** not stored in v1 (null) */
+  qval: number | null; is_sqtl: boolean
   n_credible_sets: number
-  /** the intron's block in the sQTL pack (gene details only) */
+  /** the intron's block in the sQTL results file */
   blk_off: number; blk_len: number
 }
 
@@ -57,23 +59,23 @@ export const searchGenes = (q: string, limit = 12) =>
   rows<SearchHit>(`
     SELECT * FROM search_index
     WHERE upper(symbol) LIKE ${lit(q.toUpperCase() + '%')} OR upper(gene_id) LIKE ${lit(q.toUpperCase() + '%')}
-    ORDER BY tested DESC, is_egene DESC NULLS LAST, length(symbol), symbol LIMIT ${limit}`)
+    ORDER BY has_results DESC, tested DESC, is_egene DESC NULLS LAST, length(symbol), symbol LIMIT ${limit}`)
 
 export const resolveGene = (id: string) =>
   one<SearchHit>(`SELECT * FROM search_index WHERE gene_id = ${lit(id)} OR upper(symbol) = ${lit(id.toUpperCase())}
-                  ORDER BY tested DESC LIMIT 1`)
+                  ORDER BY has_results DESC, tested DESC LIMIT 1`)
 
 export interface Exon extends Row { start: number; end: number }
-/** Everything the gene page needs besides the locus: the genes row, the collapsed exon model, and
- *  every tested intron, from the details in the gene's eQTL block (pack.ts). */
-export interface GeneDetail { gene: Gene; exons: Exon[]; splice: SplicePhenotype[] }
+/** Everything the gene page needs besides the locus and the introns (gene.ts): the genes row
+ *  (annotation plus the eQTL block's details and lead row) and the collapsed exon model. */
+export interface GeneDetail { gene: Gene; exons: Exon[] }
 
 // ---- paged tables over materialized windows -------------------------------------------------
-// The gene page holds two in-memory tables per gene, both from packs: the cis window that the
-// locus plot draws from (pack.ts `locusTable`) and the gene's trans rows (trans-pack.ts
-// `geneTransTable`). The variant page builds its trans rows from its hits frame (trans-pack.ts
-// `variantTransTable`). The cis and trans tables page off those with limit/offset, a count, and an
-// unpaged export, so every interaction is a local query and nothing is re-read over HTTP.
+// The gene page holds the cis window that the locus plot draws from (gene.ts `locusTable`) as an
+// in-memory table. The cis table pages off it with limit/offset, a count, and an unpaged export,
+// so every interaction is a local query and nothing is re-read over HTTP. The trans queries below
+// serve TransTable, which has no v1 data yet (SPEC section 10); a trans reader will build its
+// table with the `TransRow` columns.
 
 interface PagedQuery {
   table: string                 // materialized table to page off

@@ -9,6 +9,14 @@ export function Empty({ label }: { label: string }) {
   return <div className="rounded-lg border border-base-300 px-4 py-6 text-center text-sm text-base-content/60">{label}</div>
 }
 
+/** What a page says where a section's data has no v1 object yet (trans, GWAS, coloc). */
+export const NOT_YET = 'Not available in this data release yet.'
+
+/** The plain empty state for a section whose data this release does not carry. */
+export function Unavailable({ what }: { what: string }) {
+  return <Empty label={`${what}: not available in this data release yet.`} />
+}
+
 export function ErrorState({ message }: { message: string }) {
   return <div className="alert alert-error text-sm">{message}</div>
 }

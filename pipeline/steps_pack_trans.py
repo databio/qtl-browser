@@ -32,7 +32,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 from scipy.special import stdtrit
 
-from . import packfmt
+from . import packfmt_v0 as packfmt
 from .common import (CHROMS, Config, connect, log, publish_file, read_search_index, register_search_index, stage,
                      variants_sql, write_parquet)
 from .steps_pack import (EXT, PackError, _file_header, _read_pages, _require, _unframe, _write_arrow, pack_file,

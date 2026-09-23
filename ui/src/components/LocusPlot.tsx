@@ -6,7 +6,8 @@ import { dropTable, getCoordinator, getDB } from '@/lib/db'
 import { CS_COLORS, CS_DOMAIN, CS_SWATCH_CLIP, CS_SYMBOLS, isDark } from '@/lib/plot-theme'
 import type { CredibleSetRow, Exon, SearchHit } from '@/lib/queries'
 import { CompareSkeleton, LocusSkeleton } from '@/components/plot-skeleton'
-import { credibleSets, locusTable, type GenePack } from '@/lib/pack'
+import { credibleSets, locusTable, type GenePack } from '@/lib/gene'
+import { useStoreInfo } from '@/contexts/store-context'
 import GeneTrack from '@/components/GeneTrack'
 import LocusCompare from '@/components/LocusCompare'
 import { clearPlotHover, onPlotPointerMove, useHoverOverlay, type HoverLookup, type HoverRow } from '@/lib/plot-hover'
@@ -16,12 +17,12 @@ import ExportMenu from '@/components/ExportMenu'
 
 export interface LocusSpec {
   hit: SearchHit
-  /** the open gene (pack.ts): its block, variants range, GWAS window, and intron blocks */
+  /** the open gene (gene.ts): its eQTL block, variants range, and intron blocks */
   pack: GenePack
   qtlType: 'e' | 's'
   phenotypeId?: string
   tss: number
-  exons: Exon[]                              // collapsed model of the gene, from the pack details
+  exons: Exon[]                              // collapsed model of the gene, from the annotation
   intron?: { start: number; end: number }
 }
 const MARGIN_LEFT = 48
@@ -179,7 +180,7 @@ export default function LocusPlot({ spec, onCount, onLegend, onActions, onCredib
     ;(async () => {
       try {
         await getCoordinator()
-        // the gene's pack requests left when the page opened the gene; an intron adds its block
+        // the gene's requests left when the page opened the gene; the sQTL tab adds its introns' span
         table = await locusTable(spec.pack, spec.qtlType, spec.phenotypeId)
         if (!alive) { dropTable(table); return }
         onTable?.(table)
@@ -293,6 +294,8 @@ export default function LocusPlot({ spec, onCount, onLegend, onActions, onCredib
   }, [tableName, link, brushSel, width, dark, yMax, spec.tss, spec.hit.chr])
 
   const compareCol = useRef<HTMLDivElement>(null)
+  // no GWAS object in this data release (SPEC section 10): the QTL-versus-GWAS panel says so
+  const hasGwas = useStoreInfo()?.hasGwas ?? false
   const stem = `${spec.hit.symbol ?? spec.hit.gene_id}${spec.phenotypeId ? '_' + spec.phenotypeId.split(':').slice(0, 3).join('_') : ''}`
   useEffect(() => {
     // the buttons stay in place while a locus loads, disabled, so the header does not reflow
@@ -305,11 +308,11 @@ export default function LocusPlot({ spec, onCount, onLegend, onActions, onCredib
         </label>
         <ExportMenu disabled={state !== 'ready'} background={dark ? SURFACE.dark : SURFACE.light} targets={[
           { label: showTrack ? 'Locus plot with gene track' : 'Locus plot', name: `${stem}_locus`, el: () => column.current },
-          { label: 'QTL versus GWAS', name: `${stem}_locuscompare`, el: () => compareCol.current },
+          ...(hasGwas ? [{ label: 'QTL versus GWAS', name: `${stem}_locuscompare`, el: () => compareCol.current }] : []),
         ]} />
       </>
     )
-  }, [state, dark, stem, showTrack]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [state, dark, stem, showTrack, hasGwas]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // the popup sits above the scatter when there is room, else below it; it never takes the pointer
   const rect = anchor.current
@@ -345,7 +348,10 @@ export default function LocusPlot({ spec, onCount, onLegend, onActions, onCredib
       {/* the right column is reserved from the start so the scatter measures its final width;
           the panel is a square the height of the scatter so the two plots share a top and bottom */}
       <div ref={compareCol} className="shrink-0" style={{ width: SCATTER_H }}>
-        {state === 'ready' && tableName && link && brushSel
+        {!hasGwas
+          ? <div className="flex h-full items-center rounded-lg border border-base-300 p-4 text-center text-sm text-base-content/60" style={{ height: SCATTER_H }}>
+              QTL versus DCM GWAS: not available in this data release yet.</div>
+          : state === 'ready' && tableName && link && brushSel
           ? <LocusCompare table={tableName} dark={dark} size={Math.min(SCATTER_H, Math.max(width, 200))} yDomain={[0, yMax]} link={link} brush={brushSel} click={click} lookup={lookup} />
           : <CompareSkeleton />}
       </div>

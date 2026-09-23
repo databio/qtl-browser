@@ -16,8 +16,9 @@ export function fmtInt(x: unknown): string {
   return Number(x).toLocaleString('en-US')
 }
 
+/** Empty when there is no slope (a results set without dof stores none: SPEC section 8). */
 export function fmtSlopeSE(slope: unknown, se: unknown): string {
-  if (slope == null) return ''
+  if (slope == null || Number.isNaN(slope)) return ''
   return `${fmtNum(slope)} ± ${fmtNum(se)}`
 }
 

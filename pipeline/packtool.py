@@ -53,7 +53,7 @@ import pyarrow.feather as pafeather
 import pyarrow.parquet as pq
 import zstandard
 
-from . import packfmt
+from . import packfmt_v0 as packfmt
 
 # ---- file kinds ----------------------------------------------------------------------------------
 # kind number -> (name, extension, one-line meaning). SPEC.md section 3 numbers the kinds. Extensions

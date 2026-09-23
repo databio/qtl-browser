@@ -1,10 +1,16 @@
-"""Steps 3-4: collect distinct tested variants, then assign rsIDs from dbSNP."""
+"""Steps 3-4: collect distinct tested variants, then assign rsIDs from dbSNP.
+
+Which archives hold the tested variants, and how each one names its alleles, is TOPCHeF knowledge
+and lives in `adapters/topchef.py`; this file only knows how to take a distinct set of (chr,
+position, A1, A2) and hang a dbSNP rsID on it.
+"""
 import gzip
 import shutil
 import subprocess
 
 import pyarrow as pa
 
+from .adapters import topchef
 from .common import CHROMS, Config, connect, log, write_parquet
 
 
@@ -15,10 +21,8 @@ def collect(cfg: Config) -> None:
     get null alleles unless the same position appears in trans_sQTL. A position never gets
     both an allele-bearing and a null-allele row."""
     con = connect(cfg)
-    srcs = ["cis_eQTL_nominal", "cis_sQTL_nominal", "cis_eQTL_permutation", "cis_sQTL_permutation",
-            "cis_eQTL_SuSiE", "cis_sQTL_SuSiE"]
     union = " UNION ALL ".join(
-        f"SELECT chr, position, A1, A2 FROM read_parquet('{cfg.raw_glob(s)}')" for s in srcs
+        f"SELECT chr, position, A1, A2 FROM read_parquet('{cfg.raw_glob(s)}')" for s in topchef.cis_sources()
     )
     out = cfg.tmp / "variants_raw.parquet"
     log("variants_collect: scanning cis files for distinct (chr, position, A1, A2), then trans files for positions outside cis")
@@ -27,9 +31,9 @@ def collect(cfg: Config) -> None:
             WITH cis AS (SELECT DISTINCT chr, position::INTEGER AS position, A1, A2 FROM ({union})),
             cispos AS (SELECT DISTINCT chr, position FROM cis),
             ts AS (SELECT DISTINCT chr, position::INTEGER AS position, A1, A2
-                   FROM read_parquet('{cfg.raw_glob('trans_sQTL')}')),
+                   FROM read_parquet('{topchef.archive_glob(cfg, 's', 'trans')}')),
             te AS (SELECT DISTINCT split_part(variant_id, ':', 1) AS chr, split_part(variant_id, ':', 2)::INTEGER AS position
-                   FROM read_parquet('{cfg.raw_glob('trans_eQTL')}')),
+                   FROM read_parquet('{topchef.archive_glob(cfg, 'e', 'trans')}')),
             trans_alleles AS (SELECT * FROM ts ANTI JOIN cispos USING (chr, position)),
             trans_noallele AS (
                 SELECT chr, position, NULL::VARCHAR AS A1, NULL::VARCHAR AS A2
@@ -66,7 +70,10 @@ def _accession_map(cfg: Config) -> dict[str, str]:
 
 def rsid(cfg: Config) -> None:
     if shutil.which("bcftools") is None:
-        raise SystemExit("bcftools not found; install with `brew install bcftools` (plan D6)")
+        raise SystemExit("bcftools not found. It comes from a bulker crate, not a package manager: "
+                         "`bulker activate bulker/qtlb-format.yaml` in the qtlb-format analysis "
+                         "project, which pins bcftools 1.24. On Rivanna an sbatch script must also "
+                         "`module load apptainer` for bulker to find its container runtime.")
     con = connect(cfg)
     acc = _accession_map(cfg)
     chr_to_acc = {v: k for k, v in acc.items()}
@@ -90,12 +97,21 @@ def rsid(cfg: Config) -> None:
                 for (p,) in rows:
                     fh.write(f"{a}\t{p}\n")
 
-    # 2. stream dbSNP once, keep only records at tested positions
+    # 2. stream dbSNP once, keep only records at tested positions.
+    #
+    #    -T streams the whole 29.5 GB VCF; -R seeks with the tabix index instead. For a genome-wide
+    #    build -T wins, because the targets are dense enough that seeking costs more than reading.
+    #    For a CHROMS subset (a smoke build) the targets cover a few percent of the genome and -R
+    #    turns nine minutes into seconds, which is the difference between a usable debug loop and a
+    #    useless one. Both flags select the same records; only the access pattern differs.
+    subset = len(CHROMS) < 23
+    flag = "-R" if subset else "-T"
     if not matched.exists():
-        log("variants_rsid: streaming dbSNP VCF through bcftools (this is the long step)")
+        log(f"variants_rsid: {'seeking' if subset else 'streaming'} the dbSNP VCF through bcftools "
+            f"({flag}, {len(CHROMS)} chromosome(s))" + ("" if subset else "; this is the long step"))
         with gzip.open(matched, "wt") as out:
             p = subprocess.Popen(
-                ["bcftools", "query", "-T", str(targets), "-f", "%CHROM\t%POS\t%ID\t%REF\t%ALT\n", str(cfg.dbsnp_vcf)],
+                ["bcftools", "query", flag, str(targets), "-f", "%CHROM\t%POS\t%ID\t%REF\t%ALT\n", str(cfg.dbsnp_vcf)],
                 stdout=subprocess.PIPE, text=True,
             )
             n = 0

@@ -32,9 +32,10 @@ const VIEWPORT = { width: 1280, height: 900 }
 const CATEGORIES = ['data', 'app', 'duckdb-cdn', 'duckdb-ext', 'other']
 const SCENARIOS = ['cold', 'warm', 'nav', 'pair']
 const PREVIEW_HELP = 'cd ui && VITE_DATA_BASE= npm run build && npm run preview'
-const USAGE = 'usage: node bench/locus-bench.mjs --target live|preview|rehearsal --label <name> [--runs 3] [--scenario cold,warm,nav,pair] [--pages FLNC-eqtl,...] [--note "..."] [--nav-mode popstate|click] [--query pack=1] [--latency <ms>] [--manifest <key>]'
+const USAGE = 'usage: node bench/locus-bench.mjs --target live|preview|rehearsal --label <name> [--runs 3] [--scenario cold,warm,nav,pair] [--pages FLNC-eqtl,...] [--note "..."] [--nav-mode popstate|click] [--query pack=1] [--latency <ms>] [--manifest <key>] [--self-check-page <id>]'
 // Any manifest name: `manifest.json`, or a staged copy `immutable/manifest.<sha16>.json` (rehearsal).
-const MANIFEST_RE = /\/manifest(\.[0-9a-f]{16})?\.json(\?|$)/
+// qtlb v1 (SPEC.md section 2): store.json and the pointer documents count as `manifest` too.
+const MANIFEST_RE = /\/(manifest(\.[0-9a-f]{16})?\.json|store\.json|(experiments|variant_catalogs|annotations)\/[\w.-]+\.json)(\?|$)/
 // Data requests by what they read; gated plan metrics count some kinds separately. Every file the
 // browser reads at a byte offset lives flat under immutable/ as <stem>.<sha16>.<ext> (SPEC section
 // 3), so a kind is matched by its stem. Kind names are unchanged, so older results stay comparable;
@@ -44,10 +45,19 @@ const DATA_KINDS = [['eqtl_pack', /\/immutable\/eqtl\./], ['variants', /\/immuta
   ['gwas_pack', /\/immutable\/gwas\./], ['sqtl_pack', /\/immutable\/sqtl\./], ['trans_pack', /\/immutable\/trans\./], ['gwas_index', /\/immutable\/gwas_index\./],
   ['hits', /\/immutable\/hits\./], ['rsid_index', /\/immutable\/rsid_index\./], ['variant_index', /\/immutable\/variant_index\./],
   ['manifest', MANIFEST_RE], ['search_index', /\/immutable\/search_index\./],
+  // qtlb v1 objects are `immutable/<sha512t24u>.<ext>`: the kind is the extension. Results files
+  // (.qbe) do not say their phenotype type in the name, so eQTL and sQTL reads share `results`;
+  // `.arrow.zst` is the search index and the annotation's gene and exon tables; `.qbt`, `.qbg` and
+  // `.qgi` count under the v0 names trans_pack, gwas_pack and gwas_index.
+  ['variants', /\/immutable\/[\w-]{32}\.qbv(\?|$)/], ['results', /\/immutable\/[\w-]{32}\.qbe(\?|$)/],
+  ['hits', /\/immutable\/[\w-]{32}\.qbh(\?|$)/], ['rsid_index', /\/immutable\/[\w-]{32}\.qbr(\?|$)/],
+  ['variant_index', /\/immutable\/[\w-]{32}\.qbx(\?|$)/], ['arrow_object', /\/immutable\/[\w-]{32}\.arrow\.zst(\?|$)/],
+  ['trans_pack', /\/immutable\/[\w-]{32}\.qbt(\?|$)/], ['gwas_pack', /\/immutable\/[\w-]{32}\.qbg(\?|$)/],
+  ['gwas_index', /\/immutable\/[\w-]{32}\.qgi(\?|$)/],
   // last: every parquet a page still reads. Plan 9 removed the last of them, so this is a tripwire
   // that should stay 0.
   ['parquet_other', /\.parquet(\?|$)/]]
-const KIND_NAMES = [...DATA_KINDS.map(k => k[0]), 'other']
+const KIND_NAMES = [...new Set(DATA_KINDS.map(k => k[0])), 'other']
 const dataKind = url => (DATA_KINDS.find(([, re]) => re.test(url)) ?? ['other'])[0]
 /** Run-wide options set once in main: extra query parameters for every page, and CDP latency. */
 const OPTS = { query: null, latency: 0 }
@@ -84,7 +94,8 @@ const TARGETS = {
 }
 
 function parseArgs(argv) {
-  const a = { runs: 3, scenario: 'cold,warm,nav', pages: null, target: null, label: null, note: null, navMode: 'popstate', query: null, latency: 0, manifest: null }
+  const a = { runs: 3, scenario: 'cold,warm,nav', pages: null, target: null, label: null, note: null, navMode: 'popstate', query: null, latency: 0, manifest: null,
+    selfCheckPage: 'FLNC-eqtl' }
   for (let i = 0; i < argv.length; i++) {
     const k = argv[i]
     const v = () => { const x = argv[++i]; if (x === undefined) die(`${k} needs a value\n${USAGE}`); return x }
@@ -98,6 +109,7 @@ function parseArgs(argv) {
     else if (k === '--query') a.query = v()
     else if (k === '--latency') a.latency = Number(v())
     else if (k === '--manifest') a.manifest = v().replace(/^\/+/, '')
+    else if (k === '--self-check-page') a.selfCheckPage = v()
     else if (k === '--help' || k === '-h') { console.log(USAGE); process.exit(0) }
     else die(`unknown argument ${k}\n${USAGE}`)
   }
@@ -709,7 +721,8 @@ async function main() {
   const pagesByScenario = Object.fromEntries(args.scenarios.map(s => [s, s === 'pair' ? [pairPage] : pages]))
 
   // what the target serves; rehearsal reads the staged copy rather than manifest.json
-  const manifestKey = args.manifest ?? 'manifest.json'
+  // qtlb v1 serves store.json where v0 served manifest.json (--manifest still names either)
+  const manifestKey = args.manifest ?? 'store.json'
   const manifestPath = new URL(`${target.dataBase}/${manifestKey}`).pathname
   const manRes = await fetch(`${target.dataBase}/${manifestKey}`).catch(e => ({ ok: false, status: String(e.cause?.code ?? e.message) }))
   if (!manRes.ok || manRes.status !== 200) {
@@ -774,9 +787,10 @@ async function main() {
     if (missing.length) die(`${target.name} data responses 404: ${[...new Set(missing.map(q => new URL(q.url).pathname))].join(', ')}`)
   }
 
-  const flncPage = allPages.find(p => p.id === 'FLNC-eqtl')
+  const flncPage = allPages.find(p => p.id === args.selfCheckPage)
+  if (!flncPage) die(`unknown --self-check-page ${args.selfCheckPage}`)
   const flnc = { ...flncPage, path: withQuery(flncPage.path, args.query) }
-  if (pages[0]?.id !== 'FLNC-eqtl' || !(args.scenarios.includes('cold') || args.scenarios.includes('warm'))) {
+  if (pages[0]?.id !== args.selfCheckPage || !(args.scenarios.includes('cold') || args.scenarios.includes('warm'))) {
     const [r] = await coldWarm(browser, target, flnc, false)
     selfCheck(r)
     guardTarget(r)
@@ -794,7 +808,7 @@ async function main() {
         if (args.scenarios.includes('cold') || args.scenarios.includes('warm')) {
           const rs = await coldWarm(browser, target, p, args.scenarios.includes('warm'))
           for (const r of rs) {
-            if (!selfChecked && p.id === 'FLNC-eqtl' && r.scenario === 'cold') selfCheck(r)
+            if (!selfChecked && p.id === args.selfCheckPage && r.scenario === 'cold') selfCheck(r)
             guardTarget(r)
             if (args.scenarios.includes(r.scenario)) runs.push({ run, ...r })
           }

@@ -16,5 +16,12 @@
   {"id": "variant-rs10824026",      "path": "/variant/rs10824026",        "chr": "chr10", "ready": "[data-variant-lists=\"1\"] [data-trans-total]"},
   {"id": "variant-chr10-73661450",  "path": "/variant/chr10:73661450",    "chr": "chr10", "ready": "[data-variant-lists=\"1\"] [data-trans-total]"},
   {"id": "variant-rs141809548",     "path": "/variant/rs141809548",       "chr": "chr1",  "ready": "[data-variant-lists=\"1\"] [data-trans-total=\"9\"]"},
-  {"id": "variant-rs10824026-scan", "path": "/variant/rs10824026",        "chr": "chr10", "pre_ready": "[data-variant-lists=\"1\"] [data-trans-total]", "click": "[data-scan-button]", "ready": "[data-scan-ready=\"1\"]"}
+  {"id": "variant-rs10824026-scan", "path": "/variant/rs10824026",        "chr": "chr10", "pre_ready": "[data-variant-lists=\"1\"] [data-trans-total]", "click": "[data-scan-button]", "ready": "[data-scan-ready=\"1\"]"},
+  {"id": "v1-PDXK-eqtl",         "path": "/gene/PDXK",              "chr": "chr21"},
+  {"id": "v1-MICAL3-sqtl",       "path": "/gene/MICAL3?tab=sqtl",   "chr": "chr22"},
+  {"id": "v1-GUSBP11-sqtl",      "path": "/gene/GUSBP11",           "chr": "chr22"},
+  {"id": "v1-variant-rs34599497", "path": "/variant/rs34599497",    "chr": "chr22", "ready": "[data-variant-lists=\"1\"]"},
+  {"id": "v1-variant-rs34599497-scan", "path": "/variant/rs34599497", "chr": "chr22", "pre_ready": "[data-variant-lists=\"1\"]", "click": "[data-scan-button]", "ready": "[data-scan-ready=\"1\"]"},
+  {"id": "v1-SMARCB1-trans",     "path": "/gene/SMARCB1",           "chr": "chr22", "ready": "[data-trans-total=\"7\"]"},
+  {"id": "v1-variant-rs4819361-trans", "path": "/variant/rs4819361", "chr": "chr21", "ready": "[data-variant-lists=\"1\"] [data-trans-total=\"10\"]"}
 ]

@@ -1,12 +1,23 @@
-// Plan 9 step 11 smoke check against the local preview: the variant page on packs.
-// Checks the three lists, the trans table, the cis scan, the request counts the plan gates on,
-// and that no parquet is read on any variant page.
-import { chromium } from '/home/nsheff/Dropbox/workspaces/assistant/tasks/qtl-browser/ui/node_modules/playwright/index.mjs'
+// Smoke check of the variant page on the qtlb v1 store, against the local preview serving the
+// chr21/chr22 smoke store (bench/README.md, "Local v1 store"). Checks the lead and credible-set
+// lists, the trans table (from the paged hits file), the cis scan, and the request counts per lookup path.
+//   node bench/smoke_variant_page.mjs
+import { chromium } from '../node_modules/playwright/index.mjs'
 
-const BASE = 'http://localhost:4173'
+const BASE = process.env.SMOKE_BASE ?? 'http://localhost:4173'
 const LISTS = '[data-variant-lists="1"]'
 const results = []
 const check = (ok, msg) => { results.push([ok, msg]); console.log(`${ok ? 'PASS' : 'FAIL'} ${msg}`) }
+
+const exp = await (await fetch(`${BASE}/data/experiments/topchef.json`)).json()
+const cat = await (await fetch(`${BASE}/data/variant_catalogs/${exp.catalog}.json`)).json()
+const names = new Map([
+  ...Object.values(exp.results.find(r => r.phenotype_type === 'ge').files).map(f => [f, 'ge']),
+  ...Object.values(exp.results.find(r => r.phenotype_type === 'leafcutter').files).map(f => [f, 'leafcutter']),
+  ...cat.chromosomes.map(c => [c.file, 'variants']), ...Object.values(exp.hits).map(f => [f, 'hits']), [cat.rsid, 'rsid'],
+])
+/** Per-variant requests by kind; boot's whole-object reads (pointers, search index, genes, variant index) are left out. */
+const kinds = reqs => reqs.map(p => names.get(p.split('/').pop())).filter(Boolean).sort().join(',')
 
 const browser = await chromium.launch({ headless: true })
 
@@ -35,122 +46,102 @@ async function open(path) {
   }
   return { ctx, page, errors, reqs, idle }
 }
-
-/** The data requests the plan gates on: not the manifest, and not the three files boot fetches
- *  whole (search_index, the GWAS index, and the variant index). */
-const gated = reqs => reqs.filter(p => !/manifest\.json$|search_index|variant_index|gwas_index/.test(p))
-// packs live flat under immutable/ as <stem>.<chr>.<sha16>.<ext> (SPEC section 3)
-const kind = p => /\/immutable\/hits\./.test(p) ? 'hits' : /rsid_index/.test(p) ? 'rsid_index'
-  : /\/immutable\/variants\./.test(p) ? 'variants' : /\/immutable\/eqtl\./.test(p) ? 'eqtl'
-  : /\/immutable\/sqtl\./.test(p) ? 'sqtl' : /\.parquet/.test(p) ? 'parquet' : 'other'
-const kinds = reqs => gated(reqs).map(kind).sort().join(',')
 const table = (page, head) => page.locator(`table:has(th:has-text("${head}"))`)
 const rowsOf = loc => loc.locator('tbody tr').evaluateAll(trs => trs.map(tr => [...tr.querySelectorAll('td')].map(td => td.textContent.trim())))
 
-// ---- rs10824026: the paper's variant, by rsID ----
+// ---- rs34599497 (chr22): lead of 21 phenotypes, in 50 credible sets ----
 {
-  const { ctx, page, errors, reqs, idle } = await open('/variant/rs10824026')
-  await page.waitForSelector(`${LISTS} [data-trans-total]`, { timeout: 60_000 })
+  const { ctx, page, errors, reqs, idle } = await open('/variant/rs34599497')
+  await page.waitForSelector(LISTS, { timeout: 60_000 })
   await idle()
-  check(kinds(reqs) === 'hits,rsid_index,variants',
-    `rs10824026: 3 gated cold requests, one each of rsid_index, variants, hits (got ${kinds(reqs) || 'none'})`)
-  check(!gated(reqs).some(p => /\.parquet/.test(p)), `rs10824026: no parquet request (${gated(reqs).filter(p => /\.parquet/.test(p)).join(', ') || 'none'})`)
-  const head = await page.locator('h1').first().innerText()
-  check(head.trim() === 'rs10824026', `rs10824026: header title is "${head.trim()}"`)
-  const pos = await page.getByText('chr10:73,661,450 (GRCh38)').count()
-  check(pos === 1, 'rs10824026: position row reads chr10:73,661,450 (GRCh38)')
-  // the hits frame holds exactly one row for this variant, a trans sQTL: it leads nothing and is in
-  // no credible set, which is what the parquet page showed too (genes, splice_phenotypes and
-  // credible_sets all have 0 rows at chr10:73,661,450)
-  const noLead = await page.getByText('Not the lead variant for any gene or splice phenotype.').count()
-  const noCs = await page.getByText('Not in any credible set.').count()
-  check(noLead === 1 && noCs === 1, `rs10824026: leads and credible sets are both empty, as the parquet page had them (${noLead}, ${noCs})`)
-  const transTotal = await page.locator('[data-trans-total]').first().getAttribute('data-trans-total')
-  check(transTotal === '1', `rs10824026: trans table reports ${transTotal} row (expected 1)`)
+  const leads = await rowsOf(table(page, 'Perm p'))
+  const cs = await rowsOf(table(page, 'PIP'))
+  const ld = leads.filter(r => r[0] === 'eQTL' && r[1] === 'AP000346.2')[0]
+  check(leads.length === 21 && cs.length === 50 && ld && /^-0\.412 ± 0\.032$/.test(ld[3]) && ld[4] === '1.0e-4' && ld[5] === 'eGene',
+    `rs34599497: ${leads.length} lead rows, ${cs.length} credible-set rows; AP000346.2 eQTL lead slope ${ld?.[3]}, perm p ${ld?.[4]}`)
+  // rsID block and page (each with its header read), the hits file, then one block per lead for its slope
+  const k = kinds(reqs)
+  const want = ['ge', 'ge', ...Array(21).fill('leafcutter'), 'hits', 'hits', 'rsid', 'rsid', 'variants', 'variants'].sort().join(',')
+  check(k === want, `rs34599497: requests ${k.split(',').length}: rsID header + block, variants header + page, hits table + frame, results headers + one block per lead`)
+  check((await page.locator('h1').first().innerText()).trim() === 'rs34599497', 'rs34599497: header title')
+  check(await page.getByText('chr22:23,680,950 (GRCh38)').count() === 1 && await page.getByText('T / C', { exact: true }).count() === 1,
+    'rs34599497: position chr22:23,680,950, A1 / A2 = T / C (ALT / REF)')
+  check(await page.locator('[data-trans-total="0"]').count() === 1, 'rs34599497: trans table present with no rows (its hits have no kind 2 record)')
 
-  // the scan: two more requests, one eQTL span and one sQTL span
   const before = reqs.length
-  const label = await page.locator('[data-scan-button]').innerText()
-  check(/^Scan cis windows \(861 KB \+ splicing\)$/.test(label.trim()), `rs10824026: scan button reads "${label.trim()}" (the eQTL span; splicing is only known once it arrives)`)
+  const label = (await page.locator('[data-scan-button]').innerText()).trim()
+  check(/^Scan cis windows \([\d.]+ MB\)$/.test(label), `rs34599497: scan button reads "${label}" (both spans known before any request)`)
   await page.locator('[data-scan-button]').click()
   await page.waitForSelector('[data-scan-ready="1"]', { timeout: 120_000 })
   await idle()
-  const scanReqs = reqs.slice(before)
-  check(kinds(scanReqs) === 'eqtl,sqtl', `rs10824026 scan: 2 requests, one eQTL span and one sQTL span (got ${kinds(scanReqs) || 'none'})`)
-  const eTitle = await page.getByRole('heading', { name: /^Expression \(/ }).innerText()
-  check(eTitle.trim() === 'Expression (42)', `rs10824026 scan: ${eTitle.trim()} (the raw chr10 file has 42 genes at this position)`)
-  const sTitle = await page.getByRole('heading', { name: /^Splicing \(/ }).innerText()
-  const toggle = await page.locator('button:has-text("Show all")').innerText()
-  check(/^Show all 239 tested introns$/.test(toggle.trim()),
-    `rs10824026 scan: splicing shows ${sTitle.trim()} with "${toggle.trim()}" (the raw file has 239 introns)`)
+  check(kinds(reqs.slice(before)) === 'ge,leafcutter', `rs34599497 scan: one eQTL span and one sQTL span (got ${kinds(reqs.slice(before))})`)
+  const eTitle = (await page.getByRole('heading', { name: /^Expression \(/ }).innerText()).trim()
+  const sTitle = (await page.getByRole('heading', { name: /^Splicing \(/ }).innerText()).trim()
+  const toggle = (await page.locator('button:has-text("Show all")').innerText()).trim()
+  // search index: 46 ge and 267 leafcutter phenotypes cover chr22 vidx 22469, 96 of the introns significant
+  check(eTitle === 'Expression (46)' && sTitle === 'Splicing (96)' && toggle === 'Show all 267 tested introns',
+    `rs34599497 scan: ${eTitle}, ${sTitle}, "${toggle}" (search index: 46, 96 of 267)`)
   await page.locator('button:has-text("Show all")').click()
-  const sAll = await page.getByRole('heading', { name: /^Splicing \(/ }).innerText()
-  check(sAll.trim() === 'Splicing (239)', `rs10824026 scan: the toggle shows ${sAll.trim()}`)
-  check(errors.length === 0, `rs10824026: no console errors (${errors.slice(0, 2).join(' | ')})`)
+  check((await page.getByRole('heading', { name: /^Splicing \(/ }).innerText()).trim() === 'Splicing (267)', 'rs34599497 scan: the toggle shows all 267')
+  check(errors.length === 0, `rs34599497: no console errors (${errors.slice(0, 2).join(' | ')})`)
   await ctx.close()
 }
 
-// ---- the same variant by chr:pos: one request fewer ----
+// ---- the same variant by chr:pos: no rsID request ----
 {
-  const { ctx, page, errors, reqs, idle } = await open('/variant/chr10:73661450')
-  await page.waitForSelector(`${LISTS} [data-trans-total]`, { timeout: 60_000 })
+  const { ctx, page, errors, reqs, idle } = await open('/variant/chr22:23680950')
+  await page.waitForSelector(LISTS, { timeout: 60_000 })
   await idle()
-  check(kinds(reqs) === 'hits,variants', `chr10:73661450: 2 gated cold requests, variants then hits (got ${kinds(reqs) || 'none'})`)
-  const head = await page.locator('h1').first().innerText()
-  check(head.trim() === 'rs10824026', `chr10:73661450: resolves to ${head.trim()}`)
-  check(errors.length === 0, `chr10:73661450: no console errors (${errors.slice(0, 2).join(' | ')})`)
+  const k = kinds(reqs)
+  check(!k.includes('rsid') && k.split(',').filter(x => x === 'hits').length === 2 && k.split(',').filter(x => x === 'variants').length === 2, `chr22:23680950: no rsID request; variants header + page, hits table + frame (got ${k})`)
+  check((await page.locator('h1').first().innerText()).trim() === 'rs34599497', 'chr22:23680950: resolves to rs34599497')
+  check(errors.length === 0, `chr22:23680950: no console errors (${errors.slice(0, 2).join(' | ')})`)
   await ctx.close()
 }
 
-// ---- rs141809548: trans-only, outside every cis window ----
+// ---- rs4819361 (chr21): a cis variant with 10 trans associations ----
 {
-  const { ctx, page, errors, reqs, idle } = await open('/variant/rs141809548')
-  await page.waitForSelector(`${LISTS} [data-trans-total="9"]`, { timeout: 60_000 })
+  const { ctx, page, errors, reqs, idle } = await open('/variant/rs4819361')
+  await page.waitForSelector(`${LISTS} [data-trans-total="10"]`, { timeout: 60_000 })
   await idle()
-  check(kinds(reqs) === 'hits,rsid_index,variants', `rs141809548: 3 gated cold requests (got ${kinds(reqs) || 'none'})`)
-  check((await page.locator('[data-scan-button]').count()) === 0, 'rs141809548: no scan button (outside every cis window)')
+  const rows = await rowsOf(page.locator('[data-trans-total] table'))
+  check(rows.length === 10 && rows.every(r => r.length > 3), `rs4819361: trans table lists ${rows.length} genes and introns from its hits frame (kind 2)`)
+  check(!kinds(reqs).includes('trans'), 'rs4819361: the variant page reads no trans object (the hits frame carries the rows)')
+  check(errors.length === 0, `rs4819361: no console errors (${errors.slice(0, 2).join(' | ')})`)
+  await ctx.close()
+}
+
+// ---- rs457868 (chr21): a trans-only site, outside every cis window, with 1 trans association ----
+{
+  const { ctx, page, errors, reqs, idle } = await open('/variant/rs457868')
+  await page.waitForSelector(`${LISTS} [data-trans-total="1"]`, { timeout: 60_000 })
+  await idle()
+  check(kinds(reqs) === 'hits,hits,rsid,rsid,variants,variants', `rs457868: rsID, variants page, hits table + frame only (got ${kinds(reqs)})`)
+  check((await page.locator('[data-scan-button]').count()) === 0, 'rs457868: no scan button (outside every cis window)')
   const outside = await page.getByText('outside every cis window', { exact: false }).count()
-  check(outside === 3, `rs141809548: the outside-cis message stands in for all three cis sections (${outside} of 3)`)
-  const alleles = await page.getByText('ATGTCT / A', { exact: true }).count()
-  check(alleles === 1, 'rs141809548: alleles read ATGTCT / A (an indel the trans-only section still reports)')
-  check(errors.length === 0, `rs141809548: no console errors (${errors.slice(0, 2).join(' | ')})`)
+  check(outside === 3, `rs457868: the outside-cis message stands in for all three cis sections (${outside} of 3); trans table has its 1 row`)
+  check(errors.length === 0, `rs457868: no console errors (${errors.slice(0, 2).join(' | ')})`)
   await ctx.close()
 }
 
-// ---- a chrX variant ----
-{
-  const { ctx, page, errors, reqs, idle } = await open('/variant/rs1204407')
-  await page.waitForSelector(`${LISTS} [data-trans-total]`, { timeout: 60_000 })
-  await idle()
-  check(kinds(reqs) === 'hits,rsid_index,variants', `rs1204407 (chrX): 3 gated cold requests (got ${kinds(reqs) || 'none'})`)
-  const pos = await page.getByText('chrX:100,649,875 (GRCh38)').count()
-  check(pos === 1, 'rs1204407: position row reads chrX:100,649,875 (GRCh38)')
-  const leads = await rowsOf(table(page, 'Perm p'))
-  check(leads.some(r => r.includes('TSPAN6')), `rs1204407: lead of TSPAN6 (${leads.length} lead row(s))`)
-  check(errors.length === 0, `rs1204407: no console errors (${errors.slice(0, 2).join(' | ')})`)
-  await ctx.close()
-}
-
-// ---- rs1: a real rsID the study does not hold ----
+// ---- rs1: below the first rsID block, answered from the variant index alone ----
 {
   const { ctx, page, errors, reqs, idle } = await open('/variant/rs1')
   await page.waitForSelector('text=is not among the variants tested', { timeout: 60_000 })
   await idle()
-  // rs1 is below the first rsID block's first record (rs3), so SPEC section 14 step 1 answers
-  // "not held" from the startup file alone and sends no request at all
-  check(gated(reqs).length === 0, `rs1: answered from the startup file with no request (got ${kinds(reqs) || 'none'})`)
+  check(kinds(reqs) === '', `rs1: no per-variant request (got ${kinds(reqs) || 'none'})`)
   check((await page.getByText('Look it up in dbSNP').count()) === 1, 'rs1: offers the dbSNP link')
   check(errors.length === 0, `rs1: no console errors (${errors.slice(0, 2).join(' | ')})`)
   await ctx.close()
 }
 
-// ---- a malformed id: no request at all ----
-{
-  const { ctx, page, errors, reqs, idle } = await open('/variant/not-a-variant')
+// ---- a malformed id, and a chromosome the store does not hold ----
+for (const id of ['not-a-variant', 'chr1:1000000']) {
+  const { ctx, page, errors, reqs, idle } = await open(`/variant/${id}`)
   await page.waitForSelector('text=is not among the variants tested', { timeout: 60_000 })
   await idle()
-  check(gated(reqs).length === 0, `not-a-variant: no data request (got ${gated(reqs).join(', ') || 'none'})`)
-  check(errors.length === 0, `not-a-variant: no console errors (${errors.slice(0, 2).join(' | ')})`)
+  check(kinds(reqs) === '', `${id}: no per-variant request (got ${kinds(reqs) || 'none'})`)
+  check(errors.length === 0, `${id}: no console errors (${errors.slice(0, 2).join(' | ')})`)
   await ctx.close()
 }
 

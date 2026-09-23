@@ -6,11 +6,18 @@ import pyarrow as pa
 
 from .common import Config, log, write_parquet
 
-ATTR = re.compile(r'(\S+) "([^"]*)"')
+# GTF attributes are `key "value";` for strings and bare `key value;` for numbers. Reading only the
+# quoted form is why every `exon_number` written before this was the 0 default: GENCODE writes
+# `exon_number 1;` unquoted, so the key never reached `a.get("exon_number", 0)`. Quoted values are
+# still taken whole -- they may hold spaces and even `;`. The terminator is `;` or end of string, so
+# a final attribute written without its semicolon parses exactly as it did before.
+# `pipeline/annotation.py` reads the same two forms; the two parsers must agree on any real GTF.
+ATTR = re.compile(r'(\S+)\s+(?:"([^"]*)"|([^";]*?))\s*(?:;|$)')
 
 
 def parse_attrs(s: str) -> dict:
-    return dict(ATTR.findall(s))
+    # findall gives "" for the branch that did not participate, so `or` picks the one that did
+    return {k: (q or bare) for k, q, bare in ATTR.findall(s)}
 
 
 def run(cfg: Config) -> None:
