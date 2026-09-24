@@ -33,14 +33,15 @@ remote_cwd = "/home/ns5bc/scratch/qtl-browser-live"
 # not exist there, and take the build's inputs with them.
 #
 # The cost is that data/raw/sources.yaml and data/raw/download.py are tracked in
-# git but never reach the remote, and `manifest` reads sources.yaml. Copy those
-# two files to the sync target by hand once per new remote:
+# git but never reach the remote, and `pipeline.annotation` reads sources.yaml
+# for provenance. Copy those two files to the sync target by hand once per new
+# remote:
 #
 #   scp data/raw/sources.yaml data/raw/download.py riva:~/scratch/qtl-browser-live/data/raw/
 #
 # Do not "fix" this by narrowing the ignore to data/derived: that re-exposes the
-# symlinks above. A from-scratch build fails at `manifest` with FileNotFoundError
-# on data/raw/sources.yaml when this step is skipped.
+# symlinks above. Without sources.yaml an annotation's pointer records only the
+# GTF file name, not its release and md5.
 [[syncs]]
 name   = "live"
 local  = "."

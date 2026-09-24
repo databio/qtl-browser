@@ -2,8 +2,6 @@
 from __future__ import annotations
 
 import datetime as dt
-import hashlib
-import json
 import os
 import re
 import sys
@@ -11,28 +9,21 @@ from pathlib import Path
 
 import duckdb
 import pyarrow as pa
-import pyarrow.compute as pc
 import pyarrow.parquet as pq
 import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 CHROMS = [f"chr{i}" for i in range(1, 23)] + ["chrX"]
 
-# A full build is tens of GB and most of an hour, which is a bad loop to debug in: every breakage
-# costs a full re-run to find the next one. These two variables cut a smoke build down to a couple
-# of chromosomes so the whole pipeline can be exercised end to end in minutes.
+# Two variables cut a run down to a few chromosomes in its own tree, so a change can be exercised
+# end to end in minutes (adapter.sbatch and store.sbatch pass them through):
 #
 #   QTLB_CHROMS=chr21,chr22 QTLB_DERIVED=/scratch/$USER/qtl-browser/derived-smoke \
-#       uv run python -m pipeline build
+#       uv run python -m pipeline.adapters.topchef
 #
-# QTLB_DERIVED is what keeps a smoke run from colliding with a real one: the step markers, the
-# tables and the packs all hang off `derived`, so pointing it elsewhere gives the smoke build its
-# own everything. Never run a subset build into the real derived directory.
-#
-# A subset build is for finding breakage, not for release. Two things are deliberately wrong in it:
-# `validate` compares egene and sQTL counts against `paper_counts`, which only a genome-wide build
-# can meet; and chromosome ordinals in the variant and rsID indexes are positions in CHROMS, so a
-# subset's packs are not byte-comparable to a full release.
+# QTLB_DERIVED is what keeps a subset run from colliding with a real one: the step markers and the
+# tables all hang off `derived`, so pointing it elsewhere gives the run its own everything. Never
+# run a subset into the frozen v0 derived directory.
 if os.environ.get("QTLB_CHROMS"):
     CHROMS = [c.strip() for c in os.environ["QTLB_CHROMS"].split(",") if c.strip()]
     unknown = [c for c in CHROMS if not re.fullmatch(r"chr(\d{1,2}|X|Y|M)", c)]
@@ -56,11 +47,10 @@ class Config:
         self.dbsnp_vcf = self.raw / self.cfg["dbsnp_vcf"]
         self.assembly_report = self.raw / self.cfg["dbsnp_assembly_report"]
         self.tmp = self.derived / "_tmp"
-        # build intermediates: everything the pipeline reads but the browser never does. `_tables/`
-        # is never uploaded (pipeline/README.md), so a table here costs local disk and nothing else.
+        # build intermediates and contract tables: nothing under `_tables/` is ever deployed
         self.tables = self.derived / "_tables"
-        # every file the browser reads at a byte offset, named by its own content hash
-        self.immutable = self.derived / self.cfg["r2"]["immutable_prefix"].rstrip("/")
+        # the frozen v0 packs, each named by its own content hash; read only by the v0 comparisons
+        self.immutable = self.derived / "immutable"
         self.done_dir = self.derived / ".done"
 
     def __getitem__(self, k):
@@ -98,69 +88,14 @@ def connect(cfg: Config, memory_limit: str | None = None, threads: int | None = 
     return con
 
 
-def phenotype_batches(pfile: pq.ParquetFile, cols: list[str], batch_size: int = 1_000_000):
-    """Tables of whole phenotypes from a file whose rows are grouped by phenotype_id. A table can be
-    empty when one phenotype spans a whole batch; its rows arrive with the next table."""
-    carry: pa.Table | None = None
-    for batch in pfile.iter_batches(batch_size=batch_size, columns=cols):
-        tb = pa.Table.from_batches([batch])
-        if carry is not None and carry.num_rows:
-            tb = pa.concat_tables([carry, tb])
-        tb = tb.combine_chunks()
-        ids = tb["phenotype_id"].combine_chunks()
-        n = tb.num_rows
-        ch = pc.indices_nonzero(pc.not_equal(ids.slice(0, n - 1), ids.slice(1))).to_numpy()
-        last = int(ch[-1]) + 1 if len(ch) else 0
-        yield tb.slice(0, last)
-        carry = tb.slice(last)
-    if carry is not None and carry.num_rows:
-        yield carry.combine_chunks()
-
-
 def strip_metadata(table: pa.Table) -> pa.Table:
     return table.replace_schema_metadata(None)
 
 
-# ---- content-addressed publishing (SPEC.md section 3) ------------------------------------------
+# ---- the frozen v0 build's content-addressed files (v0 SPEC section 3) ---------------------------
 # A logical key uses letters, digits, "_" and "/" only, so the "." in a published name is
 # unambiguous: <stem>.<sha16>.<ext>, stem being the key with "/" replaced by ".".
 NAME = re.compile(r"^(?P<stem>[A-Za-z0-9_]+(?:\.[A-Za-z0-9_]+)*)\.(?P<sha>[0-9a-f]{16})\.(?P<ext>[a-z0-9.]+)$")
-# Arrow schema metadata key in search_index: logical key -> sha256 of every pack its offsets reach
-PACKS_METADATA_KEY = b"qtl_browser.packs"
-
-
-def digests(path: Path) -> tuple[str, str]:
-    """(sha256 hex, md5 hex) in one pass. MD5 is R2's ETag for a single-part upload."""
-    sha, md5 = hashlib.sha256(), hashlib.md5()
-    with path.open("rb") as f:
-        while chunk := f.read(8 << 20):
-            sha.update(chunk)
-            md5.update(chunk)
-    return sha.hexdigest(), md5.hexdigest()
-
-
-def publish_file(cfg, tmp: Path, key: str, ext: str) -> Path:
-    """Move a finished file to `immutable/<stem>.<sha16>.<ext>` and delete older builds of the same
-    key. Changing one byte changes the name, so a browser can cache it for a year and a stale pack
-    can never be paired with a fresh index. Write `tmp` under `cfg.tmp` so the rename stays on one
-    filesystem."""
-    stem = key.replace("/", ".")
-    sha, _ = digests(tmp)
-    out = cfg.immutable / f"{stem}.{sha[:16]}.{ext}"
-    out.parent.mkdir(parents=True, exist_ok=True)
-    os.replace(tmp, out)
-    for old in out.parent.glob(f"{stem}.*.{ext}"):
-        m = NAME.match(old.name)
-        if old != out and m and m["stem"] == stem:
-            old.unlink()
-    return out
-
-
-def stage(cfg, key: str, ext: str) -> Path:
-    """Where a writer builds a file before `publish_file` names it by its hash."""
-    out = cfg.tmp / "publish" / f"{key.replace('/', '.')}.{ext}"
-    out.parent.mkdir(parents=True, exist_ok=True)
-    return out
 
 
 def addressed_files(cfg) -> dict[str, Path]:
@@ -177,33 +112,22 @@ def addressed_files(cfg) -> dict[str, Path]:
     return out
 
 
-def published(cfg, key: str) -> Path:
-    """One published file by its logical key, with a message naming the step that writes it."""
-    files = addressed_files(cfg)
-    if key not in files:
-        die(f"{key} is not published in {cfg.immutable.name}/; run the step that writes it")
-    return files[key]
-
-
 UNBUILT_SHA = "0" * 16
 
 
 def pack_file(cfg, key: str, ext: str) -> Path:
     """The published path of `key`, or the name it would carry if the step that writes it had run.
-    That placeholder does not exist, so a caller can say "missing, run step X" (or report a FAIL)
-    instead of dying the way `published` does."""
+    That placeholder does not exist, so a caller can report a FAIL instead of dying."""
     f = addressed_files(cfg).get(key)
     return f if f is not None else cfg.immutable / f"{key.replace('/', '.')}.{UNBUILT_SHA}.{ext}"
 
 
-# the search index is not a pack, but it is content-addressed like one (SPEC section 3)
+# the v0 search index is not a pack, but it is content-addressed like one (v0 SPEC section 3)
 SEARCH_INDEX_EXT = "arrow.zst"
-SEARCH_INDEX_NAME = f"search_index.{SEARCH_INDEX_EXT}"       # the logical name, without its hash
 
 
 def search_index_path(cfg) -> Path:
-    """The browser's one non-pack file (SPEC section 6): an Arrow IPC stream in a single zstd
-    frame. Arrow rather than parquet so the browser needs no parquet reader at all."""
+    """The v0 search index (v0 SPEC section 6): an Arrow IPC stream in a single zstd frame."""
     return pack_file(cfg, "search_index", SEARCH_INDEX_EXT)
 
 
@@ -213,18 +137,6 @@ def read_search_index(cfg, columns: list[str] | None = None) -> pa.Table:
     raw = packfmt.zstd_unframe(path.read_bytes(), None, path.name)
     t = pa.ipc.open_stream(pa.py_buffer(raw)).read_all()
     return t.select(columns) if columns else t
-
-
-def search_index_packs(cfg) -> dict[str, str]:
-    """`qtl_browser.packs` from the search index's Arrow schema metadata: the logical key of every
-    pack its byte offsets reach, to that file's full SHA-256 (SPEC section 3). Empty when the index
-    predates the metadata."""
-    from . import packfmt_v0 as packfmt
-    path = search_index_path(cfg)
-    raw = packfmt.zstd_unframe(path.read_bytes(), None, path.name)
-    md = pa.ipc.open_stream(pa.py_buffer(raw)).schema.metadata or {}
-    blob = md.get(PACKS_METADATA_KEY)
-    return json.loads(blob) if blob else {}
 
 
 def register_search_index(cfg, con, name: str = "search_index") -> str:
@@ -256,6 +168,8 @@ def write_parquet(table: pa.Table, path: Path, row_group_size: int, stats_column
         table, path, compression="zstd", compression_level=9, use_dictionary=True,
         row_group_size=row_group_size, write_statistics=stats_columns if stats_columns else True,
     )
+
+
 def die(msg: str) -> None:
     print(f"ERROR: {msg}", file=sys.stderr)
     sys.exit(1)

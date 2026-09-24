@@ -1,8 +1,8 @@
 """Codec for qtlb **v1** (SPEC.md at the repo root): the byte-level pieces every v1 object shares.
 
 The v1 store modules (`qtlstore`, `catalog`, `annotation`, `results`) import this module and never
-`packfmt_v0`; the v0 build (`steps_pack*`, `packcheck`, `packtool`, `upload`) imports only
-`packfmt_v0`. The two share code by copy for now: where v1 reuses a v0 layout unchanged (variant
+`packfmt_v0`; the v0 reader tools (`packtool`, the TOPCHeF gate) import only `packfmt_v0`. The
+two share code by copy: where v1 reuses a v0 layout unchanged (variant
 pages, result blocks, quantizers, zstd framing, SNP codes) the functions here are the v0 ones,
 byte for byte, and a v1 store rebuilt after the split is identical object for object.
 

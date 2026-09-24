@@ -148,13 +148,13 @@ def source_paths_and_the_experiment_facts():
         "cis_eQTL_nominal/topchef_chr7_MaxPC70.cis_qtl_pairs.chr7.parquet")
     assert str(tc.source_file(cfg, "s", "susie", "chr7")).endswith(
         "cis_sQTL_SuSiE/topchefSplice_chr7_MaxPC25.SuSiE_summary.parquet")
+    # the contract leafcutter nominal reads the raw file the v0 sQTL packs streamed, every tested intron
+    assert str(tc.source_file(cfg, "s", "nominal", "chr7")).endswith(
+        "cis_sQTL_nominal/topchefSplice_chr7_MaxPC25.cis_qtl_pairs.chr7.parquet")
     assert len(tc.cis_sources()) == 6 and "trans_eQTL" not in tc.cis_sources()
     assert tc.dof(cfg) == {"ge": 435, "leafcutter": 480}
     assert tc.significance(cfg) == {"column": "p_perm", "op": "<", "threshold": 0.05}
     assert tc.PHENOTYPE_TYPE == {"e": "ge", "s": "leafcutter"}
-    # the contract leafcutter nominal reads the very file the v0 sQTL packs stream
-    from ..steps_pack import _raw_sqtl
-    assert _raw_sqtl(cfg, "chr7") == tc.source_file(cfg, "s", "nominal", "chr7")
 
 
 def main() -> int:

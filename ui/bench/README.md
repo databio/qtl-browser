@@ -12,17 +12,15 @@ npm run bench -- --target live --label x --runs 1 --pages FLNC-eqtl --scenario c
 npm run bench:compare -- bench/results/baseline-live.json bench/results/<label>-live.json
 npm run bench -- --target preview --label x --latency 90 --scenario cold,nav   # 90 ms added per request
 npm run bench -- --target preview --label pair --scenario pair --pages MYOZ1-eqtl,SYNPO2L-sqtl
-npm run bench -- --target rehearsal --label r2 --manifest immutable/manifest.<sha16>.json
 ```
 
 - `--query k=v&...` adds parameters to every page path, and to `/genes` in `nav`. The app reads no
   flags today (Plan 2's `?pack` flag is gone); Plan 2's results used it to pick the data path.
-- `--manifest <key>` names the manifest the target serves. It applies to `--target rehearsal` only,
-  where the bucket holds a staged copy (`immutable/manifest.<sha16>.json`) that `manifest.json`
-  itself has not been switched to yet.
+- `--manifest <key>` names the entry file the target serves (default `store.json`). It applies to
+  `--target rehearsal` only, which is v0 history (see Targets).
 - `--latency <ms>` adds that round-trip latency to every request of the tab with CDP
   `Network.emulateNetworkConditions`. Local serving hides the cost of serial requests, which
-  dominates on R2. With latency on, the self-check also reports how many DuckDB worker XHRs
+  dominates against the bucket. With latency on, the self-check also reports how many DuckDB worker XHRs
   waited at least 90% of it for headers, and stops if any did not.
 
 Playwright is pinned in `ui/package.json`, which pins the Chromium build. After `npm install`, run
@@ -92,34 +90,37 @@ any more, so it is a tripwire: any value above zero means a page found one.
 
 ## Targets
 
-- `live`: `https://qtl-browser.topchef.workers.dev`, which reads the R2 bucket named in
-  `ui/.env.production`.
-- `preview`: `http://localhost:4173`, serving `../data/derived` at `/data` with Range support
-  (`vite.config.ts`). Build the bundle for local data first; a plain `npm run build` reads R2:
+- `live`: `https://topchef.databio.org`, which reads the qtlstore on Backblaze B2 named in
+  `ui/.env.production` (`https://cloud2.databio.org/qtl-browser`). Results recorded before
+  2026-09-24 were taken against the older v0 site, `https://qtl-browser.topchef.workers.dev`, which
+  read a Cloudflare R2 bucket.
+- `preview`: `http://localhost:4173`, serving `QTL_DATA_DIR` (default `../data/store`) at `/data`
+  with Range support (`vite.config.ts`). Build the bundle for local data first; a plain
+  `npm run build` reads the B2 bucket:
 
   ```bash
   cd ui && VITE_DATA_BASE= npm run build && npm run preview
   ```
 
-  The harness does not start the server. It stops if `/data/manifest.json` does not answer 200,
+  The harness does not start the server. It stops if `/data/store.json` does not answer 200,
   if any data request goes to a non-local host, or if any data response is 404.
 
-  The local `/data` server now sends the same cache headers as the bucket (SPEC section 3):
+  The local `/data` server sends the same cache headers as the bucket:
   `public, max-age=31536000, immutable` for anything under `immutable/`, and `no-cache` for the
-  rest. It also sends an `ETag` and a `Last-Modified`, as R2 does: Chromium stores a 206 only when
+  rest. It also sends an `ETag` and a `Last-Modified`, as the bucket does: Chromium stores a 206 only when
   the response carries a strong validator, so without them `warm` re-downloaded every pack range
   while reading whole files from cache. Every file a page reads at a byte offset has an `immutable/`
   name, so `warm` on preview reads its packs from the browser cache, the way `live` does. Cold runs
   stay cold because each one gets a fresh browser context. Results recorded before Plan 6 were taken
   with `no-store`, where `warm` on preview downloaded everything again, so do not compare `warm`
-  across that line. The local server does not answer `If-None-Match`, so `warm`'s `manifest.json`
+  across that line. The local server does not answer `If-None-Match`, so `warm`'s `store.json`
   fetch is a 200 here and a 304 against the bucket.
 
-- `rehearsal`: the deploy rehearsal of Plan 6. A local preview at `http://localhost:4173` serving a
-  production bundle (`npm run build` with `VITE_DATA_BASE` left at its `.env.production` value) that
-  reads the real bucket, with `VITE_MANIFEST` pointing at the staged manifest copy named by
-  `--manifest`. It is the reverse of the preview guard: the run stops if any data request goes to
-  `localhost` or `127.0.0.1`, or if the app fetched a manifest other than the named key.
+- `rehearsal`: v0 history, the deploy rehearsal of Plan 6. A local preview of a production bundle
+  that read the real bucket through a staged `manifest.json` copy (`VITE_MANIFEST`, `--manifest`).
+  The v1 app has no `VITE_MANIFEST`, so this target no longer applies. It is the reverse of the
+  preview guard: the run stops if any data request goes to `localhost` or `127.0.0.1`, or if the app
+  fetched an entry file other than the named key.
 
 ## Scenarios
 
@@ -175,8 +176,8 @@ Per request (raw log): start and end relative to the scenario's zero, URL, metho
   the rule can be refined without re-running.
 - Max concurrency: most `data` requests in flight at once, from the request intervals. The app
   reads no parquet, so the old DuckDB probe-plus-`HEAD` pairs are gone; what overlaps now is the
-  app's own parallel reads, such as the startup fetches (`manifest.json`, the search index, the
-  GWAS index and the variant index) and a gene page's block, variants and GWAS requests, which go
+  app's own parallel reads, such as the startup fetches (`store.json` and its pointers, the search
+  index, the GWAS index and the variant index) and a gene page's block, variants and GWAS requests, which go
   out in one tick.
 - Longest data request: `data_max_ms` is the largest `end_ms - start_ms` over the `data` requests
   of the window, and `data_max_url` is that request's URL. A stall shows up here and nowhere else in
@@ -187,8 +188,9 @@ Per request (raw log): start and end relative to the scenario's zero, URL, metho
   flat under `immutable/` as `<stem>.<sha16>.<ext>` (SPEC section 3), so the kind is the stem:
   `eqtl_pack` (`immutable/eqtl.`), `variants` (`immutable/variants.`), `sqtl_pack`
   (`immutable/sqtl.`), `gwas_pack` (`immutable/gwas.`), `trans_pack` (`immutable/trans.`), `hits`,
-  `gwas_index`, `rsid_index`, `variant_index`, `search_index`, `manifest` (`manifest.json` or a
-  staged `immutable/manifest.<sha16>.json`), and `other` (anything else). The parquet kinds
+  `gwas_index`, `rsid_index`, `variant_index`, `search_index`, `manifest` (v1: `store.json` and the
+  `experiments/`, `variant_catalogs/` and `annotations/` pointers; v0: `manifest.json` or a staged
+  `immutable/manifest.<sha16>.json`), and `other` (anything else). The parquet kinds
   `gene_detail`, `eqtl_nominal`, `sqtl_nominal`, `gwas` (`gwas_dcm/`) and `trans` (`trans_pairs/`)
   are kept under their old names so older results stay comparable; every one of them should now read
   0. Results recorded before Plan 5 counted the manifest and search index under `other`, and results
@@ -223,7 +225,7 @@ driving the Playwright-installed Chromium, enabling CDP `Network` on each worker
 `page.on('workercreated')`.
 
 Metadata: time, target, label, runs, Playwright and Chromium versions, the app bundle name from the
-target's `index.html`, the data `manifest.json` `built` and `pipeline_commit` as served, repo HEAD
+target's `index.html`, the entry file's (`store.json`) `built` and `pipeline_commit` as served (null when absent), repo HEAD
 (and whether the tree was dirty), hostname, CPU count, network interface and `--note`, and the
 1-minute load average at the start and end of every scenario. Timings on a busy machine are
 indicative; counts and bytes are the stable part.

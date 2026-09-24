@@ -340,7 +340,7 @@ def validate_degrades_honestly():
 
 @case
 def codecs_do_not_mix():
-    """The v1 store modules import packfmt_v1 and never packfmt_v0; the v0 build imports only packfmt_v0.
+    """The v1 store modules import packfmt_v1 and never packfmt_v0; the v0 reader tools import only packfmt_v0.
     `verify_v0` and `bench_store` compare the two formats and are the only modules allowed both."""
     import ast
     here = Path(__file__).parent
@@ -360,8 +360,7 @@ def codecs_do_not_mix():
               "test_results.py"):
         if (here / m).exists():
             assert codecs(m) <= {"packfmt_v1"}, f"{m} imports {codecs(m)}"
-    for m in ("steps_pack.py", "steps_pack_trans.py", "steps_pack_variant.py", "steps_gwas.py", "steps_finish.py",
-              "packcheck.py", "packtool.py", "upload.py", "common.py", "test_packfmt.py", "test_packtool.py"):
+    for m in ("packtool.py", "common.py", "test_packfmt.py", "test_packtool.py", "adapters/verify_topchef.py"):
         assert codecs(m) <= {"packfmt_v0"}, f"{m} imports {codecs(m)}"
 
 

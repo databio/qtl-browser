@@ -1,8 +1,10 @@
-"""Build the browser-ready parquet tables.
+"""Build the shared input tables under `_tables/`: the extracted Zenodo files, the variant table
+with rsIDs, the refget reference and allele check, and the v0 tables the TOPCHeF adapter and its
+acceptance gate read. The qtlb v1 store itself is built by the adapters and store modules
+(pipeline/README.md), not here.
 
     uv run python -m pipeline build                    # all steps, skipping ones already done
     uv run python -m pipeline build --step nominal --force
-    uv run python -m pipeline validate
     uv run python -m pipeline steps                    # list steps in order
 """
 import argparse
@@ -10,9 +12,7 @@ import inspect
 import sys
 import time
 
-from . import (steps_extract, steps_finish, steps_gtf, steps_gwas, steps_nominal, steps_pack, steps_pack_trans,
-               steps_pack_variant, steps_refget, steps_tables,
-               steps_variants)
+from . import steps_extract, steps_gtf, steps_nominal, steps_refget, steps_tables, steps_variants
 from .common import Config, log
 
 STEPS = [
@@ -24,19 +24,7 @@ STEPS = [
     ("variants_refcheck", steps_refget.variants_refcheck),
     ("permutation_tables", steps_tables.permutation_tables),
     ("credible_sets", steps_tables.credible_sets),
-    ("trans", steps_tables.trans),
     ("nominal", steps_nominal.run),
-    ("pack_sqtl", steps_pack.sqtl),
-    ("pack_eqtl", steps_pack.eqtl),
-    ("pack_variants_trans", steps_pack_trans.variants_trans),
-    ("pack_trans", steps_pack_trans.pack),
-    ("search_index", steps_pack.search_index),
-    ("pack_hits", steps_pack_variant.pack_hits),
-    ("pack_variant_index", steps_pack_variant.pack_variant_index),
-    ("coloc_stub", steps_tables.coloc_stub),
-    ("gwas_bins", steps_gwas.run),
-    ("pack_gwas", steps_gwas.pack),
-    ("manifest", steps_finish.manifest),
 ]
 
 
@@ -46,29 +34,12 @@ def main() -> int:
     b = sub.add_parser("build")
     b.add_argument("--step", action="append", help="run only this step (repeatable)")
     b.add_argument("--force", action="store_true", help="re-run even if marked done")
-    sub.add_parser("validate")
     sub.add_parser("steps")
-    pk = sub.add_parser("packcheck", help="genome-wide checks and measurements for the pack format (SPEC.md); not a build step")
-    pk.add_argument("action", choices=["dof", "run", "report", "measure", "roundtrip"])
-    pk.add_argument("--type", action="append", choices=["e", "s"], help="QTL type (repeatable; default both)")
-    pk.add_argument("--chrom", nargs="+", help="chromosomes (default all)")
-    pk.add_argument("--workers", type=int, help="processes (default config workers)")
-    pk.add_argument("--source", choices=["auto", "raw", "derived"], default="auto",
-                    help="nominal rows from the extracted Zenodo files, the derived tables, or raw when complete (default)")
-    pk.add_argument("--md5", action="store_true", help="report: md5 the Zenodo archives (cached by size and mtime)")
-    pk.add_argument("--steepest", type=int, help="roundtrip: only the N phenotypes per type with the largest -log10 p genome-wide")
     args = ap.parse_args()
     cfg = Config()
 
     if args.cmd == "steps":
         print("\n".join(n for n, _ in STEPS))
-        return 0
-    if args.cmd == "validate":
-        steps_finish.validate(cfg)
-        return 0
-    if args.cmd == "packcheck":
-        from . import packcheck
-        packcheck.main(cfg, args)
         return 0
     names = [n for n, _ in STEPS]
     for s in args.step or []:

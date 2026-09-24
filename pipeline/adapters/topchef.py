@@ -604,7 +604,7 @@ def _nominal_chrom(args) -> tuple[str, int, int]:
                 else "split_part(split_part(n.phenotype_id, ':', 5), '.', 1)")
         # Every tested phenotype keeps every row, leafcutter included. `sqtl_nominal` governs only the
         # v0 `_tables/cis_sqtl_nominal` intermediate; the v0 sQTL packs stream this same raw file
-        # (`steps_pack._raw_sqtl`) for every tested intron, so a contract table trimmed to the
+        # for every tested intron, so a contract table trimmed to the
         # significant introns would leave most introns with `has_nominal = false` that v0 serves.
         for lo, hi in _gene_chunks(con, src, gene, NOMINAL_CHUNK_ROWS):
             part = out.with_name(f"sorted.{len(parts):03d}.tmp.parquet")

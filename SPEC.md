@@ -887,7 +887,7 @@ is compared to the source beta (`results.slope_error`); the experiment records t
 | GTEx v8 heart LV | `ge` | 367 (fitted) | 153,275,168 | 3.30e-3 |
 | GTEx v8 heart LV | `leafcutter` | 367 (fitted) | 16,489,572 | 2.91e-3 |
 
-TOPCHeF's two maxima equal v0's `packcheck roundtrip` numbers to every printed digit (v0 manifest
+TOPCHeF's two maxima equal v0's round-trip numbers to every printed digit (v0 manifest
 `precision.*.slope_max_error_over_se`: 3.518e-3, 4.466e-3), as they must, since the codes are
 identical. For the eQTL Catalogue, with a fitted dof, the measured error is at the same level. **So a
 rebuilt slope is within 0.5% of the row's SE** in every results set built so far. The check costs a
@@ -982,11 +982,18 @@ TOPCHeF object byte for byte as it was (pipeline/README.md, "Experiment modulari
 
 The v0 spec (sections 1-15, byte layouts for GWAS, trans and paged hits included) is in the
 analysis repo's git history at `qtlb-format/docs/SPEC.md`, commit `fe5a606`. Its Appendix A is now
-`qtlb-format/docs/EVIDENCE.md`. v0 packs are not read by any v1 code; TOPCHeF is rebuilt into the
-store.
+`qtlb-format/docs/EVIDENCE.md`.
+
+The frozen v0 build is on Rivanna at `/scratch/ns5bc/qtl-browser/derived/`: the packs in
+`immutable/`, `manifest.json`, and the v0 tables in `_tables/`. The live site no longer serves it.
+No v1 builder reads v0 packs; TOPCHeF is rebuilt into the store from its contract tables. Only the
+comparisons read that tree: `pipeline/verify_v0.py` (store.sbatch), the TOPCHeF acceptance gate
+`pipeline/adapters/verify_topchef.py` (adapter.sbatch), and `pipeline/bench_store.py`, through
+`packfmt_v0.py` and the v0 reader `packtool.py`. The code that built v0 (the pack steps, `packcheck`,
+the R2 upload) is in this repo's git history at commit `c62bca3`.
 
 ## 18. Open
 
 1. `store.json` `refget` URLs are written empty; the VRS-id index is reserved, not built.
-2. The v0 bridges (`pipeline/verify_v0.py`, `pipeline/bench_store.py`) import both codecs and go away
-   with the v0 packs.
+2. The v0 bridges (`pipeline/verify_v0.py`, `pipeline/bench_store.py`, `pipeline/adapters/verify_topchef.py`,
+   with `packfmt_v0.py` and `packtool.py`) go away with the frozen v0 build.

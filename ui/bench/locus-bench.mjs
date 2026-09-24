@@ -78,19 +78,19 @@ const log = msg => console.log(`[${new Date().toISOString().slice(11, 19)}] ${ms
 const sleep = ms => new Promise(r => setTimeout(r, ms))
 const withTimeout = (p, ms) => Promise.race([p, sleep(ms).then(() => undefined)])
 
-/** The R2 host production bundles read, from ui/.env.production. */
+/** The data host production bundles read, from ui/.env.production. */
 function productionDataBase() {
   const m = /^VITE_DATA_BASE=(.*)$/m.exec(readFileSync(join(UI, '.env.production'), 'utf8'))
   return m ? m[1].trim().replace(/\/$/, '') : null
 }
 
-const R2_BASE = productionDataBase()
+const DATA_BASE = productionDataBase()
 const TARGETS = {
-  live: { name: 'live', origin: 'https://qtl-browser.topchef.workers.dev', dataBase: R2_BASE },
+  live: { name: 'live', origin: 'https://topchef.databio.org', dataBase: DATA_BASE },
   preview: { name: 'preview', origin: 'http://localhost:4173', dataBase: 'http://localhost:4173/data' },
   // the deploy rehearsal: a local preview of a production bundle reading the real bucket, pointed
   // at a staged manifest copy with --manifest before manifest.json itself is switched over
-  rehearsal: { name: 'rehearsal', origin: 'http://localhost:4173', dataBase: R2_BASE },
+  rehearsal: { name: 'rehearsal', origin: 'http://localhost:4173', dataBase: DATA_BASE },
 }
 
 function parseArgs(argv) {
@@ -133,7 +133,7 @@ function parseArgs(argv) {
 // ---- request classification and recording ----------------------------------------------------
 
 function classifier(target) {
-  const dataHosts = new Set([new URL(target.dataBase).host, R2_BASE && new URL(R2_BASE).host].filter(Boolean))
+  const dataHosts = new Set([new URL(target.dataBase).host, DATA_BASE && new URL(DATA_BASE).host].filter(Boolean))
   const origin = new URL(target.origin).origin
   return url => {
     let u

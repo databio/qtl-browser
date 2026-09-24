@@ -41,7 +41,6 @@ import pyarrow.parquet as pq
 from .. import packfmt_v0 as packfmt
 from .. import packtool as pt
 from ..common import CHROMS, Config, connect, log, pack_file, variants_sql
-from ..steps_pack import _raw_sqtl, pointer_dir
 from . import topchef as tc
 
 # the genome, not `common.CHROMS`, which QTLB_CHROMS narrows: the v0 tables next to a smoke build
@@ -169,7 +168,7 @@ def _v0_nominal_sql(cfg: Config, chrom: str, ptype: str) -> str | None:
     them: (phenotype_id, position, A1, A2) with `slope`, `slope_se`, `pval_nominal`.
 
     eQTL: the v0 build intermediate, which is what the eQTL packs were encoded from. sQTL: the raw
-    Zenodo file, which is what the sQTL packs stream (`steps_pack._raw_sqtl`), every tested intron.
+    Zenodo file, which is what the sQTL packs stream (`topchef.source_file`), every tested intron.
     Not `_tables/cis_sqtl_nominal`: with `sqtl_nominal: significant` that intermediate holds only
     the significant introns, and comparing against it passed a contract table that had lost the
     rest. Slope and SE are cast to the contract's float32, the same cast the adapter makes, so a
@@ -181,7 +180,7 @@ def _v0_nominal_sql(cfg: Config, chrom: str, ptype: str) -> str | None:
         src = "read_parquet([" + ", ".join(f"'{f}'" for f in files) + "], hive_partitioning = false)"
         pid = "gene_id"
     else:
-        raw = _raw_sqtl(cfg, chrom)
+        raw = tc.source_file(cfg, "s", "nominal", chrom)
         if not raw.exists():
             return None
         src, pid = f"'{raw}'", "phenotype_id"
@@ -349,7 +348,7 @@ def verify_pack_counts(cfg: Config, chroms: list[str]) -> None:
     tot = {"introns": 0, "rows": 0, "no_rows": 0, "no_block": 0, "count_differs": 0, "ptr_bad": 0, "no_flag": 0}
     for chrom in chroms:
         sqtl = pack_file(cfg, f"sqtl/{chrom}", "qbs")
-        ptr_path = pointer_dir(cfg) / f"sqtl_{chrom}.parquet"
+        ptr_path = cfg.tmp / "pack_pointers" / f"sqtl_{chrom}.parquet"
         cn = tc.nominal_path(cfg, chrom)
         if not (sqtl.exists() and ptr_path.exists() and cn.exists()):
             check(False, f"pack counts {chrom}: missing input(s): "

@@ -145,7 +145,7 @@ BINS_SQL = """
 
 
 def bins(cfg: Config, out: Path, con=None) -> int:
-    """`gwas_bins.parquet`: v0's landing-track summary (steps_gwas.run), from the source rows as given.
+    """`gwas_bins.parquet`: v0's landing-track summary, from the source rows as given.
 
     Source rows, not the oriented table: v0 binned every row with a GRCh38 position and p > 0, the 9,346
     rows the reference does not read included, with the lead's `EA` and its beta as published. Values
