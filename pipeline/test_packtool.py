@@ -797,7 +797,7 @@ def rsid_index_round_trip():
     d = tmpdir()
     rng = np.random.default_rng(31)
     n = 3 * 64 + 5                                   # four blocks, the last one short
-    rs = np.sort(rng.choice(np.arange(1, 2_153_660_727), n, replace=False))
+    rs = np.sort(rng.choice(2_153_660_726, n, replace=False) + 1)   # from the range; np.arange of it would be 17 GB
     chrom = [pf.VARIANT_CHROMS[i % 23] for i in range(n)]
     vidx = rng.integers(0, 700_000, n)
     src = pa.table({"rs_number": pa.array(rs, pa.int64()), "chr": pa.array(chrom, pa.string()),

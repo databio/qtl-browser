@@ -11,8 +11,8 @@ import type { IncomingMessage, ServerResponse } from 'node:http'
 const DATA_DIR = process.env.QTL_DATA_DIR || fileURLToPath(new URL('../data/store', import.meta.url))
 
 /**
- * Serve DATA_DIR at /data in `vite` and `vite preview`, with HTTP Range support, the way R2 will
- * serve it in production. This replaces a public/ symlink, which `vite build` would copy
+ * Serve DATA_DIR at /data in `vite` and `vite preview`, with HTTP Range support, the way B2
+ * (cloud2.databio.org) serves it in production. This replaces a public/ symlink, which `vite build` would copy
  * wholesale into dist/.
  */
 function serveDerivedData(): Plugin {
@@ -27,14 +27,13 @@ function serveDerivedData(): Plugin {
     const type = file.endsWith('.json') ? 'application/json' : 'application/octet-stream'
     res.setHeader('Accept-Ranges', 'bytes')
     res.setHeader('Content-Type', type)
-    // R2 answers every object with an ETag and a Last-Modified. Chromium stores a 206 only when the
-    // response carries a strong validator, so without one `warm` re-downloads every pack range here
-    // while it reads them from cache against the bucket. Size and mtime identify a local file as
-    // well as the bucket's MD5 identifies a bucket object.
+    // Chromium stores a 206 only when the response carries a strong validator, so without one `warm`
+    // re-downloads every range. Size and mtime identify a local file. Production (cloud2.databio.org)
+    // must send one too; see the deploy notes in README.md.
     const st = statSync(file)
     res.setHeader('ETag', `"${st.size.toString(16)}-${Math.floor(st.mtimeMs).toString(16)}"`)
     res.setHeader('Last-Modified', new Date(st.mtimeMs).toUTCString())
-    // the production headers (SPEC section 3, set on R2 by pipeline/upload.py): an immutable/ name
+    // the production headers (SPEC section 3, set at upload to B2): an immutable/ name
     // carries the file's content hash, so a rebuilt file is a new URL and the old one can be cached
     // forever; everything else revalidates. Harness cold runs use a fresh browser context.
     res.setHeader('Cache-Control', rel.startsWith('immutable/') ? 'public, max-age=31536000, immutable' : 'no-cache')
