@@ -69,8 +69,13 @@ export interface IndexPart { file: string; rows: number; ords: [number, number][
 /** What the Home and About pages print for one phenotype type (phenotypes with a cis result). */
 export interface TypeCounts { phenotypes: number; with_rows: number; significant: number; significant_genes: number }
 
-/** Worst-case rounding of one results set (SPEC section 8, `precision`). */
-export interface ResultsPrecision { neglog10p_max_error: number; slope_se_max_rel_error: number; af_max_error: number }
+/** How much one results set was rounded (SPEC section 8, `precision`). The first three are
+ *  worst-case bounds; `slope_max_error_over_se` is measured at build time over `slope_rows_compared`
+ *  rows, and is null when the set has no dof (no slope is shown then). */
+export interface ResultsPrecision {
+  neglog10p_max_error: number; slope_se_max_rel_error: number; af_max_error: number
+  slope_max_error_over_se: number | null; slope_rows_compared?: number
+}
 /** A phenotype type's trans object (SPEC section 9). */
 export interface TransSet { file: string; n_rows: number; n_phenotypes: number; precision: Record<string, number> }
 export interface ResultsSet {
@@ -178,18 +183,56 @@ export async function fetchDecoded<T>(mark: string, detail: Record<string, unkno
 function checkNames(doc: unknown, where: string): void {
   // every string that looks like an object name must be one (qtlstore.object_names)
   const walk = (x: unknown) => {
-    if (typeof x === 'string') { if (/\.(qb[vehrx]|arrow\.zst)$/.test(x) && !OBJECT_NAME.test(x)) throw new Error(`${where}: bad object name ${x}`) }
+    // every extension SPEC section 3 lists: qbv qbe qbg qbt qbh qbr qbx, qgi qgl, arrow.zst
+    if (typeof x === 'string') { if (/\.(qb[vegthrx]|qg[il]|arrow\.zst)$/.test(x) && !OBJECT_NAME.test(x)) throw new Error(`${where}: bad object name ${x}`) }
     else if (Array.isArray(x)) x.forEach(walk)
     else if (x && typeof x === 'object') Object.values(x).forEach(walk)
   }
   walk(doc)
 }
 
+/** The catalog and annotation a previous open found this experiment naming (lib/store.ts is the only
+ *  writer). Kept per data host and experiment so a dev build pointed at another store cannot inherit
+ *  ids from this one. */
+interface Remembered { catalog: string; annotation: string }
+const REMEMBER_KEY = `qtlstore:${DATA_BASE}:${EXPERIMENT_ID}`
+
+function remembered(): Remembered | null {
+  try {
+    const r = JSON.parse(localStorage.getItem(REMEMBER_KEY) ?? 'null') as Remembered | null
+    return typeof r?.catalog === 'string' && typeof r?.annotation === 'string' ? r : null
+  } catch { return null }   // no localStorage, or a value this build did not write: guess nothing
+}
+
+function remember(r: Remembered): void {
+  try { localStorage.setItem(REMEMBER_KEY, JSON.stringify(r)) } catch { /* not worth failing an open over */ }
+}
+
+/** A speculative pointer fetch when it was for the id the experiment turned out to name, else a
+ *  fresh one. A guess that 404s (the store was rebuilt) falls through to the real id. */
+async function speculated<T>(spec: Promise<T> | null, guessed: string | undefined, want: string,
+  fetchIt: (id: string) => Promise<T>): Promise<T> {
+  if (spec && guessed === want) {
+    const got = await spec.catch(() => null)
+    if (got) return got
+  }
+  return fetchIt(want)
+}
+
 async function openStore(): Promise<Store> {
-  // the experiment's pointer is fetched alongside store.json (its id is known), and used only once
-  // store.json lists it: one round trip fewer before the first object read
+  // One wave, not two. The experiment's pointer is fetched alongside store.json (its id is a
+  // build-time constant) and used only once store.json lists it. The catalog and annotation names
+  // live inside the experiment document, so reading them would cost a second round trip; instead the
+  // ids a previous open recorded are fetched in this same wave. A right guess -- the normal case,
+  // since these ids change only when the store is rebuilt -- removes the round trip entirely, and a
+  // wrong one costs only the two discarded requests. The pointer documents are served with
+  // `no-cache` and no validator, so each round trip is a full origin fetch; this is the only part of
+  // that the reader can do anything about.
+  const guess = remembered()
   const expP = pointer<ExperimentDoc>(`experiments/${EXPERIMENT_ID}.json`)
-  expP.catch(() => {})
+  const catP = guess ? pointer<CatalogDoc>(`${CATALOG_DIR}/${guess.catalog}.json`) : null
+  const annP = guess ? pointer<AnnotationDoc>(`annotations/${guess.annotation}.json`) : null
+  for (const p of [expP, catP, annP]) p?.catch(() => {})
   const store = await pointer<StoreDoc>('store.json')
   if (store.format_version !== FORMAT_VERSION)
     throw new Error(`store.json: format version ${store.format_version}, and this build reads version ${FORMAT_VERSION}. The data was updated; reload the page.`)
@@ -199,9 +242,13 @@ async function openStore(): Promise<Store> {
   if (!store[CATALOG_DIR]?.includes(experiment.catalog) || !store.annotations?.includes(experiment.annotation))
     throw new Error(`experiment ${experiment.id}: variant catalog ${experiment.catalog} or annotation ${experiment.annotation} is not in store.json`)
   const [catalog, annotation] = await Promise.all([
-    pointer<CatalogDoc>(`${CATALOG_DIR}/${experiment.catalog}.json`),
-    pointer<AnnotationDoc>(`annotations/${experiment.annotation}.json`),
+    speculated(catP, guess?.catalog, experiment.catalog, id => pointer<CatalogDoc>(`${CATALOG_DIR}/${id}.json`)),
+    speculated(annP, guess?.annotation, experiment.annotation, id => pointer<AnnotationDoc>(`annotations/${id}.json`)),
   ])
+  // the two URLs can come from a remembered id, so check the documents are the ones the experiment
+  // names rather than trusting the path they were fetched from
+  if (catalog.id !== experiment.catalog) throw new Error(`experiment ${experiment.id}: catalog ${experiment.catalog} answered with id "${catalog.id}"`)
+  if (annotation.id !== experiment.annotation) throw new Error(`experiment ${experiment.id}: annotation ${experiment.annotation} answered with id "${annotation.id}"`)
   if (experiment.catalog_identity !== catalog.identity_digest)
     throw new Error(`experiment ${experiment.id}: catalog_identity ${experiment.catalog_identity} is not catalog ${catalog.id}'s ${catalog.identity_digest}`)
   if (catalog.orientation !== 'ref_alt') throw new Error(`catalog ${catalog.id}: orientation "${catalog.orientation}", this reader reads ref_alt`)
@@ -217,6 +264,8 @@ async function openStore(): Promise<Store> {
   for (const [c] of Object.entries(experiment.hits)) if (!chroms.has(c)) throw new Error(`experiment ${experiment.id}: hits for ${c}, not in the catalog`)
   for (const r of experiment.results) for (const c of Object.keys(r.files))
     if (!chroms.has(c)) throw new Error(`experiment ${experiment.id}: ${r.phenotype_type} results for ${c}, not in the catalog`)
+  // only after every check: the next open guesses these two ids and skips a round trip
+  remember({ catalog: experiment.catalog, annotation: experiment.annotation })
   return { store, experiment, catalog, annotation, chroms, results,
     hasTrans: experiment.results.some(r => r.trans != null), hasGwas: experiment.gwas != null }
 }
@@ -378,7 +427,11 @@ export interface Counts {
   variants_cis?: number; variants_trans_only?: number
   gwas_variants?: number; trans_pairs?: number
 }
-export interface PrecisionKind { neglog10p_max_error: number; slope_se_max_rel_error: number }
+export interface PrecisionKind {
+  neglog10p_max_error: number; slope_se_max_rel_error: number
+  /** measured slope error in units of the row's SE; null when the set has no dof */
+  slope_max_error_over_se: number | null
+}
 export interface Precision { af_max_error: number; eqtl: PrecisionKind; sqtl: PrecisionKind }
 
 /** What the pages print about the release: the resolved store plus counts, sources and precision. */
@@ -388,6 +441,13 @@ export interface StoreInfo extends Store {
   precision: Precision | null
   /** annotation release label, e.g. "v34 (GRCh38.p13)" */
   annotationVersion: string | null
+}
+
+/** The adapter records a Zenodo release as the directory it unpacked (`zenodo_21382723`); cite it
+ *  the way Zenodo itself does, as a DOI. Anything else is passed through as written. */
+function zenodoDoi(s: string | undefined): string | undefined {
+  const m = /^zenodo[_.]?(\d+)$/i.exec(s ?? '')
+  return m ? `10.5281/zenodo.${m[1]}` : s
 }
 
 export const getStoreInfo = memo(async (): Promise<StoreInfo> => {
@@ -403,16 +463,20 @@ export const getStoreInfo = memo(async (): Promise<StoreInfo> => {
   const e = s.results.get(EQTL_TYPE)?.precision, q = s.results.get(SQTL_TYPE)?.precision
   const precision = e && q ? {
     af_max_error: Math.max(e.af_max_error, q.af_max_error),
-    eqtl: { neglog10p_max_error: e.neglog10p_max_error, slope_se_max_rel_error: e.slope_se_max_rel_error },
-    sqtl: { neglog10p_max_error: q.neglog10p_max_error, slope_se_max_rel_error: q.slope_se_max_rel_error },
+    eqtl: { neglog10p_max_error: e.neglog10p_max_error, slope_se_max_rel_error: e.slope_se_max_rel_error,
+            slope_max_error_over_se: e.slope_max_error_over_se ?? null },
+    sqtl: { neglog10p_max_error: q.neglog10p_max_error, slope_se_max_rel_error: q.slope_se_max_rel_error,
+            slope_max_error_over_se: q.slope_max_error_over_se ?? null },
   } : null
   const version = s.annotation.source?.version ?? null
   const src = s.experiment.source?.source as { zenodo?: string } | undefined
+  // no GWAS row: `gwas.id` names which set of the release was used, which the About text already
+  // says in prose, with the case and control counts
   const sources: StoreInfo['sources'] = {
     gencode: { version: version ?? s.annotation.id, description: `gene annotation (${s.annotation.id})` },
+    reference: { version: s.catalog.collection_digest, description: 'GRCh38 reference sequence collection (seqcol)' },
     catalog: { version: s.catalog.identity_digest, description: `variant catalog ${s.catalog.id}, ${s.catalog.n_sites.toLocaleString('en-US')} sites` },
-    [s.experiment.id]: { version: src?.zenodo ?? s.experiment.id, description: `experiment ${s.experiment.id} (store ${s.store.name})` },
+    [s.experiment.id]: { version: zenodoDoi(src?.zenodo) ?? s.experiment.id, description: `experiment ${s.experiment.id} (store ${s.store.name})` },
   }
-  if (s.experiment.gwas) sources.gwas = { version: s.experiment.gwas.id, description: s.experiment.gwas.title }
   return { ...s, counts: c, sources, precision, annotationVersion: version?.split(' ')[0] ?? null }
 })

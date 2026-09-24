@@ -4,8 +4,11 @@ data/**
 !data/raw/sources.yaml
 !data/raw/download.py
 
-# secrets (R2 token for pipeline/upload.py)
+# secrets (bucket credentials for uploading the store)
 .env
+
+# Finder metadata
+.DS_Store
 
 # python env
 .venv/

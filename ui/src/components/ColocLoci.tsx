@@ -30,22 +30,12 @@ const TRAIT_COLORS: Record<string, string> = {
  * bars are the GWAS's strongest p per 5 Mb bin, from the bin summary the experiment's `gwas.bins`
  * names (v0's `gwas_dcm_bins.json`, same bins and values): one small whole-object read.
  */
-export default function ColocLoci() {
-  const s = useStoreInfo()
-  if (s && !s.hasGwas) return (
-    <SectionPanel title="Loci colocalized with dilated cardiomyopathy risk" description="Single-locus coloc with the Jurgens et al. 2024 DCM GWAS, PP.H4 > 0.8.">
-      <Unavailable what="Colocalization and DCM GWAS data" />
-    </SectionPanel>
-  )
-  if (!s) return <div className="h-[268px]" aria-busy="true" />
-  return <ColocTrack />
-}
-
 /** The coloc genes at their annotated TSS, on the store's chromosomes: from the table in coloc.ts
  *  when the store's annotation is the one it was read from (no request), else through the store's
  *  gene lookup (one small read per symbol). */
 async function colocLoci(): Promise<ColocLocus[]> {
   const s = await getStore()
+  if (!s.hasGwas) return []   // the panel shows "not available" instead; do not spend lookups on it
   const e = new Set(COLOC_EQTL_GENES), q = new Set(COLOC_SQTL_GENES)
   const symbols = [...new Set([...COLOC_EQTL_GENES, ...COLOC_SQTL_GENES])]
   const pinned = s.annotation.identity_digest === COLOC_ANNOTATION
@@ -62,8 +52,8 @@ async function colocLoci(): Promise<ColocLocus[]> {
   return out
 }
 
-/** The track itself. */
-function ColocTrack() {
+export default function ColocLoci() {
+  const s = useStoreInfo()
   const [chrom, setChrom] = useState<ChromSizes | null>(null)
   const [chromError, setChromError] = useState<string | null>(null)
   const [hits, setHits] = useState<ColocLocus[] | null>(null)
@@ -72,6 +62,10 @@ function ColocTrack() {
   const [skipped, setSkipped] = useState(0)
   const navigate = useNavigate()
 
+  // all three start at mount, not after the store has opened: chromosome sizes come from seqcol and
+  // need no store at all, and the other two wait on `getStore()` themselves. Gating the whole
+  // component on the store instead put two pointer round trips in front of the seqcol request and
+  // held the page blank for both of them.
   useEffect(() => {
     // autosomes only: the coloc loci and the DCM GWAS are both autosomal
     fetchChromSizes('GRCh38')
@@ -107,6 +101,14 @@ function ColocTrack() {
         </span>
       )}
     </span>
+  )
+
+  // an experiment without the DCM GWAS has no bars and no coloc to show (after the hooks, so the
+  // fetches above still start at mount whatever the store turns out to hold)
+  if (s && !s.hasGwas) return (
+    <SectionPanel title="Loci colocalized with dilated cardiomyopathy risk" description="Single-locus coloc with the Jurgens et al. 2024 DCM GWAS, PP.H4 > 0.8.">
+      <Unavailable what="Colocalization and DCM GWAS data" />
+    </SectionPanel>
   )
 
   return (

@@ -30,6 +30,7 @@
 import { closeSync, openSync, readFileSync, readSync } from 'node:fs'
 import { join } from 'node:path'
 import { tableFromIPC } from 'apache-arrow'
+import { seqcolDigest } from '../src/lib/chrom-sizes.ts'
 import { COLOC_ANNOTATION, COLOC_LOCI } from '../src/lib/coloc.ts'
 import { checkFileHeader, decodeArrowObject, decodeLookupDir, lookupBucket, lookupDirLen, lookupKey, decodeGwasBins, decodeGwasIndex, decodeGwasRange, decodeHitsFrame, decodeHitsTable, decodeResultBlock, decodeRsidRecords,
   decodeTransFrame, decodeVariantIndex, decodeVariantPage, decodeVariantRange, gwasRange, HEADER_LEN, hitsOf, hitsTableLen, KIND,
@@ -82,6 +83,12 @@ const catalog = JSON.parse(readFileSync(join(STORE, ref.catalog_dir, `${ref.cata
 const names: string[] = catalog.chromosomes.map((c: { name: string }) => c.name)
 
 // ---- variant index ----------------------------------------------------------------------------
+// the genome track fetches its chromosome lengths from seqcol by a digest of its own; it has to be
+// the collection the catalog's positions are anchored to, or the track is drawn against a reference
+// the data does not use
+check(seqcolDigest() === catalog.collection_digest,
+  `genome track collection (lib/chrom-sizes.ts) is the catalog's ${catalog.collection_digest}${seqcolDigest() === catalog.collection_digest ? '' : `, but it cites ${seqcolDigest()}`}`)
+
 const vx = decodeVariantIndex(whole(catalog.vidx), names, catalog.collection_digest, catalog.vidx)
 {
   const p = ref.vidx

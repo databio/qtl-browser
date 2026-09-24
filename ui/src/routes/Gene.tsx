@@ -3,6 +3,7 @@ import { Link, useParams, useSearchParams } from 'react-router'
 import ExternalLink from '@/components/ExternalLink'
 import { Page } from '@/components/page'
 import { PageHeader } from '@/components/page-header'
+import RoundingNote from '@/components/rounding-note'
 import { SectionPanel } from '@/components/section-panel'
 import { KvTable } from '@/components/kv-table'
 import { Tooltip } from '@/components/tooltip'
@@ -208,7 +209,7 @@ function EqtlTab({ hit, gp, d, transTable }: { hit: SearchHit; gp: GenePack; d: 
         {cs === null ? <TableSkeleton columns={[{ w: 'w-4' }, { w: 'w-12' }, { w: 'w-8', align: 'right' }, { w: 'w-24' }, { w: 'w-10', align: 'right' }, { w: 'w-10', align: 'right' }, { w: 'w-16', align: 'right' }]} rows={2} /> : <CredibleSetTable rows={cs} />}
       </SectionPanel>
       <ColocSection sym={sym} qtlType="e" />
-      <SectionPanel title="cis associations" description="Every variant within ±1 Mb of the TSS; rows tinted when the variant is in a credible set. Click a row to open the variant.">
+      <SectionPanel title="cis associations" description={<>Every variant within ±1 Mb of the TSS; rows tinted when the variant is in a credible set. <RoundingNote /> Click a row to open the variant.</>}>
         <CisTable table={locus.name} failed={locus.failed} chr={hit.chr} qtlType="e" fileStem={`${sym}_cis_eqtl`} />
       </SectionPanel>
       <TransSection table={transTable} qtlType="e" fileStem={`${sym}_trans_eqtl`} />
@@ -290,7 +291,7 @@ function SqtlIntrons({ hit, gp, d, transTable, phens }: { hit: SearchHit; gp: Ge
             {cs === null ? <TableSkeleton columns={[{ w: 'w-4' }, { w: 'w-12' }, { w: 'w-8', align: 'right' }, { w: 'w-24' }, { w: 'w-10', align: 'right' }, { w: 'w-10', align: 'right' }, { w: 'w-16', align: 'right' }]} rows={2} /> : <CredibleSetTable rows={cs} />}
           </SectionPanel>
           <ColocSection sym={sym} qtlType="s" />
-          <SectionPanel title="cis associations" description={<>Every variant within ±1 Mb of the TSS for <b className="font-medium text-base-content/80">this intron</b>; rows tinted when the variant is in a credible set. Click a row to open the variant.</>}>
+          <SectionPanel title="cis associations" description={<>Every variant within ±1 Mb of the TSS for <b className="font-medium text-base-content/80">this intron</b>; rows tinted when the variant is in a credible set. <RoundingNote /> Click a row to open the variant.</>}>
             <CisTable table={locus.name} failed={locus.failed} chr={hit.chr} qtlType="s" phenotypeId={sel.phenotype_id} fileStem={`${sym}_${sel.cluster_id}_${sel.intron_start}_${sel.intron_end}_cis_sqtl`} />
           </SectionPanel>
         </>
@@ -308,7 +309,7 @@ function TransSection({ table, qtlType, fileStem }: { table: string | null; qtlT
   const hasTrans = useStoreInfo()?.hasTrans ?? false
   return (
     <SectionPanel title="trans associations"
-      description={<>Every variant outside the cis window associated with this gene's {what}{qtlType === 's' && <> <b className="font-medium text-base-content/80">(any intron)</b></>}. Click a row to open the variant.</>}>
+      description={<>Every variant outside the cis window associated with this gene's {what}{qtlType === 's' && <> <b className="font-medium text-base-content/80">(any intron)</b></>}. <RoundingNote kind="trans" /> Click a row to open the variant.</>}>
       {hasTrans ? <TransTable table={table} qtlType={qtlType} fileStem={fileStem} /> : <Unavailable what={`trans ${qtlType === 'e' ? 'eQTL' : 'sQTL'} results`} />}
     </SectionPanel>
   )

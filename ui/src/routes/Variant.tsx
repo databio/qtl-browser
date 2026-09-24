@@ -5,6 +5,7 @@ import { Page } from '@/components/page'
 import { PageHeader } from '@/components/page-header'
 import { KvTable } from '@/components/kv-table'
 import { SectionPanel } from '@/components/section-panel'
+import RoundingNote from '@/components/rounding-note'
 import { DetailSkeleton, Empty, TableSkeleton, Unavailable } from '@/components/states'
 import TransTable from '@/components/TransTable'
 import { CopyButton } from '@/components/copy-button'
@@ -157,19 +158,18 @@ function VariantBody({ v, hits }: { v: VariantRecord; hits: Hits }) {
           { label: 'Position', value: <span className="tabular-nums">{v.chr}:{fmtInt(v.position)} (GRCh38)</span> },
           { label: 'Links', value: <span className="flex flex-wrap gap-x-4">
             <ExternalLink icon href={ucsc(v.chr, v.position - 50, v.position + 50)}>UCSC</ExternalLink>
-            {/* both URLs embed ref and alt, so they need the alleles */}
-            {v.A1 && <ExternalLink icon href={gnomad(v)}>gnomAD</ExternalLink>}
-            {v.A1 && <ExternalLink icon href={openTargets(v)}>Open Targets</ExternalLink>}
+            <ExternalLink icon href={gnomad(v)}>gnomAD</ExternalLink>
+            <ExternalLink icon href={openTargets(v)}>Open Targets</ExternalLink>
             {rsid && <ExternalLink icon href={ensemblVar(rsid)}>Ensembl</ExternalLink>}
           </span> },
           { label: 'rsID match', value: v.match === 'exact' ? 'alleles match dbSNP'
-            : v.match === 'position' ? (v.A1 ? 'position only (alleles differ from dbSNP record)' : 'by position (alleles not reported)')
+            : v.match === 'position' ? 'position only (alleles differ from dbSNP record)'
             : 'no dbSNP record' },
         ]} />
+        {/* every site in the store has both alleles (SPEC section 5), so neither is ever missing */}
         <KvTable rows={[
-          { label: 'A1 / A2',
-            value: v.A1 ? `${v.A1} / ${v.A2}` : 'not reported (the trans eQTL file has no allele columns)' },
-          { label: 'A1', value: 'effect allele (minor allele in TOPCHeF)' },
+          { label: 'A1 / A2', value: `${v.A1} / ${v.A2}` },
+          { label: 'A1', value: 'alternate allele (carries the effect)' },
           { label: 'A2', value: 'reference allele' },
         ]} />
       </div>
@@ -225,7 +225,7 @@ function VariantBody({ v, hits }: { v: VariantRecord; hits: Hits }) {
           )}
       </SectionPanel>
 
-      <SectionPanel title="trans associations" description="Genes and splice phenotypes anywhere in the genome whose expression or splicing this variant associates with, outside their cis windows.">
+      <SectionPanel title="trans associations" description={<>Genes and splice phenotypes anywhere in the genome whose expression or splicing this variant associates with, outside their cis windows. <RoundingNote kind="trans" /></>}>
         {hasTrans ? <TransTable table={transTable} keyedBy="variant" fileStem={`${rsid ?? `${v.chr}_${v.position}`}_trans`} />
           : <Unavailable what="trans eQTL and sQTL results" />}
       </SectionPanel>

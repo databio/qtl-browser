@@ -7,7 +7,6 @@ import { fmtBp, fmtNum, fmtP, rsFromNumber } from '@/lib/format'
 import { cisAll, cisCount, cisRows, type CisQuery, type CisRow } from '@/lib/queries'
 import { csTint, useIsDark } from '@/lib/plot-theme'
 import { downloadCSV, roundedCsvName } from '@/lib/csv'
-import RoundingNote from '@/components/rounding-note'
 import { roundingText, useRoundingFacts } from '@/lib/rounding'
 import { ROW_LINK, ROW_LINK_TEXT, useRowLink } from '@/lib/row-link'
 
@@ -78,7 +77,8 @@ export default function CisTable({ table, failed, chr, qtlType, phenotypeId, fil
           <option value="1e-5">p ≤ 1e-5</option>
           <option value="5e-8">p ≤ 5e-8</option>
         </select>
-        <RoundingNote className="max-w-md text-right" />
+        {/* the note itself is in the section description (routes/Gene.tsx); the button keeps it as a
+            title, because the file it writes leaves the page behind */}
         <button className="btn btn-sm h-8 gap-1.5 rounded-lg border-base-300 font-medium" title={rounding ? roundingText(rounding) : undefined}
           onClick={exportCSV} disabled={!table}><Download className="size-3.5" /> CSV</button>
       </div>
