@@ -1,8 +1,12 @@
-/** Every SQL string over the boot tables (db.ts: `phenotypes`, `genes`, `search_index`) in one place. */
+/** The row shapes the pages share, and the SQL over the tables a page materializes (cis windows,
+ *  trans rows). Gene lookups and lists are plain JS over the per-chromosome objects (gene-index.ts),
+ *  re-exported here. */
 import { lit, one, rows, type Row } from './db'
+export { genesInRegion, genesInWindow, resolveGene, searchGenes } from './gene-index'
 
-/** One `search_index` row (db.ts): an annotated gene on a catalog chromosome, joined to its eQTL
- *  phenotype. `tss`, bounds, symbol and biotype come from the annotation, never from the study. */
+/** A gene as the pages list it (gene-index.ts `hitOf`): an annotated gene on a catalog chromosome,
+ *  joined to its eQTL phenotype. `tss`, bounds, symbol and biotype come from the annotation, never
+ *  from the study. */
 export interface SearchHit extends Row {
   gene_id: string; symbol: string | null; chr: string; tss: number
   start: number; end: number; strand: string; biotype: string; gene_version: number | null
@@ -54,16 +58,6 @@ export interface TransRow extends Row {
   gene_chr: string; gene_tss: number; variant_chr: string; position: number; rsid: string | null; af: number
   pval: number; beta: number; beta_se: number; r2: number
 }
-
-export const searchGenes = (q: string, limit = 12) =>
-  rows<SearchHit>(`
-    SELECT * FROM search_index
-    WHERE upper(symbol) LIKE ${lit(q.toUpperCase() + '%')} OR upper(gene_id) LIKE ${lit(q.toUpperCase() + '%')}
-    ORDER BY has_results DESC, tested DESC, is_egene DESC NULLS LAST, length(symbol), symbol LIMIT ${limit}`)
-
-export const resolveGene = (id: string) =>
-  one<SearchHit>(`SELECT * FROM search_index WHERE gene_id = ${lit(id)} OR upper(symbol) = ${lit(id.toUpperCase())}
-                  ORDER BY has_results DESC, tested DESC LIMIT 1`)
 
 export interface Exon extends Row { start: number; end: number }
 /** Everything the gene page needs besides the locus and the introns (gene.ts): the genes row
@@ -173,13 +167,6 @@ export const transCount = async (q: TransQuery) =>
 export const transAll = (q: TransQuery) =>
   rows<TransRow>(`SELECT * ${transWhere(q)} ORDER BY ${transOrder(q)}`)
 
-export const genesInRegion = (chr: string, start: number, end: number) =>
-  rows<SearchHit>(`SELECT * FROM search_index WHERE chr = ${lit(chr)} AND tss BETWEEN ${start} AND ${end} ORDER BY tss`)
-
 // ---- gene track under the locus plot --------------------------------------------------------
 
 export interface WindowGene extends Row { gene_id: string; symbol: string | null; start: number; end: number; strand: string; tss: number; biotype: string }
-/** Genes overlapping a window, from the in-memory search index (no fetch). */
-export const genesInWindow = (chr: string, lo: number, hi: number) =>
-  rows<WindowGene>(`SELECT gene_id, symbol, start, "end", strand, tss, biotype FROM search_index
-    WHERE chr = ${lit(chr)} AND "end" >= ${lo} AND start <= ${hi} ORDER BY start`)

@@ -20,6 +20,7 @@ import pyarrow.parquet as pq
 from . import packfmt_v1 as pf
 from . import qtlstore as qs
 from . import results as rs
+from .test_annotation import build_fixture as build_annotation
 from .test_catalog import build as build_catalog
 
 NOMINAL = [  # phenotype_type, phenotype_id, gene_id, chr, pos, ref, alt, beta, se, pvalue
@@ -72,7 +73,7 @@ def write_tables(d: Path, with_new_columns: bool = True) -> Path:
 
 def build_all(d: Path, with_new_columns: bool = True):
     st, rg, cdoc = build_catalog(d)
-    st.write_pointer("annotations", "ann", {"id": "ann", "genes": st.put(b"genes", "arrow.zst")})
+    build_annotation(st)
     doc = rs.build(st, "exp", write_tables(d, with_new_columns), "cat1", "ann", ["chr1", "chr2"])
     st.write_store("t", [])
     return st, rg, doc
@@ -175,7 +176,7 @@ def add_trans_and_gwas(t: Path) -> None:
 
 def build_with_trans(d: Path):
     st, rg, cdoc = build_catalog(d)
-    st.write_pointer("annotations", "ann", {"id": "ann", "genes": st.put(b"genes", "arrow.zst")})
+    build_annotation(st)
     t = write_tables(d)
     add_trans_and_gwas(t)
     doc = rs.build(st, "exp", t, "cat1", "ann", ["chr1", "chr2"])
@@ -214,6 +215,36 @@ def test_trans_objects_index_and_hits():
         assert [(int(x["vidx"]), int(x["ord"])) for x in tr] == [(0, r["G9"]["ord"]), (3, r["G1"]["ord"])]
         assert abs(float(tr["value"][1]) - 8.0) < 1e-5 and abs(float(tr["beta"][1]) - 0.8) < 1e-6
         assert np.all(np.isnan(h2[h2["kind"] != rs.HIT_TRANS]["beta"]))
+
+
+def test_index_parts_and_counts():
+    """The browser's copy of the search index: one part per chromosome built, a trans-only part, the
+    ord runs each part holds, and the counts the Home page prints. `add_split` on a pointer without
+    them writes the same keys `build` did, and validate fails a part that differs from the index."""
+    with tempfile.TemporaryDirectory() as d:
+        st, rg, doc = build_with_trans(Path(d))
+        r = rows_by_id(st, doc)
+        parts = doc["search_index_parts"]
+        assert list(parts) == ["chr1", "chr2"]
+        got = {c: [x["phenotype_id"] for x in rs.decode_arrow((st.immutable / e["file"]).read_bytes()).to_pylist()]
+               for c, e in parts.items()}
+        assert got == {"chr1": ["G1", "G2"], "chr2": ["I1", "I2", "I3"]}, got
+        assert parts["chr1"]["ords"] == [[r["G1"]["ord"], r["G2"]["ord"]]] and parts["chr2"]["rows"] == 3
+        to = doc["search_index_trans_only"]
+        assert to["rows"] == 1 and to["ords"] == [[r["G9"]["ord"]] * 2]
+        # G2 has no rows; the clu_1 group (p_perm 0.01) makes all three introns significant; I2, I3 name no gene
+        assert doc["counts"] == {"ge": {"phenotypes": 2, "with_rows": 1, "significant": 1, "significant_genes": 1},
+                                 "leafcutter": {"phenotypes": 3, "with_rows": 1, "significant": 3, "significant_genes": 1}}, doc["counts"]
+        assert rs.ord_ranges([0, 1, 2, 5, 7, 8]) == [[0, 2], [5, 5], [7, 8]] and rs.ord_ranges([]) == []
+        old = {k: v for k, v in doc.items() if k not in rs.SPLIT_KEYS}
+        st.write_pointer("experiments", "exp", old)
+        assert any("no search_index_parts" in f for f in st.validate(refget=rg))
+        assert rs.add_split(st, "exp") == doc
+        assert st.validate(refget=rg) == []
+        swapped = dict(doc, search_index_parts={"chr1": parts["chr2"], "chr2": parts["chr1"]})
+        st.write_pointer("experiments", "exp", swapped)
+        fails = st.validate(refget=rg)
+        assert any("part chr1: rows differ" in f for f in fails), fails
 
 
 def _layout_rows():
@@ -261,7 +292,7 @@ def test_trans_frame_order_keeps_genes_contiguous():
 def test_trans_rejects_orphans():
     with tempfile.TemporaryDirectory() as d:
         st, rg, cdoc = build_catalog(Path(d))
-        st.write_pointer("annotations", "ann", {"id": "ann", "genes": st.put(b"genes", "arrow.zst")})
+        build_annotation(st)
         t = write_tables(Path(d))
         add_trans_and_gwas(t)
         tr = pq.read_table(t / "trans.parquet").to_pylist()
@@ -463,7 +494,7 @@ def test_significance_uses_the_rules_column():
     with tempfile.TemporaryDirectory() as d:
         d = Path(d)
         st, rg, cdoc = build_catalog(d)
-        st.write_pointer("annotations", "ann", {"id": "ann", "genes": st.put(b"genes", "arrow.zst")})
+        build_annotation(st)
         t = write_tables(d)
         ing = json.loads((t / "ingestion.json").read_text())
         doc = rs.build(st, "exp", t, "cat1", "ann", ["chr1", "chr2"], ingestion={**ing, "significance": rule})
@@ -519,7 +550,7 @@ def test_fitted_dof_and_has_nominal_check():
     assert rs._dof({"dof": 12, "usable": False, "reason": "no fit"})[0] is None
     with tempfile.TemporaryDirectory() as d:
         st, rg, cdoc = build_catalog(Path(d))
-        st.write_pointer("annotations", "ann", {"id": "ann", "genes": st.put(b"genes", "arrow.zst")})
+        build_annotation(st)
         t = write_tables(Path(d))
         ph = pq.read_table(t / "phenotypes.parquet").to_pandas()
         ph["has_nominal"] = True
@@ -536,7 +567,7 @@ def test_read_block_with_null_dof():
     # an unusable dof fit stores `dof: null`; read_block must not invent slopes from a stand-in dof
     with tempfile.TemporaryDirectory() as d:
         st, rg, cdoc = build_catalog(Path(d))
-        st.write_pointer("annotations", "ann", {"id": "ann", "genes": st.put(b"genes", "arrow.zst")})
+        build_annotation(st)
         t = write_tables(Path(d))
         ing = json.loads((t / "ingestion.json").read_text())
         ing["dof"]["ge"] = {"dof": 12, "usable": False, "reason": "no fit"}
@@ -554,7 +585,7 @@ def test_read_block_with_null_dof():
 def test_duplicate_credible_set_rows():
     with tempfile.TemporaryDirectory() as d:
         st, rg, cdoc = build_catalog(Path(d))
-        st.write_pointer("annotations", "ann", {"id": "ann", "genes": st.put(b"genes", "arrow.zst")})
+        build_annotation(st)
         t = write_tables(Path(d))
         cs = pq.read_table(t / "credible_sets.parquet")
         # the adapter removes a source's repeats; the builder accepts none, identical or not

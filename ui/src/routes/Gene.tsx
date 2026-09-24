@@ -24,7 +24,7 @@ import { geneTransTable } from '@/lib/trans'
 import { getStore } from '@/lib/store'
 
 const getStoreHasTrans = () => getStore().then(s => s.hasTrans)
-import { dropTable } from '@/lib/db'
+import { dropTable, getDB } from '@/lib/db'
 
 type Tab = 'eqtl' | 'sqtl'
 
@@ -47,6 +47,8 @@ export default function Gene() {
   // the gene's trans rows as an in-memory table, read once per gene alongside the other requests
   // and dropped when the gene changes; both tabs' trans tables page off it
   const [transTable, setTransTable] = useState<string | null>(null)
+  // the query engine (the locus plot's) downloads while the gene's first requests are in flight
+  useEffect(() => { getDB().catch(() => {}) }, [])
   useEffect(() => {
     let alive = true
     let table: string | null = null

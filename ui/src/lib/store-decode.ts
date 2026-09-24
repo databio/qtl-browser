@@ -19,9 +19,9 @@ export class PackError extends Error {}
 /** The one format version this file reads (`store.json` `format_version`, header byte 5). */
 export const FORMAT_VERSION = 1
 /** Header kinds v1 writes (SPEC section 3). */
-export const KIND = { variants: 1, results: 2, gwas: 4, gwasIndex: 5, trans: 6, hits: 7, rsid: 8, variantIndex: 9 } as const
+export const KIND = { variants: 1, results: 2, gwas: 4, gwasIndex: 5, trans: 6, hits: 7, rsid: 8, variantIndex: 9, geneLookup: 10 } as const
 export const HEADER_LEN = 64
-/** Header chromosome of the catalog-wide objects (variant index, rsID index). */
+/** Header chromosome of the catalog-wide objects (variant index, rsID index) and of the gene lookup. */
 export const ALL = 'all'
 /** `^[A-Za-z0-9_-]{32}$`: a sha512t24u digest. */
 export const DIGEST = /^[A-Za-z0-9_-]{32}$/
@@ -93,6 +93,38 @@ export function unframe(b: Uint8Array, expect: number | null, what: string): Uin
  *  zstd frame, ready for DuckDB's `insertArrowFromIPCStream` or apache-arrow's `tableFromIPC`. */
 export function decodeArrowObject(bytes: Uint8Array, what = 'arrow object'): Uint8Array {
   return unframe(aligned(bytes), null, what)
+}
+
+// ---- the gene lookup (SPEC section 6, kind 10) ---------------------------------------------------
+
+/** `annotation.lookup_key`: ASCII a-z upper-cased, every other character unchanged. */
+export function lookupKey(s: string): string {
+  return s.replace(/[a-z]+/g, x => x.toUpperCase())
+}
+
+const UTF8_ENCODE = new TextEncoder()
+/** `annotation.lookup_bucket`: FNV-1a 32 over the key's UTF-8 bytes, modulo the bucket count. */
+export function lookupBucket(key: string, nBuckets: number): number {
+  let h = 0x811c9dc5
+  for (const b of UTF8_ENCODE.encode(key)) h = Math.imul(h ^ b, 0x01000193) >>> 0
+  return h % nBuckets
+}
+
+/** Bytes of the gene lookup's header and bucket offset table, for a lookup of `nBuckets` buckets. */
+export const lookupDirLen = (nBuckets: number) => HEADER_LEN + 4 * (nBuckets + 1)
+
+/** The header and bucket offset table of a gene lookup, checked against the annotation's identity
+ *  digest; `size` is the object's length when known. Bucket `b` is bytes `off[b] .. off[b + 1] - 1`
+ *  (empty when equal), an `.arrow.zst` payload of (key, gene_id, name, chr, tss) rows. */
+export function decodeLookupDir(bytes: Uint8Array, identity: string, what = 'gene lookup'): { nBuckets: number; off: Uint32Array } {
+  const h = parseFileHeader(bytes, what)
+  checkFileHeader(h, { kind: KIND.geneLookup, chrom: ALL, seqDigest: identity }, what)
+  const n = h.count
+  if (!n || bytes.length < lookupDirLen(n)) throw new PackError(`${what}: ${bytes.length} bytes, the offset table of ${n} buckets needs ${lookupDirLen(n)}`)
+  const off = new Uint32Array(aligned(bytes.slice(HEADER_LEN, lookupDirLen(n))).buffer)
+  if (off[0] !== lookupDirLen(n)) throw new PackError(`${what}: first bucket at ${off[0]}, expected ${lookupDirLen(n)}`)
+  for (let b = 0; b < n; b++) if (off[b + 1] < off[b]) throw new PackError(`${what}: bucket offsets decrease at ${b}`)
+  return { nBuckets: n, off }
 }
 
 // ---- the 64-byte v1 file header (SPEC section 4) ------------------------------------------------

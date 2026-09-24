@@ -54,8 +54,8 @@ assert _HEADER.size == HEADER_LEN
 U32_MAX = 0xFFFFFFFF
 # header kinds v1 writes (SPEC.md section 3); 3 is unused (v0's sQTL kind)
 KIND_VARIANTS, KIND_RESULTS, KIND_GWAS, KIND_GWAS_INDEX, KIND_TRANS = 1, 2, 4, 5, 6
-KIND_HITS, KIND_RSID, KIND_VARIANT_INDEX = 7, 8, 9
-ALL = "all"                        # header chromosome of objects spanning a whole variant catalog; their seq_digest is the collection
+KIND_HITS, KIND_RSID, KIND_VARIANT_INDEX, KIND_GENE_LOOKUP = 7, 8, 9, 10
+ALL = "all"                        # header chromosome of objects spanning a whole variant catalog (seq_digest: the collection) or annotation (its identity)
 
 
 def file_header(kind: int, chrom: str, count: int, page_size: int, n_cis: int, seq_digest: str) -> bytes:
@@ -276,6 +276,13 @@ class Store:
                                                     doc.get("collection_digest"), kind)
                 fails += self._check_sequences(pid, doc, store)
                 fails += self._check_identity(pid, doc, sites)
+            if lvl == "annotations":
+                # the browser's per-chromosome gene models and gene lookup agree with the tables
+                from . import annotation     # late, as for gwas below
+                if isinstance(doc.get("lookup"), str):
+                    fails += self._check_header(f"annotations/{pid} lookup", doc["lookup"], ALL,
+                                                doc.get("identity_digest"), KIND_GENE_LOOKUP)
+                fails += annotation.check_split(self, doc)
             if lvl != "experiments":
                 continue
             cat = docs.get((CATALOGS, doc["catalog"]))
@@ -311,6 +318,10 @@ class Store:
                 rows = results.load_index(self, doc).to_pylist()
                 sizes = {n: (self.immutable / n).stat().st_size for n in tfiles}
                 fails += [f"experiments/{pid} {x}" for x in results.check_trans_layout(rows, doc, sizes)]
+            # the browser's search index parts and counts agree with the search index
+            if doc.get("search_index") and (self.immutable / doc["search_index"]).exists():
+                from . import results
+                fails += results.check_split(self, doc, cat)
             # the GWAS bin summary (an Arrow object, no header): schema, bins, chromosomes with GWAS rows
             bins = gw.get("bins")
             if bins and (self.immutable / bins["file"]).exists():

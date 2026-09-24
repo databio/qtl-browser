@@ -6,14 +6,14 @@ import { SortableTh, type SortState } from '@/components/sortable-th'
 import { Pager } from '@/components/pager'
 import { Empty, TableSkeleton } from '@/components/states'
 import { fmtInt } from '@/lib/format'
-import { rows } from '@/lib/db'
+import { allHits } from '@/lib/gene-index'
 import type { SearchHit } from '@/lib/queries'
 import { ROW_LINK, ROW_LINK_TEXT, useRowLink } from '@/lib/row-link'
 
 type Filter = 'egenes' | 'sqtl' | 'tested' | 'all'
 const CHR_ORDER = [...Array.from({ length: 22 }, (_, i) => `chr${i + 1}`), 'chrX', 'chrY', 'chrM']
 
-/** Browse every gene in the search index (in memory): filter, sort, page. */
+/** Browse every annotated gene (every chromosome's genes and search index part, read once): filter, sort, page. */
 export default function Genes() {
   const [all, setAll] = useState<SearchHit[] | null>(null)
   const [filter, setFilter] = useState<Filter>('egenes')
@@ -23,7 +23,7 @@ export default function Genes() {
   const [pageSize, setPageSize] = useState(25)
   const rowLink = useRowLink()
 
-  useEffect(() => { rows<SearchHit>('SELECT * FROM search_index').then(setAll) }, [])
+  useEffect(() => { allHits().then(setAll).catch(e => console.error(e)) }, [])
   useEffect(() => setOffset(0), [filter, needle, sort])
 
   const shown = useMemo(() => {

@@ -57,7 +57,7 @@ function compare(got, ids, label) {
   const { ctx, page, errors, reqs } = await open('/gene/SMARCB1')
   await page.waitForSelector('[data-trans-total="7"]', { timeout: 60_000 })
   const n = reqs.filter(p => TRANS.has(p.split('/').pop())).length
-  check(n === 4, `SMARCB1: ${n} trans object requests (per phenotype type: the header and one range for the gene's frames)`)
+  check(n === 2, `SMARCB1: ${n} trans object requests (per phenotype type, one range for the gene's frames; no header reads)`)
   const e = await csv(page)
   check(e.header.join(',') === 'variant_chr,position,rsid,af,pval,beta,beta_se,r2', `SMARCB1: trans eQTL CSV header ${e.header.join(',')}`)
   compare(e.rows, new Set(['ENSG00000099956']), 'SMARCB1 trans eQTL CSV')
@@ -81,7 +81,7 @@ function compare(got, ids, label) {
   const { ctx, page, errors, reqs } = await open('/gene/MICAL3?tab=sqtl')
   await page.waitForSelector('[data-trans-total="140"]', { timeout: 60_000 })
   const n = reqs.filter(p => TRANS.has(p.split('/').pop())).length
-  check(n === 2, `MICAL3: ${n} trans object requests (sQTL only: the header and one range over all its introns' frames)`)
+  check(n === 1, `MICAL3: ${n} trans object request (sQTL only: one range over all its introns' frames)`)
   const s = await csv(page)
   compare(s.rows, new Set(s.rows.map(r => r.phenotype_id)), 'MICAL3 trans sQTL CSV')
   await page.getByText(/^eQTL$/).first().click()

@@ -180,7 +180,8 @@ def build_store(root: Path, seq: dict = SEQ) -> qs.Store:
                                           "attributes": ["af", "ma_samples", "rs_number"], "chromosomes": chroms,
                                           "vidx": st.put(qs.file_header(9, "all", 2, 512, 0, COLLECTION), "qbx"),
                                           "rsid": st.put(qs.file_header(8, "all", 0, 4096, 0, COLLECTION), "qbr")})
-    st.write_pointer("annotations", "gencode_v39", {"id": "gencode_v39", "genes": st.put(b"genes", "arrow.zst")})
+    from .test_annotation import build_fixture
+    build_fixture(st, "gencode_v39")
     for eid in ("topchef", "gtex_v8_heart_lv"):
         files = {c: st.put(qs.file_header(2, c, 1, 0, 0, seq[c]) + eid.encode(), "qbe") for c in CHROMS}
         hits = {c: st.put(qs.file_header(7, c, 0, 1024, len(SITES[c][0]), seq[c]) + eid.encode(), "qbh") for c in CHROMS}

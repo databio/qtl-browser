@@ -20,11 +20,18 @@
  * - the sampled result blocks against `results.read_block`: codes, credible sets, details and
  *   positions exactly; -log10 p, p, SE and the rebuilt slope as the largest relative difference;
  *   scanBlockRow row by row against decodeResultBlock; and `dof` null leaving every slope NaN.
+ * - what a first gene page reads (SPEC sections 6 and 8): the gene lookup's key normalization and
+ *   bucket hash on pinned vectors (the same ones as pipeline/test_annotation.py), its directory and
+ *   the rows for a sample of keys, misses included; every chromosome's genes and exon models; every
+ *   search index part's rows and ord runs; and the Home page's coloc table (lib/coloc.ts) against
+ *   the lookup when the store has the annotation the table was read from.
  * Integers, strings and codes must match exactly. Exits 1 on any failure.
  */
 import { closeSync, openSync, readFileSync, readSync } from 'node:fs'
 import { join } from 'node:path'
-import { checkFileHeader, decodeGwasBins, decodeGwasIndex, decodeGwasRange, decodeHitsFrame, decodeHitsTable, decodeResultBlock, decodeRsidRecords,
+import { tableFromIPC } from 'apache-arrow'
+import { COLOC_ANNOTATION, COLOC_LOCI } from '../src/lib/coloc.ts'
+import { checkFileHeader, decodeArrowObject, decodeLookupDir, lookupBucket, lookupDirLen, lookupKey, decodeGwasBins, decodeGwasIndex, decodeGwasRange, decodeHitsFrame, decodeHitsTable, decodeResultBlock, decodeRsidRecords,
   decodeTransFrame, decodeVariantIndex, decodeVariantPage, decodeVariantRange, gwasRange, HEADER_LEN, hitsOf, hitsTableLen, KIND,
   parseFileHeader, readerColumns, RSID_RECORD_LEN, rsidFind, scanBlockRow, sliceRun, transSe,
   type RsidRecord } from '../src/lib/store-decode.ts'
@@ -357,6 +364,69 @@ for (const c of catalog.chromosomes as { name: string; file: string; seq_digest:
     `values: ${exact} of ${3 * rows} -log10 p, p and SE values bit-identical; largest relative difference -log10 p ${g(worst.nlp)}, p ${g(worst.pval)}, SE ${g(worst.se)}`)
   check(worst.slope <= 1e-9, `slope (TS inverse t against scipy stdtrit): largest relative difference ${g(worst.slope)}`)
   check(scanBad === 0, `scanBlockRow equals decodeResultBlock on ${scanRows} sampled rows`)
+}
+
+// ---- the gene lookup, per-chromosome genes and exon models, search index parts -------------------
+{
+  // [key as given, normalized, bucket of 1024]: pipeline/test_annotation.py LOOKUP_VECTORS
+  const vectors: [string, string, number][] = [['', '', 453], ['a', 'A', 716], ['FLNC', 'FLNC', 208], ['flnc', 'FLNC', 208],
+    ['ENSG00000128591', 'ENSG00000128591', 414], ['HLA-DRB1', 'HLA-DRB1', 280], ['Y_RNA', 'Y_RNA', 828], ['Ä', 'Ä', 834]]
+  const off = vectors.filter(([raw, key, b]) => lookupKey(raw) !== key || lookupBucket(key, 1024) !== b)
+  check(off.length === 0 && lookupBucket('A', 2 ** 32) === 0xc40bf6cc, `lookupKey and lookupBucket give the pinned vectors (FNV-1a 32)${off.length ? `: ${JSON.stringify(off)}` : ''}`)
+
+  const L = ref.lookup
+  const dir = decodeLookupDir(readRange(L.file, 0, lookupDirLen(L.n_buckets)), L.identity, L.file)
+  const rowsFor = (raw: string) => {
+    const key = lookupKey(raw), b = lookupBucket(key, dir.nBuckets)
+    const len = dir.off[b + 1] - dir.off[b]
+    if (!len) return []
+    return tableFromIPC(decodeArrowObject(readRange(L.file, dir.off[b], len), `${L.file} bucket ${b}`)).toArray()
+      .map(r => r.toJSON()).filter(r => r.key === key).map(r => ({ key: r.key, gene_id: r.gene_id, name: r.name, chr: r.chr, tss: Number(r.tss) }))
+  }
+  const bad = Object.entries(L.keys as Record<string, unknown[]>).filter(([k, want]) => JSON.stringify(rowsFor(k)) !== JSON.stringify(want))
+  const misses = Object.values(L.keys as Record<string, unknown[]>).filter(x => !x.length).length
+  check(dir.nBuckets === L.n_buckets && bad.length === 0, `gene lookup: ${dir.nBuckets} buckets; ${Object.keys(L.keys).length} keys (${misses} misses) give the rows Python gives${bad.length ? `: ${bad.slice(0, 3).map(x => x[0]).join(', ')}` : ''}`)
+
+  let nGenes = 0, nModels = 0
+  const badChrom: string[] = []
+  for (const [c, want] of Object.entries(ref.annotation_chroms as Record<string, { genes: string; exon_models: string; n: number; gene_id: string[]; tss: number[]; models: { gene_id: string; exon_starts: number[]; exon_ends: number[] }[] }>)) {
+    const g = tableFromIPC(decodeArrowObject(whole(want.genes), want.genes))
+    const m = tableFromIPC(decodeArrowObject(whole(want.exon_models), want.exon_models))
+    const ids = g.getChild('gene_id')!.toArray() as string[], tss = Array.from(g.getChild('tss')!.toArray() as Int32Array)
+    const mid = m.getChild('gene_id')!.toArray() as string[]
+    if (g.numRows !== want.n || firstDiff(ids, want.gene_id) >= 0 || firstDiff(tss, want.tss) >= 0 || firstDiff(mid, want.gene_id) >= 0) badChrom.push(`${c} genes`)
+    const byId = new Map(mid.map((x, i) => [x, i]))
+    for (const w of want.models) {
+      const i = byId.get(w.gene_id)!
+      const st = Array.from(m.getChild('exon_starts')!.get(i)?.toArray() ?? []), en = Array.from(m.getChild('exon_ends')!.get(i)?.toArray() ?? [])
+      if (firstDiff(st, w.exon_starts) >= 0 || firstDiff(en, w.exon_ends) >= 0) badChrom.push(`${c} ${w.gene_id} exons`)
+      nModels++
+    }
+    nGenes += g.numRows
+  }
+  check(badChrom.length === 0, `${Object.keys(ref.annotation_chroms).length} chromosomes: ${nGenes} genes rows and ${nModels} sampled exon models equal the Python decode${badChrom.length ? `: ${badChrom.slice(0, 3).join(', ')}` : ''}`)
+
+  const badPart: string[] = []
+  let nRows = 0
+  for (const [c, want] of Object.entries(ref.index_parts as Record<string, { file: string; rows: number; ords: [number, number][]; ord: number[]; phenotype_id: string[]; blk_off: (number | null)[]; n_trans: (number | null)[] }>)) {
+    const t = tableFromIPC(decodeArrowObject(whole(want.file), want.file))
+    const col = (k: string) => Array.from({ length: t.numRows }, (_, i) => t.getChild(k)!.get(i) ?? null)
+    const ords = col('ord') as number[]
+    const runs: [number, number][] = []
+    for (const o of ords) { const r = runs[runs.length - 1]; if (r && o === r[1] + 1) r[1] = o; else runs.push([o, o]) }
+    if (t.numRows !== want.rows || firstDiff(ords, want.ord) >= 0 || JSON.stringify(runs) !== JSON.stringify(want.ords)
+      || firstDiff(col('phenotype_id'), want.phenotype_id) >= 0 || firstDiff(col('blk_off'), want.blk_off) >= 0 || firstDiff(col('n_trans'), want.n_trans) >= 0) badPart.push(c)
+    nRows += t.numRows
+  }
+  check(badPart.length === 0, `${Object.keys(ref.index_parts).length} search index parts: ${nRows} rows, ords and runs equal the Python decode${badPart.length ? `: ${badPart.join(', ')}` : ''}`)
+
+  if (L.identity === COLOC_ANNOTATION) {
+    const off = Object.entries(COLOC_LOCI).filter(([sym, loci]) =>
+      JSON.stringify(rowsFor(sym).filter(r => r.name === sym).map(r => ({ gene_id: r.gene_id, chr: r.chr, tss: r.tss }))) !== JSON.stringify(loci))
+    check(off.length === 0, `coloc table (lib/coloc.ts): ${Object.keys(COLOC_LOCI).length} symbols sit where the store's lookup puts them${off.length ? `: ${off.map(x => x[0]).join(', ')}` : ''}`)
+  } else {
+    check(false, `coloc table (lib/coloc.ts) is pinned to annotation ${COLOC_ANNOTATION}; this store's is ${L.identity}: re-read COLOC_LOCI from it`)
+  }
 }
 
 console.log(failures.length ? `store-check: ${failures.length} failed` : 'store-check: all checks passed')

@@ -5,10 +5,9 @@ import type { TrackBin, TrackLocus } from '@/components/genome-track/types'
 import { SectionPanel } from '@/components/section-panel'
 import { fetchChromSizes, type ChromSizes } from '@/lib/chrom-sizes'
 import { fmtInt, fmtP } from '@/lib/format'
-import { genesIPC, getStore, gwasBins } from '@/lib/store'
+import { getStore, gwasBins, lookupGenes } from '@/lib/store'
 import type { GwasBin } from '@/lib/store-decode'
-import { tableFromIPC } from 'apache-arrow'
-import { COLOC_EQTL_GENES, COLOC_SQTL_GENES } from '@/lib/coloc'
+import { COLOC_ANNOTATION, COLOC_EQTL_GENES, COLOC_LOCI, COLOC_SQTL_GENES } from '@/lib/coloc'
 import { Unavailable } from '@/components/states'
 import { useStoreInfo } from '@/contexts/store-context'
 
@@ -27,7 +26,7 @@ const TRAIT_COLORS: Record<string, string> = {
 /**
  * The paper's DCM-colocalized loci on a static whole-genome track. Every marker is labeled;
  * clicking one opens the gene page. The loci are the authors' gene list (lib/coloc.ts) placed at
- * each gene's TSS from the store's annotation, shown when the experiment carries the DCM GWAS. The
+ * each gene's TSS in the store's annotation, shown when the experiment carries the DCM GWAS. The
  * bars are the GWAS's strongest p per 5 Mb bin, from the bin summary the experiment's `gwas.bins`
  * names (v0's `gwas_dcm_bins.json`, same bins and values): one small whole-object read.
  */
@@ -42,20 +41,24 @@ export default function ColocLoci() {
   return <ColocTrack />
 }
 
-/** The coloc genes at their annotated TSS, on the store's chromosomes (plain JS over the gene table
- *  the app already fetched at boot; no query engine needed). */
+/** The coloc genes at their annotated TSS, on the store's chromosomes: from the table in coloc.ts
+ *  when the store's annotation is the one it was read from (no request), else through the store's
+ *  gene lookup (one small read per symbol). */
 async function colocLoci(): Promise<ColocLocus[]> {
-  const [s, ipc] = await Promise.all([getStore(), genesIPC()])
-  const t = tableFromIPC(ipc)
-  const name = t.getChild('name')!, id = t.getChild('gene_id')!, chr = t.getChild('chr')!, tss = t.getChild('tss')!
+  const s = await getStore()
   const e = new Set(COLOC_EQTL_GENES), q = new Set(COLOC_SQTL_GENES)
+  const symbols = [...new Set([...COLOC_EQTL_GENES, ...COLOC_SQTL_GENES])]
+  const pinned = s.annotation.identity_digest === COLOC_ANNOTATION
+  const found = await Promise.all(symbols.map(async sym => pinned ? (COLOC_LOCI[sym] ?? []).map(x => ({ ...x, name: sym }))
+    : (await lookupGenes(sym)).filter(r => r.name === sym)))
   const out: ColocLocus[] = []
-  for (let i = 0; i < t.numRows; i++) {
-    const sym = name.get(i) as string | null
-    if (!sym || !(e.has(sym) || q.has(sym)) || !s.chroms.has(chr.get(i))) continue
-    out.push({ gene_id: id.get(i), symbol: sym, chr: chr.get(i), tss: Number(tss.get(i)),
-      trait: e.has(sym) && q.has(sym) ? 'both' : q.has(sym) ? 'sQTL' : 'eQTL' })
-  }
+  symbols.forEach((sym, i) => {
+    for (const g of found[i]) {
+      if (!s.chroms.has(g.chr)) continue
+      out.push({ gene_id: g.gene_id, symbol: sym, chr: g.chr, tss: g.tss,
+        trait: e.has(sym) && q.has(sym) ? 'both' : q.has(sym) ? 'sQTL' : 'eQTL' })
+    }
+  })
   return out
 }
 

@@ -8,19 +8,17 @@ import Gene from '@/routes/Gene'
 import Variant from '@/routes/Variant'
 import Region from '@/routes/Region'
 import About from '@/routes/About'
-import { getDB } from '@/lib/db'
+import { onDBFailure } from '@/lib/db'
 import { useThemedFavicon } from '@/lib/favicon'
 
-/** The shell renders at once; DuckDB boots in the background. Every query awaits the
- *  engine internally and every page shows its own skeleton meanwhile, so there is no
- *  global "starting" screen. Only a boot failure needs a message. */
+/** The shell renders at once. DuckDB starts only on a page that needs it (db.ts); every query
+ *  awaits the engine internally and every page shows its own skeleton meanwhile, so there is no
+ *  global "starting" screen. Only a start failure needs a message. */
 export default function App() {
   const [dbError, setDbError] = useState<string | null>(null)
   useThemedFavicon()
 
-  useEffect(() => {
-    getDB().catch((e: Error) => setDbError(e.message))
-  }, [])
+  useEffect(() => onDBFailure(e => setDbError(e.message)), [])
 
   return (
     <div className="min-h-screen bg-base-100 text-base-content">

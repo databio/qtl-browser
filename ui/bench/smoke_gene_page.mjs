@@ -143,17 +143,17 @@ async function downloadCsv(page) {
   check(await toggle.isChecked() && after > before, `PDXK: gene track toggle adds the track (${before} -> ${after} svg elements)`)
   await toggle.click()
   await idle()
-  // one header read plus one range for each ranged object
+  // one range per ranged object and no header reads (the pointer says what each object is)
   const k = Object.fromEntries(['ge', 'variants', 'leafcutter', 'gwas', 'trans'].map(x => [x, count(reqs, x)]))
-  check(k.ge === 2 && k.variants === 2 && k.leafcutter === 0 && k.gwas === 2 && k.trans === 2,
-    `PDXK: requests eQTL results ${k.ge} (header + block), variants ${k.variants} (header + range), GWAS ${k.gwas} (header + window), trans ${k.trans} (header + frames), sQTL results ${k.leafcutter}`)
+  check(k.ge === 1 && k.variants === 1 && k.leafcutter === 0 && k.gwas === 1 && k.trans === 1,
+    `PDXK: requests eQTL results ${k.ge} (block), variants ${k.variants} (range), GWAS ${k.gwas} (window), trans ${k.trans} (frames), sQTL results ${k.leafcutter}`)
   const n0 = reqs.length
   const d = await drawnCount(page)
   await page.getByText(/^sQTL/).first().click()
   await waitDrawn(page, d); await idle()
   const sqtlText = await page.locator('text=/tested introns/').first().innerText()
-  check(/tested introns/.test(sqtlText) && count(reqs, 'leafcutter', n0) === 2 && reqs.length - n0 === 2,
-    `PDXK: sQTL tab adds ${reqs.length - n0} requests (sQTL header + introns span): "${sqtlText.slice(0, 70)}"`)
+  check(/tested introns/.test(sqtlText) && count(reqs, 'leafcutter', n0) === 1 && reqs.length - n0 === 1,
+    `PDXK: sQTL tab adds ${reqs.length - n0} request (the introns span): "${sqtlText.slice(0, 70)}"`)
   check(await page.locator('[data-trans-total="2"]').count() === 1, 'PDXK: the sQTL trans table has its 2 rows from the frames read when the gene opened')
   check(errors.length === 0, `PDXK: no console errors${errors.length ? ` (${errors.slice(0, 3).join(' | ')})` : ''}`)
   await ctx.close()
@@ -188,7 +188,7 @@ async function downloadCsv(page) {
   const n2 = reqs.length
   await page.getByText(/^eQTL$/).first().click()
   await waitDrawn(page, d); await idle()
-  check(reqs.length === n2 && count(reqs, 'ge') === 2, `MICAL3: sQTL -> eQTL tab sends ${reqs.length - n2} requests (the eQTL block left when the gene opened)`)
+  check(reqs.length === n2 && count(reqs, 'ge') === 1, `MICAL3: sQTL -> eQTL tab sends ${reqs.length - n2} requests (the eQTL block left when the gene opened)`)
   d = await drawnCount(page)
   const n3 = reqs.length
   await page.getByText(/^sQTL/).first().click()
@@ -228,7 +228,7 @@ async function downloadCsv(page) {
   const header = await locusHeader(page)
   const chip = await page.getByText('no eQTL test').count()
   check(sel === 0 && nVariants(header) > 0 && chip === 1, `GUSBP11: opens on its sQTL tab with the first significant intron selected (${rows.length} listed), "no eQTL test" chip: "${header}"`)
-  check(count(reqs, 'ge') === 0 && count(reqs, 'leafcutter') === 2 && count(reqs, 'variants') === 2,
+  check(count(reqs, 'ge') === 0 && count(reqs, 'leafcutter') === 1 && count(reqs, 'variants') === 1,
     `GUSBP11: requests eQTL ${count(reqs, 'ge')}, sQTL ${count(reqs, 'leafcutter')}, variants ${count(reqs, 'variants')}`)
   check(errors.length === 0, `GUSBP11: no console errors${errors.length ? ` (${errors.slice(0, 3).join(' | ')})` : ''}`)
   await ctx.close()
@@ -252,7 +252,7 @@ async function downloadCsv(page) {
   await sentence.waitFor({ state: 'attached', timeout: 30_000 })
   await idle()
   const line = await sentence.textContent()
-  check(/^372 eGenes and 512 significant sQTL introns across 686 tested genes/.test(line), `Home: counts from the search index: "${line.slice(0, 70)}"`)
+  check(/^372 eGenes and 512 significant sQTL introns across 686 tested genes/.test(line), `Home: counts from the experiment pointer: "${line.slice(0, 70)}"`)
   const loci = await page.getByText(/PP\.H4 > 0\.8, 4 loci/).count()
   check(loci === 1, 'Home: the colocalization track places the 4 coloc genes on chr21/chr22 (VPREB3, MAP3K7CL, MMP11, SMARCB1)')
   await page.goto(`${BASE}/genes`)

@@ -9,7 +9,10 @@ record (`decode_rsid`) plus `rsid_lookup` for a sample of rs numbers, and every 
 frame (`results.decode_hits`) with its frame table (`packfmt_v1.hits_frame_table`). Per phenotype type:
 a seeded sample of blocks plus blocks with credible sets, each through `results.read_block`; every
 trans frame through `results.read_trans`; GWAS windows through `gwas.read_window`; and every row of
-the GWAS bin summary through `gwas.read_bins`. Floats
+the GWAS bin summary through `gwas.read_bins`. The per-chromosome objects the pages read first
+(SPEC sections 6 and 8): gene lookup rows for a sample of keys (`annotation.lookup_bucket`), each
+chromosome's genes and exon models with a sample of rows, and each search index part's ords and
+phenotype ids, with the experiment's counts. Floats
 go out as JSON numbers (shortest round-trip repr, so exact); NaN as null and infinities as strings.
 """
 from __future__ import annotations
@@ -23,7 +26,7 @@ from pathlib import Path
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-from pipeline import catalog as cat, gwas as gw, packfmt_v1 as pf, qtlstore as qs, results as res  # noqa: E402
+from pipeline import annotation as an, catalog as cat, gwas as gw, packfmt_v1 as pf, qtlstore as qs, results as res  # noqa: E402
 
 
 def f(x):
@@ -150,11 +153,35 @@ def main() -> int:
     # the GWAS bin summary: every row
     bins = gw.read_bins(st, doc)
     out["gwas_bins"] = None if bins is None else {**doc["gwas"]["bins"], "rows": bins.to_pylist()}
+    # what a first gene page reads: the gene lookup, the chromosome's genes and exon models, its index part
+    adoc = st.load("annotations", doc["annotation"])
+    genes = an.decode((st.immutable / adoc["genes"]).read_bytes())
+    buckets = an.decode_lookup((st.immutable / adoc["lookup"]).read_bytes())[1]
+    gl = genes.to_pylist()
+    pick = [gl[i] for i in sorted(rng.choice(len(gl), size=min(300, len(gl)), replace=False).tolist())]
+    keys = sorted({g["gene_id"] for g in pick} | {g["name"] for g in pick if g["name"]} | {g["name"].lower() for g in pick[:20] if g["name"]}
+                  | {"NOT-A-GENE", "ensg00000000000"})
+    out["lookup"] = {"file": adoc["lookup"], "identity": adoc["identity_digest"], "n_buckets": len(buckets),
+                     "keys": {k: [r for r in buckets[an.lookup_bucket(an.lookup_key(k), len(buckets))].to_pylist()
+                                  if r["key"] == an.lookup_key(k)] for k in keys}}
+    out["annotation_chroms"] = {}
+    for c, parts in adoc["chroms"].items():
+        g = an.decode((st.immutable / parts["genes"]).read_bytes())
+        m = an.decode((st.immutable / parts["exon_models"]).read_bytes()).to_pylist()
+        out["annotation_chroms"][c] = {**parts, "n": g.num_rows, "gene_id": g.column("gene_id").to_pylist(),
+                                       "tss": g.column("tss").to_pylist(), "models": m[:: max(1, len(m) // 20)]}
+    out["index_parts"] = {}
+    for c, e in list(doc["search_index_parts"].items()) + ([("trans-only", doc["search_index_trans_only"])] if doc["search_index_trans_only"] else []):
+        t = res.decode_arrow((st.immutable / e["file"]).read_bytes()).to_pylist()
+        out["index_parts"][c] = {**e, "ord": [r["ord"] for r in t], "phenotype_id": [r["phenotype_id"] for r in t],
+                                 "blk_off": [r["blk_off"] for r in t], "n_trans": [r["n_trans"] for r in t]}
+    out["counts"] = doc["counts"]
     Path(a.out).write_text(json.dumps(out, allow_nan=False, default=lambda o: o.item() if hasattr(o, "item") else str(o)))
     print(f"{a.out}: {len(out['blocks'])} blocks, {sum(len(c['pos']) for c in out['chroms'].values())} sites, "
           f"{len(out['rsid']['rs_number'])} rsID records, {sum(len(c['hits']['vidx']) for c in out['chroms'].values())} hits, "
           f"{len(out['trans'])} trans frames, {len(out['gwas'])} GWAS windows, "
-          f"{'no' if bins is None else bins.num_rows} GWAS bins")
+          f"{'no' if bins is None else bins.num_rows} GWAS bins, {len(out['lookup']['keys'])} lookup keys, "
+          f"{len(out['annotation_chroms'])} annotation chromosomes, {len(out['index_parts'])} index parts")
     return 0
 
 

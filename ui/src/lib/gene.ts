@@ -4,27 +4,24 @@
  * credible sets and details), one variants range covering the runs of every phenotype of the gene
  * (its eQTL run and every intron's), and the GWAS rows over that window (through the GWAS index,
  * one whole-object read per session). The sQTL tab adds one request, a span holding all of the
- * gene's intron blocks, which sit next to each other in the results file. The exon model comes
- * from the annotation's exon table, read whole the first time a gene page needs it.
+ * gene's intron blocks, which sit next to each other in the results file. The gene's phenotypes
+ * and exon model come from its chromosome's search index part and exon models (gene-index.ts), which
+ * the page resolving the gene has already read, so none of this waits for the query engine.
  *
  * Annotation (symbol, TSS, bounds, exons) is joined on `gene_id`; the study's blocks carry none.
  * Rows reach DuckDB as Arrow IPC streams (insertArrow). Decoding lives in store-decode.ts.
  */
 import { makeVector, Table, tableToIPC, Utf8, vectorFromArray } from 'apache-arrow'
-import { getDB, insertArrow, lit, rows, tableName, type Row } from './db'
-import { EQTL_TYPE, exonsIPC, fetchDecoded, fetchObject, getStore, gwasFile, resultsFile, SQTL_TYPE, variantsFile } from './store'
+import { getDB, insertArrow, tableName } from './db'
+import { exonModel, phenotypesOfGene, type PhenotypeRow } from './gene-index'
+import { EQTL_TYPE, fetchDecoded, fetchObject, getStore, gwasFile, resultsFile, SQTL_TYPE, variantsFile } from './store'
 import { csMembers, decodeGwasIndex, decodeGwasRange, decodeResultBlock, decodeVariantRange, gwasRange, readerColumns, sliceRun,
   type GwasColumns, type GwasIndex, type ResultBlock, type VariantRange } from './store-decode'
 import { dropTable } from './db'
-import type { CredibleSetRow, Exon, Gene, GeneDetail, SearchHit, SplicePhenotype } from './queries'
+import type { CredibleSetRow, Gene, GeneDetail, SearchHit, SplicePhenotype } from './queries'
 
-/** A row of the `phenotypes` table (the experiment's search index). */
-interface PhenotypeRow extends Row {
-  ord: number; phenotype_type: string; phenotype_id: string; gene_id: string | null; chr: string
-  significant: boolean; p_perm: number | null
-  blk_off: number; blk_len: number; var_start: number | null; n_var: number | null; var_off: number | null; var_len: number | null
-  w_lo: number | null; w_hi: number | null
-}
+/** A phenotype with a block (every phenotype on a chromosome part has one; only trans-only ones do not). */
+type Placed = PhenotypeRow & { blk_off: number; blk_len: number }
 
 export interface GenePack {
   hit: SearchHit
@@ -35,15 +32,13 @@ export interface GenePack {
   /** request 3: the GWAS rows over the gene's window as a DuckDB table (empty without a GWAS or rows
    *  there); dropped when the gene leaves the cache */
   gwas: Promise<string>
-  /** the genes row and exon model: no request beyond the two above and the exon table */
+  /** the genes row and exon model: no request beyond the two above and the chromosome's exon models */
   detail: Promise<GeneDetail>
   /** the sQTL tab: +1 request for the span of the gene's intron blocks, memoized */
   splice(): Promise<SplicePhenotype[]>
   /** one intron's block, from that span */
   intron(phenotypeId: string): Promise<ResultBlock>
 }
-
-const PHENOTYPE_COLS = 'ord, phenotype_type, phenotype_id, gene_id, chr, significant, p_perm, blk_off, blk_len, var_start, n_var, var_off, var_len, w_lo, w_hi'
 
 // ---- the GWAS window --------------------------------------------------------------------------
 
@@ -78,7 +73,7 @@ async function gwasTable(hit: SearchHit, lo: number | null, hi: number | null): 
   let cols: GwasColumns | null = null
   if (index && f && lo != null && hi != null) {
     const range = gwasRange(index, hit.chr, lo, hi)
-    if (range) cols = await fetchDecoded('store:gwas', detail, f.name, f.expect, range.off, range.len,
+    if (range) cols = await fetchDecoded('store:gwas', detail, f.name, range.off, range.len,
       (b, what) => decodeGwasRange(b, index, hit.chr, range, lo, hi, what))
   }
   const ipc = cols?.rows ? tableToIPC(new Table({
@@ -91,32 +86,6 @@ async function gwasTable(hit: SearchHit, lo: number | null, hi: number | null): 
   const name = tableName('gwas')
   await insertArrow(name, ipc ?? GWAS_DDL, { ...detail, part: 'gwas' })
   return name
-}
-
-// ---- the exon model ---------------------------------------------------------------------------
-
-let exonTable: Promise<string> | null = null
-/** The annotation's exons as the DuckDB table `exons`, inserted once. */
-function exons(): Promise<string> {
-  if (!exonTable) {
-    const p = exonsIPC().then(async ipc => { await insertArrow('exons', ipc, { part: 'exons' }); return 'exons' })
-    exonTable = p
-    p.catch(() => { if (exonTable === p) exonTable = null })
-  }
-  return exonTable
-}
-
-/** The union of the gene's transcripts' exons, as sorted non-overlapping intervals. */
-async function exonModel(geneId: string): Promise<Exon[]> {
-  const t = await exons()
-  const all = await rows<Exon>(`SELECT start, "end" FROM ${t} WHERE gene_id = ${lit(geneId)} ORDER BY start, "end"`)
-  const out: Exon[] = []
-  for (const e of all) {
-    const last = out[out.length - 1]
-    if (last && e.start <= last.end) last.end = Math.max(last.end, e.end)
-    else out.push({ start: e.start, end: e.end })
-  }
-  return out
 }
 
 // ---- rows of a block --------------------------------------------------------------------------
@@ -154,7 +123,7 @@ function geneRow(hit: SearchHit, block: ResultBlock | null, range: VariantRange 
 
 /** An intron's row for the sQTL tab, from its search-index row, its block and the variants range.
  *  Intron coordinates come from the details' `extra`, else from the leafcutter phenotype id. */
-function spliceRow(hit: SearchHit, p: PhenotypeRow, block: ResultBlock, range: VariantRange | null): SplicePhenotype {
+function spliceRow(hit: SearchHit, p: Placed, block: ResultBlock, range: VariantRange | null): SplicePhenotype {
   const x = block.details.extra as { intron_start?: number; intron_end?: number; cluster_id?: string; strand?: string }
   const m = /^[^:]+:(\d+):(\d+):(clu_\d+_([+-?]))(?::|$)/.exec(p.phenotype_id)
   const g = block.details.group, lead = g?.lead ?? null, row = leadRow(block, range)
@@ -175,13 +144,13 @@ function spliceRow(hit: SearchHit, p: PhenotypeRow, block: ResultBlock, range: V
 
 function openGene(hit: SearchHit): GenePack {
   const s = getStore()
+  loadGwasIndex().catch(() => {})       // its fetch overlaps the phenotype lookup the GWAS window waits for
   const detail0 = { gene_id: hit.gene_id }
-  const phen = rows<PhenotypeRow>(`SELECT ${PHENOTYPE_COLS} FROM phenotypes
-    WHERE gene_id = ${lit(hit.gene_id)} AND chr = ${lit(hit.chr)} ORDER BY ord`)
+  const phen = phenotypesOfGene(hit.gene_id, hit.chr).then(ps => ps.filter((p): p is Placed => p.blk_off != null && p.blk_len != null))
   const block = s.then(st => {
     if (hit.blk_off == null || hit.blk_len == null) return null
     const f = resultsFile(st, EQTL_TYPE, hit.chr)
-    return fetchDecoded('store:block', detail0, f.name, f.expect, hit.blk_off, hit.blk_len,
+    return fetchDecoded('store:block', detail0, f.name, hit.blk_off, hit.blk_len,
       (b, what) => decodeResultBlock(b, f.dof, { blk_len: hit.blk_len, n_var: hit.n_var, var_start: hit.var_start }, what))
   })
   const variants = Promise.all([s, phen]).then(([st, ps]) => {
@@ -190,14 +159,14 @@ function openGene(hit: SearchHit): GenePack {
     const off = Math.min(...withRuns.map(p => p.var_off!))
     const len = Math.max(...withRuns.map(p => p.var_off! + p.var_len!)) - off
     const f = variantsFile(st, hit.chr)
-    return fetchDecoded('store:variants', detail0, f.name, f.expect, off, len, (b, what) => decodeVariantRange(b, len, what))
+    return fetchDecoded('store:variants', detail0, f.name, off, len, (b, what) => decodeVariantRange(b, len, what))
   })
   // the GWAS window spans every run of the gene's phenotypes, as the variants range does
   const gwas = phen.then(ps => {
     const runs = ps.filter(p => p.w_lo != null && p.w_hi != null)
     return gwasTable(hit, runs.length ? Math.min(...runs.map(p => p.w_lo!)) : null, runs.length ? Math.max(...runs.map(p => p.w_hi!)) : null)
   })
-  const detail = Promise.all([block, variants, exonModel(hit.gene_id)])
+  const detail = Promise.all([block, variants, exonModel(hit.gene_id, hit.chr)])
     .then(([b, v, ex]) => ({ gene: geneRow(hit, b, v), exons: ex }))
 
   let introns: Promise<{ list: SplicePhenotype[]; blocks: Map<string, ResultBlock> }> | null = null
@@ -210,7 +179,7 @@ function openGene(hit: SearchHit): GenePack {
         const f = resultsFile(st, SQTL_TYPE, hit.chr)
         const off = Math.min(...rowsS.map(p => p.blk_off))
         const len = Math.max(...rowsS.map(p => p.blk_off + p.blk_len)) - off
-        const decoded = await fetchDecoded('store:introns', detail0, f.name, f.expect, off, len, (span, what) =>
+        const decoded = await fetchDecoded('store:introns', detail0, f.name, off, len, (span, what) =>
           rowsS.map(p => decodeResultBlock(span.subarray(p.blk_off - off, p.blk_off - off + p.blk_len), f.dof,
             { blk_len: p.blk_len, n_var: p.n_var, var_start: p.var_start }, `${what} ${p.phenotype_id}`)))
         rowsS.forEach((p, i) => blocks.set(p.phenotype_id, decoded[i]))

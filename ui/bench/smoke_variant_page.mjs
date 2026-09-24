@@ -59,10 +59,11 @@ const rowsOf = loc => loc.locator('tbody tr').evaluateAll(trs => trs.map(tr => [
   const ld = leads.filter(r => r[0] === 'eQTL' && r[1] === 'AP000346.2')[0]
   check(leads.length === 21 && cs.length === 50 && ld && /^-0\.412 ± 0\.032$/.test(ld[3]) && ld[4] === '1.0e-4' && ld[5] === 'eGene',
     `rs34599497: ${leads.length} lead rows, ${cs.length} credible-set rows; AP000346.2 eQTL lead slope ${ld?.[3]}, perm p ${ld?.[4]}`)
-  // rsID block and page (each with its header read), the hits file, then one block per lead for its slope
+  // rsID block and page (no header reads), the hits file's table and frame, then the lead blocks for
+  // their slopes: its 1 eQTL lead block, and its 20 intron lead blocks in 4 runs of blocks < 64 KB apart
   const k = kinds(reqs)
-  const want = ['ge', 'ge', ...Array(21).fill('leafcutter'), 'hits', 'hits', 'rsid', 'rsid', 'variants', 'variants'].sort().join(',')
-  check(k === want, `rs34599497: requests ${k.split(',').length}: rsID header + block, variants header + page, hits table + frame, results headers + one block per lead`)
+  const want = ['ge', ...Array(4).fill('leafcutter'), 'hits', 'hits', 'rsid', 'variants'].sort().join(',')
+  check(k === want, `rs34599497: requests ${k.split(',').length}: rsID block, variants page, hits table + frame, lead blocks in runs (got ${k})`)
   check((await page.locator('h1').first().innerText()).trim() === 'rs34599497', 'rs34599497: header title')
   check(await page.getByText('chr22:23,680,950 (GRCh38)').count() === 1 && await page.getByText('T / C', { exact: true }).count() === 1,
     'rs34599497: position chr22:23,680,950, A1 / A2 = T / C (ALT / REF)')
@@ -93,7 +94,7 @@ const rowsOf = loc => loc.locator('tbody tr').evaluateAll(trs => trs.map(tr => [
   await page.waitForSelector(LISTS, { timeout: 60_000 })
   await idle()
   const k = kinds(reqs)
-  check(!k.includes('rsid') && k.split(',').filter(x => x === 'hits').length === 2 && k.split(',').filter(x => x === 'variants').length === 2, `chr22:23680950: no rsID request; variants header + page, hits table + frame (got ${k})`)
+  check(!k.includes('rsid') && k.split(',').filter(x => x === 'hits').length === 2 && k.split(',').filter(x => x === 'variants').length === 1, `chr22:23680950: no rsID request; variants page, hits table + frame (got ${k})`)
   check((await page.locator('h1').first().innerText()).trim() === 'rs34599497', 'chr22:23680950: resolves to rs34599497')
   check(errors.length === 0, `chr22:23680950: no console errors (${errors.slice(0, 2).join(' | ')})`)
   await ctx.close()
@@ -116,7 +117,7 @@ const rowsOf = loc => loc.locator('tbody tr').evaluateAll(trs => trs.map(tr => [
   const { ctx, page, errors, reqs, idle } = await open('/variant/rs457868')
   await page.waitForSelector(`${LISTS} [data-trans-total="1"]`, { timeout: 60_000 })
   await idle()
-  check(kinds(reqs) === 'hits,hits,rsid,rsid,variants,variants', `rs457868: rsID, variants page, hits table + frame only (got ${kinds(reqs)})`)
+  check(kinds(reqs) === 'hits,hits,rsid,variants', `rs457868: rsID block, variants page, hits table + frame only (got ${kinds(reqs)})`)
   check((await page.locator('[data-scan-button]').count()) === 0, 'rs457868: no scan button (outside every cis window)')
   const outside = await page.getByText('outside every cis window', { exact: false }).count()
   check(outside === 3, `rs457868: the outside-cis message stands in for all three cis sections (${outside} of 3); trans table has its 1 row`)

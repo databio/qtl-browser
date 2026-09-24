@@ -10,7 +10,7 @@
 # v0 vs v1 format benchmark (pipeline/bench_store.py): bytes per table type per chromosome, and
 # random-access block read speed. Reads only; writes only $OUT.
 #   sbatch bench_store.sbatch                                  # chr21/22 two-study store
-#   QTLB_STORE=/scratch/ns5bc/qtl-browser/store-genome-v1e sbatch bench_store.sbatch
+#   QTLB_STORE=/scratch/ns5bc/qtl-browser/store-genome-v1f sbatch bench_store.sbatch
 #   EXPERIMENT=gtex_v8_heart_lv QTLB_STORE=... sbatch bench_store.sbatch --no-reads   # no v0 twin: sizes only
 # CHROMS: all (the catalog's chromosomes) or a comma list. N random phenotypes per type, REPS per read.
 # Extra arguments go to pipeline.bench_store. OUT defaults to bench/<store>[_<experiment>]_<date>.

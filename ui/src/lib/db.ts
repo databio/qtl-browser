@@ -2,30 +2,26 @@
  * DuckDB-WASM bootstrap. One database, one connection, shared by plain queries and by the
  * Mosaic coordinator.
  *
- * The browser reads no parquet at all. Every page's data comes from qtlstore objects fetched with
- * plain Range requests (gene.ts, variant.ts, cis-scan.ts) and decoded in JS; DuckDB holds only
- * in-memory tables built from those, plus three from Arrow objects inserted directly at boot:
- *
- * - `phenotypes`: the experiment's search index, one row per phenotype (SPEC section 8);
- * - `genes`: the annotation's gene table (SPEC section 6);
- * - `search_index`: one row per annotated gene on a catalog chromosome, the join the gene list,
- *   search, region and gene pages read (its eQTL phenotype's block and run, eGene and sQTL counts).
+ * DuckDB holds only the tables a page materializes from qtlstore reads: a gene's locus window and
+ * GWAS window (gene.ts), trans rows (trans.ts), for the plots and the paged tables. Gene lookups,
+ * lists and search are plain JS (gene-index.ts), so the engine is started only by a page that
+ * draws or pages such a table: the gene and variant pages start it at mount, alongside their
+ * first data requests, and nothing starts it on Home, the gene list or a region.
  */
 import * as duckdb from '@duckdb/duckdb-wasm'
-import { EQTL_TYPE, genesIPC, getStore, searchIndexIPC, SQTL_TYPE } from './store'
-import { startVariantIndex } from './variant'
-import { loadGwasIndex } from './gene'
 
 export type Row = Record<string, unknown>
 
 let dbPromise: Promise<{ db: duckdb.AsyncDuckDB; con: duckdb.AsyncDuckDBConnection }> | null = null
+const failureListeners = new Set<(e: Error) => void>()
+
+/** Called with the error when the engine fails to start (App shows it above the page). */
+export function onDBFailure(cb: (e: Error) => void): () => void {
+  failureListeners.add(cb)
+  return () => { failureListeners.delete(cb) }
+}
 
 async function boot() {
-  // the pointers, the search index and the gene table are plain fetches started now, alongside
-  // the wasm download; the variant index is too, and is ready by the time a variant page needs it
-  const tables = Promise.all([getStore(), searchIndexIPC(), genesIPC()])
-  startVariantIndex()
-  loadGwasIndex().catch(() => {})
   // wasm and worker from jsDelivr (the 36 MB module is over the Workers asset limit). The
   // worker script is cross-origin, so it is loaded through a same-origin blob shim.
   const bundle = await duckdb.selectBundle(duckdb.getJsDelivrBundles())
@@ -39,32 +35,20 @@ async function boot() {
   // nothing here needs an extension; fail loudly rather than reach out to extensions.duckdb.org
   await con.query(`SET autoinstall_known_extensions = false`).catch(() => {})
   await con.query(`SET autoload_known_extensions = false`).catch(() => {})
-  const [s, index, genes] = await tables
-  await con.insertArrowFromIPCStream(index, { name: 'phenotypes', create: true })
-  await con.insertArrowFromIPCStream(genes, { name: 'genes', create: true })
-  const chroms = [...s.chroms.keys()].map(lit).join(', ')
-  // Trans-only phenotypes (chr and blk_* null) have no cis block, so they are left out here: a
-  // gene with only trans results is "not tested" on its page, as in v0. `tested`: the gene has an
-  // eQTL phenotype with rows; `is_egene`: that phenotype passes the
-  // experiment's significance rule (null when not eQTL-tested); `has_results`: any phenotype of
-  // the gene has a block, so the gene page has something to show
-  await con.query(`CREATE TABLE search_index AS
-    WITH e AS (SELECT * FROM phenotypes WHERE phenotype_type = ${lit(EQTL_TYPE)} AND blk_off IS NOT NULL),
-         s AS (SELECT gene_id, count(*)::INTEGER AS n_sqtl, (count(*) FILTER (WHERE significant))::INTEGER AS n_sqtl_sig
-               FROM phenotypes WHERE phenotype_type = ${lit(SQTL_TYPE)} AND blk_off IS NOT NULL GROUP BY gene_id)
-    SELECT g.gene_id, g.name AS symbol, g.chr, g.tss, g.start, g."end", g.strand, g.biotype, g.version AS gene_version,
-           e.ord, e.blk_off, e.blk_len, e.var_start, e.n_var, e.var_off, e.var_len, e.w_lo, e.w_hi,
-           e.n_var IS NOT NULL AS tested,
-           CASE WHEN e.ord IS NULL THEN NULL ELSE e.significant END AS is_egene,
-           coalesce(s.n_sqtl_sig, 0) AS n_sqtl_sig, coalesce(s.n_sqtl, 0) AS n_sqtl,
-           e.ord IS NOT NULL OR s.n_sqtl IS NOT NULL AS has_results
-    FROM genes g LEFT JOIN e USING (gene_id) LEFT JOIN s USING (gene_id)
-    WHERE g.chr IN (${chroms})`)
   return { db, con }
 }
 
+/** The engine, started on first use; a failed start is reported to `onDBFailure` listeners and
+ *  forgotten, so the next call retries. */
 export function getDB() {
-  if (!dbPromise) dbPromise = boot()
+  if (!dbPromise) {
+    const p = boot()
+    dbPromise = p
+    p.catch((e: Error) => {
+      if (dbPromise === p) dbPromise = null
+      for (const cb of failureListeners) cb(e)
+    })
+  }
   return dbPromise
 }
 

@@ -38,7 +38,7 @@ The build runs on Rivanna, where the inputs live. It goes in four stages:
    suites in `ui/bench/` check the pages in a browser.
 
 `pipeline/README.md` has the exact commands and variables. The current whole-genome store is
-`/scratch/ns5bc/qtl-browser/store-genome-v1e` on Rivanna.
+`/scratch/ns5bc/qtl-browser/store-genome-v1f` on Rivanna.
 
 Local setup:
 

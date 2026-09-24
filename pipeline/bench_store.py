@@ -39,10 +39,12 @@ byte range holding the gene's frames (`results.gene_trans_ranges`; a gene's fram
 decodes each frame in it. `requests` counts range reads. GWAS (`gwas_bench`): the GWAS rows in a gene's [w_lo, w_hi] window
 through each format's GWAS index, one range read, decode, filter.
 
-Startup: the one-time reads a reader does before any page: v0 search index + variant index + GWAS
-index; v1 store/experiment/variant catalog/annotation pointers, experiment search index, the variant
-variant catalog's variant index, the annotation genes + exons tables (gene coordinates and exons moved out of
-the blocks into it), and the GWAS index.
+Startup: the one-time reads before a first gene page: v0 search index + variant index + GWAS
+index; v1 store/experiment/variant catalog/annotation pointers, the gene lookup's directory and one
+bucket, one chromosome's genes, exon models and search index part (the catalog's first chromosome,
+the largest), the trans-only part, and the GWAS index (SPEC.md sections 6 and 8). The whole-genome
+search index and annotation tables are no longer read on a gene page; `sizes` lists them with the
+per-chromosome objects (`split`).
 
     python -m pipeline.bench_store --v0 /scratch/.../derived/immutable --store /scratch/.../store \
         [--experiment topchef] [--chroms all|chr21,chr22] [--n 200] [--reps 5] [--out DIR]
@@ -120,7 +122,14 @@ def v1_experiment(store: qs.Store, exp_id: str) -> dict:
     if gw.get("index"):
         glob_["gwas_index"] = im / gw["index"]
     trans = {f"trans_{r['phenotype_type']}": im / r["trans"]["file"] for r in doc["results"] if r.get("trans")}
-    return {"doc": doc, "cdoc": cdoc, "adoc": adoc, "per": per, "global": glob_, "trans": trans}
+    # the per-chromosome objects the browser reads instead of the whole-genome ones (SPEC sections 6, 8)
+    split = {f"annotation_{k} {c}": im / n for c, parts in (adoc.get("chroms") or {}).items() for k, n in parts.items()}
+    split |= {f"search_index_part {c}": im / e_["file"] for c, e_ in (doc.get("search_index_parts") or {}).items()}
+    if doc.get("search_index_trans_only"):
+        split["search_index_part trans-only"] = im / doc["search_index_trans_only"]["file"]
+    if adoc.get("lookup"):
+        split["annotation_lookup"] = im / adoc["lookup"]
+    return {"doc": doc, "cdoc": cdoc, "adoc": adoc, "per": per, "global": glob_, "trans": trans, "split": split}
 
 
 def _size(p: Path | None):
@@ -163,7 +172,10 @@ def sizes(v0: Path, store: qs.Store, exp_id: str, chroms: list[str]) -> dict:
             "note": ("v0 global objects and the v1 annotation cover the whole genome; v1 search index, "
                      "catalog variant index and rsID index cover only the variant catalog's chromosomes"
                      + ("; on this chromosome subset they are not comparable" if genome_wide else ""))}
-    return {"per_chrom": per_chrom, "totals": tot, "global": glob, "missing": missing,
+    sp = {k: _size(p) for k, p in e["split"].items()}
+    split = {"objects": len(sp), "bytes": sum(sp.values()),
+             "by_kind": {k: sum(v for n, v in sp.items() if n.split(" ")[0] == k) for k in dict.fromkeys(n.split(" ")[0] for n in sp)}}
+    return {"per_chrom": per_chrom, "totals": tot, "global": glob, "split": split, "missing": missing,
             "store": store_sizes(store)}
 
 
@@ -173,7 +185,8 @@ def store_sizes(store: qs.Store) -> dict:
     per_exp = {}
     for p in sorted((store.root / "experiments").glob("*.json")):
         e = v1_experiment(store, p.stem)
-        files = {f for d in e["per"].values() for f in d.values()} | set(e["global"].values()) | set(e["trans"].values())
+        files = ({f for d in e["per"].values() for f in d.values()} | set(e["global"].values()) | set(e["trans"].values())
+                 | set(e["split"].values()))
         per_exp[p.stem] = sum(f.stat().st_size for f in files)
         for f in files:
             owners.setdefault(f.name, set()).add(p.stem)
@@ -468,16 +481,18 @@ def gwas_bench(v0: Path, store: qs.Store, exp_id: str, chroms: list[str], n: int
 def startup(v0: Path, store: qs.Store, exp_id: str, reps: int) -> dict:
     _, v0glob = v0_files(v0)
     e = v1_experiment(store, exp_id)
-    names = [c["name"] for c in e["cdoc"]["chromosomes"]]
+    c0 = e["cdoc"]["chromosomes"][0]["name"]         # the first (largest) chromosome: the dearest gene page
     steps = {
         "v0": [("search_index", v0glob["search_index"], lambda b: an.decode(b, "v0 search index")),
                ("variant_index", v0glob["variant_index"], pf0.decode_variant_index)]
               + ([("gwas_index", v0glob["gwas_index"], pf0.decode_gwas_index)] if "gwas_index" in v0glob else []),
         "v1": [("pointers (store, experiment, variant catalog, annotation json)", None, None),
-               ("search_index", e["global"]["search_index"], lambda b: an.decode(b, "v1 search index")),
-               ("catalog_vidx", e["global"]["catalog_vidx"], lambda b: cat.decode_vidx(b, names)),
-               ("annotation_genes", e["global"]["annotation_genes"], lambda b: an.decode(b, "genes")),
-               ("annotation_exons", e["global"]["annotation_exons"], lambda b: an.decode(b, "exons"))]
+               ("gene lookup: directory and one bucket", e["split"]["annotation_lookup"], _lookup_one),
+               (f"genes {c0}", e["split"][f"annotation_genes {c0}"], lambda b: an.decode(b, "genes")),
+               (f"exon models {c0}", e["split"][f"annotation_exon_models {c0}"], lambda b: an.decode(b, "exon models")),
+               (f"search index part {c0}", e["split"][f"search_index_part {c0}"], lambda b: an.decode(b, "index part"))]
+              + ([("search index part trans-only", e["split"]["search_index_part trans-only"], lambda b: an.decode(b, "index part"))]
+                 if "search_index_part trans-only" in e["split"] else [])
               + ([("gwas_index", e["global"]["gwas_index"], _gwas_index1)] if "gwas_index" in e["global"] else []),
     }
     pointers = [store.root / "store.json", store.root / "experiments" / f"{exp_id}.json",
@@ -493,6 +508,8 @@ def startup(v0: Path, store: qs.Store, exp_id: str, reps: int) -> dict:
                 if path is None:
                     nb = sum(len(p.read_bytes()) for p in pointers if p.exists())
                     [json.loads(p.read_text()) for p in pointers if p.exists()]
+                elif fn is _lookup_one:
+                    nb = _lookup_one(path)
                 else:
                     buf = path.read_bytes()
                     nb = len(buf)
@@ -504,6 +521,19 @@ def startup(v0: Path, store: qs.Store, exp_id: str, reps: int) -> dict:
             tot_b += nb
         out[fmt] = {"items": items, "bytes": tot_b, "ms": round(tot_ms, 3)}
     return out
+
+
+def _lookup_one(path: Path) -> int:
+    """What a gene page reads of the gene lookup: the header and offset table, then one bucket (the
+    key FLNC's), decoded. Returns the bytes read."""
+    with open(path, "rb") as f:
+        head = f.read(qs.HEADER_LEN)
+        n = qs.parse_file_header(head)["count"]
+        offs = struct.unpack(f"<{n + 1}I", f.read(4 * (n + 1)))
+        b = an.lookup_bucket(an.lookup_key("FLNC"), n)
+        f.seek(offs[b])
+        an.decode(f.read(offs[b + 1] - offs[b]), "lookup bucket")
+    return qs.HEADER_LEN + 4 * (n + 1) + offs[b + 1] - offs[b]
 
 
 def _gwas_index1(b: bytes):
@@ -536,6 +566,10 @@ def markdown(r: dict) -> str:
         L.append(f"| v0 {k} | {v:,} | |")
     for k, v in s["global"]["v1"].items():
         L.append(f"| v1 {k} | | {v:,} |")
+    sp = s.get("split") or {}
+    if sp.get("objects"):
+        L += ["", f"Per-chromosome objects the browser reads instead (SPEC.md sections 6 and 8): {sp['objects']} objects, "
+              f"{sp['bytes']:,} bytes ({', '.join(f'{k} {v:,}' for k, v in sp['by_kind'].items())})."]
     L += ["", s["global"]["note"] + ".", "",
           f"Store: {s['store']['unique_bytes']:,} bytes unique over experiments "
           f"{', '.join(f'{k} {v:,}' for k, v in s['store']['experiments'].items())}; "

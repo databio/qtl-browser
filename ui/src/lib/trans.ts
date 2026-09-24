@@ -12,7 +12,8 @@
  * The SE and r2 are derived from -log10 p and beta with the phenotype type's dof (none without one).
  */
 import { Int64, makeVector, Table, tableToIPC, Utf8, vectorFromArray } from 'apache-arrow'
-import { getDB, insertArrow, lit, rows, tableName, type Row } from './db'
+import { getDB, insertArrow, tableName } from './db'
+import { geneInfo, phenotypesByOrd, transPhenotypesOfGene } from './gene-index'
 import { EQTL_TYPE, fetchDecoded, getStore, SQTL_TYPE, transFile, type Store } from './store'
 import { decodeTransFrame, HIT_TRANS, transSe, type VariantRecord } from './store-decode'
 import type { Hits } from './variant'
@@ -51,13 +52,13 @@ async function insertRows(r: TransRows, detail: Record<string, unknown>): Promis
 
 const qtlOf = (phenotypeType: string) => (phenotypeType === SQTL_TYPE ? 's' : 'e')
 
-interface FrameRow extends Row { phenotype_type: string; phenotype_id: string; trans_off: number; trans_len: number; n_trans: number }
+interface FrameRow { phenotype_type: string; phenotype_id: string; trans_off: number; trans_len: number; n_trans: number }
 
 /** Every trans row of one gene's phenotypes; the caller drops the table. */
 export async function geneTransTable(hit: SearchHit): Promise<string> {
   const s = await getStore()
-  const frames = await rows<FrameRow>(`SELECT phenotype_type, phenotype_id, trans_off, trans_len, n_trans FROM phenotypes
-    WHERE gene_id = ${lit(hit.gene_id)} AND trans_off IS NOT NULL ORDER BY phenotype_type, trans_off`)
+  const frames = (await transPhenotypesOfGene(hit.gene_id, hit.chr) as FrameRow[])
+    .sort((a, b) => (a.phenotype_type < b.phenotype_type ? -1 : a.phenotype_type > b.phenotype_type ? 1 : a.trans_off - b.trans_off))
   const out = emptyRows()
   const detail = { gene_id: hit.gene_id }
   // one request per phenotype type, both in flight at once; rows go out eQTL first
@@ -71,7 +72,7 @@ export async function geneTransTable(hit: SearchHit): Promise<string> {
       if (mine[k].trans_off !== mine[k - 1].trans_off + mine[k - 1].trans_len)
         throw new Error(`${tf.name}: the trans frames of ${hit.gene_id} are not contiguous (${mine[k].phenotype_id})`)
     const off = mine[0].trans_off, len = mine[mine.length - 1].trans_off + mine[mine.length - 1].trans_len - off
-    const decoded = await fetchDecoded('store:trans', detail, tf.name, tf.expect, off, len, (bytes, what) =>
+    const decoded = await fetchDecoded('store:trans', detail, tf.name, off, len, (bytes, what) =>
       mine.map(f => decodeTransFrame(bytes.subarray(f.trans_off - off, f.trans_off - off + f.trans_len), `${what} ${f.phenotype_id}`)),
       'store:trans-decode')
     return { type, tf, mine, decoded }
@@ -102,7 +103,7 @@ function chromName(s: Store, ordinal: number): string {
   return c.name
 }
 
-interface HitGene extends Row { ord: number; phenotype_type: string; phenotype_id: string; gene_id: string | null; symbol: string | null; chr: string | null; tss: number | null }
+interface HitGene { ord: number; phenotype_type: string; phenotype_id: string; gene_id: string | null; symbol: string | null; chr: string | null; tss: number | null }
 
 /** One variant's trans rows, from its hits records (kind 2); the caller drops the table. */
 export async function variantTransTable(v: VariantRecord, hits: Hits): Promise<string> {
@@ -112,8 +113,14 @@ export async function variantTransTable(v: VariantRecord, hits: Hits): Promise<s
   const out = emptyRows()
   if (recs.length) {
     const ords = [...new Set(recs.map(r => f.ord[r]))]
-    const genes = new Map((await rows<HitGene>(`SELECT p.ord, p.phenotype_type, p.phenotype_id, p.gene_id, g.name AS symbol, g.chr, g.tss
-      FROM phenotypes p LEFT JOIN genes g USING (gene_id) WHERE p.ord IN (${ords.join(',')})`)).map(g => [g.ord, g]))
+    // each phenotype from its chromosome's search index part (the trans-only part for those with
+    // none), and its gene's symbol, chromosome and TSS from the annotation
+    const genes = new Map<number, HitGene>()
+    await Promise.all([...(await phenotypesByOrd(ords)).values()].map(async p => {
+      const g = p.gene_id ? await geneInfo(p.gene_id, p.chr) : null
+      genes.set(p.ord, { ord: p.ord, phenotype_type: p.phenotype_type, phenotype_id: p.phenotype_id, gene_id: p.gene_id,
+        symbol: g?.name ?? null, chr: g?.chr ?? null, tss: g?.tss ?? null })
+    }))
     const caches = new Map<string, Map<number, number>>()
     for (const r of recs) {
       if (f.kind[r] !== HIT_TRANS) continue

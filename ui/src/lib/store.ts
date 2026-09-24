@@ -4,17 +4,24 @@
  * so the only objects ever fetched are ones a pointer names.
  *
  * Pointers are fetched once per session with `no-cache` (they are mutable); objects are
- * content-addressed and read whole or by HTTP range. A ranged object's 64-byte header is fetched
- * once, alongside its first range, and checked for the kind, chromosome and `seq_digest` its
- * pointer promised before any of its bytes are used.
+ * content-addressed and read whole or by HTTP range. A range read sends no separate header request:
+ * the pointer says what an object is, Store.validate checked every header against its pointer at
+ * build time, and a header is checked wherever it arrives inside bytes read anyway (whole objects,
+ * the gene lookup's directory, a hits file's frame table).
+ *
+ * A gene or variant page reads per-chromosome objects only (SPEC sections 6 and 8): its genes, exon
+ * models and search index part, and one gene lookup bucket to find a gene's chromosome. Nothing on
+ * a first gene page reads a whole-genome table; the gene list and the search box read the
+ * whole-genome genes table and search index the first time they are used (two requests), and the
+ * browser cache keeps every object after.
  *
  * The reader opens one experiment (`VITE_EXPERIMENT`, default `topchef`). Trans results
  * (`results[].trans`) and the GWAS (`gwas`) are optional per experiment; `hasTrans` / `hasGwas`
  * say whether a page can show them.
  */
-import { tableFromIPC } from 'apache-arrow'
-import { checkFileHeader, decodeArrowObject, decodeGwasBins, DIGEST, FORMAT_VERSION, HEADER_LEN, KIND, OBJECT_NAME,
-  parseFileHeader, type FileHeader, type GwasBin } from './store-decode'
+import { tableFromIPC, type Table } from 'apache-arrow'
+import { decodeArrowObject, decodeGwasBins, decodeLookupDir, DIGEST, FORMAT_VERSION, lookupBucket,
+  lookupDirLen, lookupKey, OBJECT_NAME, parseFileHeader, type GwasBin } from './store-decode'
 
 /** The one data host. An empty `VITE_DATA_BASE` means "same origin" (`/data`), which is what the
  *  local dev server and preview serve. */
@@ -46,10 +53,21 @@ export interface CatalogDoc {
 }
 
 export interface AnnotationDoc {
-  id: string; identity_digest: string; genes: string; exons: string
+  id: string; identity_digest: string
+  /** the whole-genome tables (SPEC section 6): read only for the gene list and search (`genes`) */
+  genes: string; exons: string
+  /** per chromosome: its genes rows and their collapsed exon models */
+  chroms: Record<string, { genes: string; exon_models: string }>
+  /** the gene lookup (kind 10): gene_id and symbol -> gene_id, name, chr, tss */
+  lookup: string
   n_genes: number; n_transcripts: number; n_exons: number
   source: { file?: string; name?: string; version?: string; url?: string }
 }
+
+/** One part of the search index (SPEC section 8): its object, row count and inclusive ord runs. */
+export interface IndexPart { file: string; rows: number; ords: [number, number][] }
+/** What the Home and About pages print for one phenotype type (phenotypes with a cis result). */
+export interface TypeCounts { phenotypes: number; with_rows: number; significant: number; significant_genes: number }
 
 /** Worst-case rounding of one results set (SPEC section 8, `precision`). */
 export interface ResultsPrecision { neglog10p_max_error: number; slope_se_max_rel_error: number; af_max_error: number }
@@ -70,6 +88,11 @@ export interface ExperimentDoc {
   allele_orientation_source: string | null
   significance: { column: string; op: string; threshold: number }
   search_index: string; n_phenotypes: number
+  /** the search index by chromosome, which the browser reads instead of `search_index` */
+  search_index_parts: Record<string, IndexPart>
+  /** the trans-only phenotypes' rows (`chr` null), null when there are none */
+  search_index_trans_only: IndexPart | null
+  counts: Record<string, TypeCounts>
   hits: Record<string, string>
   results: ResultsSet[]
   source?: { experiment_id?: string; source?: Record<string, unknown> }
@@ -135,33 +158,14 @@ async function rangeFetch(name: string, offset: number, length: number): Promise
 /** A byte range of an object with no header check (the caller checks what it reads). */
 export const rangeObject = (name: string, offset: number, length: number) => rangeFetch(name, offset, length)
 
-/** What a ranged object's header must say. */
-export interface HeaderExpect { kind: number; chrom: string; seqDigest: string; count?: number; nCis?: number }
-
-const headers = new Map<string, Promise<FileHeader>>()
-/** The object's 64-byte header, fetched once per session and checked against `expect`. */
-function checkedHeader(name: string, expect: HeaderExpect): Promise<FileHeader> {
-  let p = headers.get(name)
-  if (!p) {
-    p = rangeFetch(name, 0, HEADER_LEN).then(b => parseFileHeader(b, name))
-    headers.set(name, p)
-    const q = p
-    q.catch(() => { if (headers.get(name) === q) headers.delete(name) })
-  }
-  return p.then(h => {
-    checkFileHeader(h, expect, name)
-    if (expect.count !== undefined && h.count !== expect.count) throw new Error(`${name}: header count ${h.count}, pointer says ${expect.count}`)
-    if (expect.nCis !== undefined && h.nCis !== expect.nCis) throw new Error(`${name}: header n_cis ${h.nCis}, pointer says ${expect.nCis}`)
-    return h
-  })
-}
-
 /** One range request timed as `mark` (store:block, store:variants, ...), then its decode as
- *  `decodeMark`. The object's header check runs alongside the range, and the decode waits for it. */
-export async function fetchDecoded<T>(mark: string, detail: Record<string, unknown>, name: string, expect: HeaderExpect,
+ *  `decodeMark`. No header request: the pointer already says what the object is (its name is the
+ *  digest of its bytes, and Store.validate checked its header at build time), and the decoders
+ *  fail on bytes that are not what the offsets promise. */
+export async function fetchDecoded<T>(mark: string, detail: Record<string, unknown>, name: string,
   offset: number, length: number, decode: (bytes: Uint8Array, what: string) => T, decodeMark = 'store:decode'): Promise<T> {
   const t0 = performance.now()
-  const [, bytes] = await Promise.all([checkedHeader(name, expect), rangeFetch(name, offset, length)])
+  const bytes = await rangeFetch(name, offset, length)
   const t1 = performance.now()
   performance.measure(mark, { start: t0, end: t1, detail })
   const out = decode(bytes, `${name} bytes ${offset}+${length}`)
@@ -182,11 +186,15 @@ function checkNames(doc: unknown, where: string): void {
 }
 
 async function openStore(): Promise<Store> {
+  // the experiment's pointer is fetched alongside store.json (its id is known), and used only once
+  // store.json lists it: one round trip fewer before the first object read
+  const expP = pointer<ExperimentDoc>(`experiments/${EXPERIMENT_ID}.json`)
+  expP.catch(() => {})
   const store = await pointer<StoreDoc>('store.json')
   if (store.format_version !== FORMAT_VERSION)
     throw new Error(`store.json: format version ${store.format_version}, and this build reads version ${FORMAT_VERSION}. The data was updated; reload the page.`)
   if (!store.experiments?.includes(EXPERIMENT_ID)) throw new Error(`store.json lists no experiment "${EXPERIMENT_ID}"`)
-  const experiment = await pointer<ExperimentDoc>(`experiments/${EXPERIMENT_ID}.json`)
+  const experiment = await expP
   if (experiment.id !== EXPERIMENT_ID) throw new Error(`experiments/${EXPERIMENT_ID}.json: id is "${experiment.id}"`)
   if (!store[CATALOG_DIR]?.includes(experiment.catalog) || !store.annotations?.includes(experiment.annotation))
     throw new Error(`experiment ${experiment.id}: variant catalog ${experiment.catalog} or annotation ${experiment.annotation} is not in store.json`)
@@ -198,6 +206,9 @@ async function openStore(): Promise<Store> {
     throw new Error(`experiment ${experiment.id}: catalog_identity ${experiment.catalog_identity} is not catalog ${catalog.id}'s ${catalog.identity_digest}`)
   if (catalog.orientation !== 'ref_alt') throw new Error(`catalog ${catalog.id}: orientation "${catalog.orientation}", this reader reads ref_alt`)
   if (!DIGEST.test(catalog.collection_digest)) throw new Error(`catalog ${catalog.id}: collection digest ${catalog.collection_digest}`)
+  // the per-chromosome objects every page reads (SPEC sections 6 and 8); a store built before them has none
+  if (!annotation.chroms || !annotation.lookup || !experiment.search_index_parts || !experiment.counts || experiment.search_index_trans_only === undefined)
+    throw new Error(`the store predates this build (no per-chromosome annotation or search index objects); rebuild it with the current pipeline`)
   checkNames(experiment, `experiments/${experiment.id}.json`)
   checkNames(catalog, `${CATALOG_DIR}/${catalog.id}.json`)
   checkNames(annotation, `annotations/${annotation.id}.json`)
@@ -233,24 +244,90 @@ function memo<T>(make: () => Promise<T>): () => Promise<T> {
   }
 }
 
-/** The experiment's search index as an Arrow IPC stream (one row per phenotype, SPEC section 8). */
-export const searchIndexIPC = memo(async () => {
-  const s = await getStore()
-  return decodeArrowObject(await fetchObject(s.experiment.search_index), s.experiment.search_index)
+/** One memoized promise per key; a rejection is forgotten so the next call retries. */
+function memoBy<T>(make: (key: string) => Promise<T>): (key: string) => Promise<T> {
+  const m = new Map<string, Promise<T>>()
+  return key => {
+    let p = m.get(key)
+    if (!p) {
+      const q = make(key)
+      m.set(key, q)
+      q.catch(() => { if (m.get(key) === q) m.delete(key) })
+      p = q
+    }
+    return p
+  }
+}
+
+const arrowTable = async (name: string): Promise<Table> => tableFromIPC(decodeArrowObject(await fetchObject(name), name))
+
+/** The whole-genome annotation genes table and experiment search index, one request each: what the
+ *  gene list and the search box read, instead of every chromosome's objects (gene-index.ts). */
+export const wholeGenes = memo(async () => arrowTable((await getStore()).annotation.genes))
+export const wholeIndex = memo(async () => arrowTable((await getStore()).experiment.search_index))
+
+/** One chromosome's annotation genes rows (SPEC section 6), or null when the annotation has none there. */
+export const chromGenes = memoBy(async (chr): Promise<Table | null> => {
+  const n = (await getStore()).annotation.chroms[chr]?.genes
+  return n ? arrowTable(n) : null
 })
 
-/** The annotation's gene table as an Arrow IPC stream (SPEC section 6). */
-export const genesIPC = memo(async () => {
-  const s = await getStore()
-  return decodeArrowObject(await fetchObject(s.annotation.genes), s.annotation.genes)
+/** One chromosome's collapsed exon models (gene_id, exon_starts, exon_ends), or null. */
+export const chromExonModels = memoBy(async (chr): Promise<Table | null> => {
+  const n = (await getStore()).annotation.chroms[chr]?.exon_models
+  return n ? arrowTable(n) : null
 })
 
-/** The annotation's exon table as an Arrow IPC stream: one whole-object read, the first time a
- *  gene page needs its exon model. */
-export const exonsIPC = memo(async () => {
-  const s = await getStore()
-  return decodeArrowObject(await fetchObject(s.annotation.exons), s.annotation.exons)
+/** One chromosome's search index rows (SPEC section 8), or null when the experiment has no part there. */
+export const chromIndex = memoBy(async (chr): Promise<Table | null> => {
+  const n = (await getStore()).experiment.search_index_parts[chr]?.file
+  return n ? arrowTable(n) : null
 })
+
+/** The trans-only phenotypes' search index rows, or null when there are none. */
+export const transOnlyIndex = memo(async (): Promise<Table | null> => {
+  const p = (await getStore()).experiment.search_index_trans_only
+  return p ? arrowTable(p.file) : null
+})
+
+/** The search index part holding row `ord`: a chromosome name, `null` for the trans-only part, or
+ *  undefined when no part lists it. */
+export function partOfOrd(s: Store, ord: number): string | null | undefined {
+  const has = (p: IndexPart) => p.ords.some(([a, b]) => ord >= a && ord <= b)
+  for (const [c, p] of Object.entries(s.experiment.search_index_parts)) if (has(p)) return c
+  const t = s.experiment.search_index_trans_only
+  return t && has(t) ? null : undefined
+}
+
+/** A gene lookup row (SPEC section 6, kind 10). */
+export interface LookupRow { key: string; gene_id: string; name: string; chr: string; tss: number }
+
+/** The lookup's header and bucket offsets: one range read of the first `lookupDirLen` bytes (the
+ *  builder writes 1024 buckets; a lookup with another count costs one more read). */
+const lookupDir = memo(async () => {
+  const s = await getStore()
+  const name = s.annotation.lookup
+  let b = await rangeFetch(name, 0, lookupDirLen(1024))
+  const n = parseFileHeader(b, name).count
+  if (n !== 1024) b = await rangeFetch(name, 0, lookupDirLen(n))
+  return { name, ...decodeLookupDir(b, s.annotation.identity_digest, name) }
+})
+
+const lookupBucketRows = memoBy(async (b): Promise<LookupRow[]> => {
+  const d = await lookupDir()
+  const k = Number(b), off = d.off[k], len = d.off[k + 1] - off
+  if (!len) return []
+  const t = tableFromIPC(decodeArrowObject(await rangeFetch(d.name, off, len), `${d.name} bucket ${k}`))
+  return t.toArray().map(r => { const o = r.toJSON(); return { key: o.key, gene_id: o.gene_id, name: o.name, chr: o.chr, tss: Number(o.tss) } })
+})
+
+/** Every gene whose `gene_id` or symbol is `id` (ASCII case ignored): two small range reads the
+ *  first time, one per new bucket after. */
+export async function lookupGenes(id: string): Promise<LookupRow[]> {
+  const key = lookupKey(id)
+  const d = await lookupDir()
+  return (await lookupBucketRows(String(lookupBucket(key, d.nBuckets)))).filter(r => r.key === key)
+}
 
 /** The GWAS bin summary as rows (one whole-object read, for the landing track), or null when the
  *  experiment's GWAS has none. */
@@ -261,40 +338,40 @@ export const gwasBins = memo(async (): Promise<GwasBin[] | null> => {
   return decodeGwasBins(await fetchObject(b.file), b, b.file)
 })
 
-/** The results file of one phenotype type on one chromosome, with the header it must carry. */
-export function resultsFile(s: Store, phenotypeType: string, chr: string): { name: string; expect: HeaderExpect; dof: number | null } {
+/** The results file of one phenotype type on one chromosome, and the dof its slopes are rebuilt with. */
+export function resultsFile(s: Store, phenotypeType: string, chr: string): { name: string; dof: number | null } {
   const r = s.results.get(phenotypeType)
   const name = r?.files[chr]
   const c = s.chroms.get(chr)
   if (!r || !name || !c) throw new Error(`experiment ${s.experiment.id}: no ${phenotypeType} results for ${chr}`)
-  return { name, expect: { kind: KIND.results, chrom: chr, seqDigest: c.seq_digest }, dof: r.dof }
+  return { name, dof: r.dof }
 }
 
-/** A phenotype type's trans object, with the header it must carry, or null when it has none. */
-export function transFile(s: Store, phenotypeType: string): { name: string; expect: HeaderExpect; dof: number | null } | null {
+/** A phenotype type's trans object and its dof, or null when it has none. */
+export function transFile(s: Store, phenotypeType: string): { name: string; dof: number | null } | null {
   const r = s.results.get(phenotypeType)
   if (!r?.trans) return null
-  return { name: r.trans.file, expect: { kind: KIND.trans, chrom: 'all', seqDigest: s.catalog.collection_digest }, dof: r.dof }
+  return { name: r.trans.file, dof: r.dof }
 }
 
-/** A chromosome's GWAS file, with the header it must carry, or null when the GWAS has no rows there. */
-export function gwasFile(s: Store, chr: string): { name: string; expect: HeaderExpect } | null {
+/** A chromosome's GWAS file, or null when the GWAS has no rows there. */
+export function gwasFile(s: Store, chr: string): { name: string } | null {
   const g = s.experiment.gwas, c = s.chroms.get(chr)
   const name = g?.files[chr]
   if (!g || !name || !c) return null
-  return { name, expect: { kind: KIND.gwas, chrom: chr, seqDigest: c.seq_digest, count: g.rows_by_chrom[chr] } }
+  return { name }
 }
 
-/** A catalog chromosome's variants file, with the header it must carry. */
-export function variantsFile(s: Store, chr: string): { name: string; expect: HeaderExpect } {
+/** A catalog chromosome's variants file. */
+export function variantsFile(s: Store, chr: string): { name: string } {
   const c = s.chroms.get(chr)
   if (!c) throw new Error(`catalog ${s.catalog.id}: no chromosome ${chr}`)
-  return { name: c.file, expect: { kind: KIND.variants, chrom: chr, seqDigest: c.seq_digest, count: c.count, nCis: c.n_cis } }
+  return { name: c.file }
 }
 
 // ---- what the About, Home and gene pages print --------------------------------------------------
 
-/** Whole-experiment counts, from the search index and the catalog. */
+/** Whole-experiment counts, from the experiment's `counts` and the catalog. */
 export interface Counts {
   genes_tested?: number; egenes?: number
   splice_phenotypes_tested?: number; sqtl_sig_phenotypes?: number; sqtl_sig_genes?: number
@@ -315,23 +392,10 @@ export interface StoreInfo extends Store {
 
 export const getStoreInfo = memo(async (): Promise<StoreInfo> => {
   const s = await getStore()
-  const t = tableFromIPC(await searchIndexIPC())
-  const type = t.getChild('phenotype_type')!, sig = t.getChild('significant')!, nVar = t.getChild('n_var')!, gene = t.getChild('gene_id')!
-  const c: Counts = { genes_tested: 0, egenes: 0, splice_phenotypes_tested: 0, sqtl_sig_phenotypes: 0 }
-  const sigGenes = new Set<string>()
-  const chr = t.getChild('chr')!
-  for (let i = 0; i < t.numRows; i++) {
-    const pt = type.get(i), significant = sig.get(i) === true
-    if (chr.get(i) == null) continue            // trans-only phenotypes: no cis test
-    if (pt === EQTL_TYPE) {
-      if (nVar.get(i) != null) c.genes_tested!++
-      if (significant) c.egenes!++
-    } else if (pt === SQTL_TYPE) {
-      c.splice_phenotypes_tested!++
-      if (significant) { c.sqtl_sig_phenotypes!++; const g = gene.get(i); if (g) sigGenes.add(g) }
-    }
-  }
-  c.sqtl_sig_genes = sigGenes.size
+  // the builder's per-type counts (results.type_counts): no index read
+  const ce = s.experiment.counts[EQTL_TYPE], cs = s.experiment.counts[SQTL_TYPE]
+  const c: Counts = { genes_tested: ce?.with_rows ?? 0, egenes: ce?.significant ?? 0,
+    splice_phenotypes_tested: cs?.phenotypes ?? 0, sqtl_sig_phenotypes: cs?.significant ?? 0, sqtl_sig_genes: cs?.significant_genes ?? 0 }
   c.variants_cis = s.catalog.chromosomes.reduce((a, x) => a + x.n_cis, 0)
   c.variants_trans_only = s.catalog.n_sites - c.variants_cis
   if (s.experiment.gwas) c.gwas_variants = s.experiment.gwas.n_rows

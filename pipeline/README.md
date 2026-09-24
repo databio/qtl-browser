@@ -47,6 +47,7 @@ writes into the frozen v0 tree (`adapter.sbatch` refuses it). Iterate with
 | Only the GWAS bin table (`gwas_bins.parquet`, v0's `gwas_dcm_bins.json` bins; seconds) | `ADAPTER=dcm_gwas STEPS="adapter contract" QTLB_DERIVED=<tree> sbatch adapter.sbatch --bins-only` | `adapters/dcm_gwas.py` |
 | Store build | `QTLB_CHROMS=all QTLB_STORE=<store> EXPERIMENTS="topchef:<tree>/_tables/topchef:gencode_v34 gtex_v8_heart_lv:<tree>/_tables/gtex_v8_heart_lv" CROSSCAT="topchef_grch38 gtex_v8_heart_lv_grch38" sbatch --time=6:00:00 --mem=64G store.sbatch` | `annotation.py`, `catalog.py`, `results.py`, `gwas.py`, `verify_v0.py` |
 | Store maintenance | `uv run python -m pipeline.qtlstore validate \| remove-experiment ID \| gc [--dry-run] \| crosscat A B --store <store>` | `qtlstore.py` |
+| Per-chromosome objects for a store built before them | `uv run python -m pipeline.annotation add-split --store <store> --id <annotation>`, then `uv run python -m pipeline.results add-split --store <store> --id <experiment>` (rewrites the pointer; no other object changes) | `annotation.py`, `results.py` |
 | Benchmark, v0 vs v1 | `QTLB_STORE=<store> sbatch bench_store.sbatch`; `EXPERIMENT=gtex_v8_heart_lv ... sbatch bench_store.sbatch --no-reads` for a study with no v0 twin | `bench_store.py` |
 
 Outside Slurm the same modules run directly, e.g.
@@ -57,7 +58,9 @@ PASS/FAIL line per `CONTRACT.md` rule, exits 1 on any failure).
   included. `GENES` sets the per-chromosome pack sample (default 20).
 - **Store build** (`store.sbatch`): per experiment an annotation (named in `EXPERIMENTS`, else the
   adapter's `ingestion.json` `source.gene_annotation`, else `gencode_v34`; GTFs from
-  `ANNOTATION_GTFS`), a variant catalog `<id>_grch38` and the results (with the trans objects when
+  `ANNOTATION_GTFS`, with its per-chromosome genes and exon models and its gene lookup, SPEC.md
+  section 6), a variant catalog `<id>_grch38` and the results (with the search index split by
+  chromosome and the page counts, SPEC.md section 8, and the trans objects when
   the tables hold `trans.parquet`, and the GWAS object when they hold `gwas.parquet`, with its bin
   summary when they also hold `gwas_bins.parquet`); then
   `Store.validate`, a per-experiment count of genes missing from the annotation, the cross-catalog

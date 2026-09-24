@@ -12,7 +12,7 @@ import { dbsnp, ucsc } from '@/lib/links'
 import { fmtBp, fmtBytes, fmtInt, fmtNum, fmtP, fmtPhenotype, fmtSlopeSE } from '@/lib/format'
 import { planScan, runScan, type CisHit, type ScanPlan } from '@/lib/cis-scan'
 import type { VariantRecord } from '@/lib/store-decode'
-import { csValues, hitPhenotypes, leadValues, loadHits, lookupRsid, nominalAt, variantAt, variantAtPosition,
+import { csValues, hitPhenotypes, leadValues, loadHits, lookupRsid, nominalsAt, variantAt, variantAtPosition,
   type HitPhenotype, type Hits } from '@/lib/variant'
 import { SQTL_TYPE } from '@/lib/store'
 import { variantTransTable } from '@/lib/trans'
@@ -82,8 +82,9 @@ interface CsRow { row: number; gene: GeneRow; qtlType: 'e' | 's'; phenotypeId: s
 /** A lead row also carries the variant's nominal slope and SE in that phenotype's block. */
 interface LeadRow extends CsRow { slope: number | null; slopeSe: number | null }
 
-/** The two list sections, built from the hits records plus one local `phenotypes` query, and one
- *  block read per lead row for its slope. */
+/** The two list sections, built from the hits records, the phenotypes they name (their
+ *  chromosome's search index part and genes), and the lead rows' blocks for their slopes, nearby
+ *  blocks read together. */
 async function buildLists(v: VariantRecord, hits: Hits): Promise<{ leads: LeadRow[]; cs: CsRow[] }> {
   const wanted = [...hits.leads, ...hits.cs]
   if (!wanted.length) return { leads: [], cs: [] }
@@ -94,11 +95,12 @@ async function buildLists(v: VariantRecord, hits: Hits): Promise<{ leads: LeadRo
     const qtlType: 'e' | 's' = p.phenotype_type === SQTL_TYPE ? 's' : 'e'
     return { row: r, p, gene: { gene_id: p.gene_id ?? p.phenotype_id, symbol: p.symbol }, qtlType, phenotypeId: qtlType === 's' ? p.phenotype_id : null }
   }
-  const leads = await Promise.all(hits.leads.map(async r => {
-    const x = of(r)
-    const n = await nominalAt(x.p, v.vidx)
+  const leadRows = hits.leads.map(of)
+  const nominal = await nominalsAt(leadRows.map(x => x.p), v.vidx)
+  const leads = leadRows.map(x => {
+    const n = nominal.get(x.p.ord)
     return { ...x, slope: n?.slope ?? null, slopeSe: n?.se ?? null }
-  }))
+  })
   return { leads, cs: hits.cs.map(of) }
 }
 
@@ -117,9 +119,11 @@ function VariantBody({ v, hits }: { v: VariantRecord; hits: Hits }) {
     let alive = true
     let table: string | null = null
     setLists(null); setTransTable(null); setScan(null); setPlan(null); setAllIntrons(false)
+    // the trans table needs the query engine (a 7 MB download); it starts once the lists have their
+    // data, so the lists do not share the connection with it
     buildLists(v, hits).then(l => { if (alive) setLists(l) }, e => console.error(e))
-    variantTransTable(v, hits)
-      .then(t => { if (!alive) { dropTable(t); return } table = t; setTransTable(t) })
+      .then(() => alive ? variantTransTable(v, hits) : null)
+      .then(t => { if (t == null) return; if (!alive) { dropTable(t); return } table = t; setTransTable(t) })
       .catch(e => console.error(e))
     if (v.inCis) planScan(v).then(p => { if (alive) setPlan(p) }, e => console.error(e))
     return () => { alive = false; if (table) dropTable(table) }

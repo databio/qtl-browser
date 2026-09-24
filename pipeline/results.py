@@ -7,7 +7,8 @@ One code path for every phenotype type (`ge`, `leafcutter`, ...). Reads the cont
     experiments/<id>.json             mutable pointer: variant catalog, annotation, results by digest, dof, rule
       <digest>.qbe                    one per (phenotype_type, chromosome): v1 header + one block per phenotype
       <digest>.qbh                    one per chromosome: lead and credible-set hits keyed by vidx
-      <digest>.arrow.zst              the experiment's search index, one row per phenotype
+      <digest>.arrow.zst              the experiment's search index, one row per phenotype, and the
+                                      same rows split by chromosome for the browser (`split_index`)
 
 Blocks
 ------
@@ -456,6 +457,8 @@ def build(store: qs.Store, exp_id: str, tables: Path, cat_id: str, annot_id: str
         "allele_orientation_source": ingestion.get("allele_orientation_source"),
         "significance": rule,
         "search_index": store.put(encode_arrow(index, level), EXT_INDEX),
+        # the index by chromosome and the page counts, which the browser reads instead (split_index)
+        **split_index(store, index, chroms, level),
         "n_phenotypes": len(entries),
         # phenotypes with no nominal rows, no permuted group and no credible set: nothing says which
         # chromosome they are on, so no build places them (on a subset build this includes phenotypes
@@ -808,6 +811,132 @@ def decode_hits(buf: bytes) -> np.ndarray:
     return a
 
 
+# ---- what the browser reads: the search index by chromosome, counts ------------------------------
+def ord_ranges(ords: list[int]) -> list[list[int]]:
+    """Sorted row numbers as inclusive `[first, last]` runs."""
+    out: list[list[int]] = []
+    for o in ords:
+        if out and o == out[-1][1] + 1:
+            out[-1][1] = o
+        else:
+            out.append([o, o])
+    return out
+
+
+def type_counts(index: pa.Table) -> dict:
+    """Per phenotype type, over its phenotypes with a cis result (`chr` set): `phenotypes`, `with_rows`
+    (a run of variant rows), `significant`, and `significant_genes` (distinct gene ids among the
+    significant). What the Home and About pages print, so neither reads the index."""
+    out: dict = {}
+    for r in index.select(["phenotype_type", "gene_id", "chr", "significant", "n_var"]).to_pylist():
+        c = out.setdefault(r["phenotype_type"], {"phenotypes": 0, "with_rows": 0, "significant": 0, "significant_genes": set()})
+        if r["chr"] is None:
+            continue
+        c["phenotypes"] += 1
+        c["with_rows"] += r["n_var"] is not None
+        if r["significant"]:
+            c["significant"] += 1
+            if r["gene_id"]:
+                c["significant_genes"].add(r["gene_id"])
+    for c in out.values():
+        c["significant_genes"] = len(c["significant_genes"])
+    return out
+
+
+def index_parts(index: pa.Table, chroms: list[str]) -> tuple[dict[str, pa.Table], pa.Table]:
+    """The search index's rows by chromosome (every chromosome in `chroms`, empty ones too, in ord
+    order) and its trans-only rows (`chr` null)."""
+    chrom = index.column("chr").to_pylist()
+    rows = {c: [] for c in chroms}
+    other = sorted({c for c in chrom if c is not None} - set(chroms))
+    if other:
+        raise ValueError(f"search index: rows on {other}, which have no results files")
+    trans_only = []
+    for i, c in enumerate(chrom):
+        (trans_only if c is None else rows[c]).append(i)
+    take = lambda ix: index.take(pa.array(ix, pa.int64()))     # noqa: E731
+    return {c: take(ix) for c, ix in rows.items()}, take(trans_only)
+
+
+def split_index(store: qs.Store, index: pa.Table, chroms: list[str], level: int = ZSTD_LEVEL) -> dict:
+    """Put the search index parts and return the pointer keys `search_index_parts` (chromosome ->
+    `{file, rows, ords}`), `search_index_trans_only` (the same shape, or null) and `counts`. `build` and
+    `add_split` both come here."""
+    parts, trans_only = index_parts(index, chroms)
+
+    def entry(t: pa.Table) -> dict:
+        return {"file": store.put(encode_arrow(t, level), EXT_INDEX), "rows": t.num_rows,
+                "ords": ord_ranges(t.column("ord").to_pylist())}
+    return {"search_index_parts": {c: entry(t) for c, t in parts.items()},
+            "search_index_trans_only": entry(trans_only) if trans_only.num_rows else None,
+            "counts": type_counts(index)}
+
+
+SPLIT_KEYS = ("search_index_parts", "search_index_trans_only", "counts")
+
+
+def _chroms_of(doc: dict, cdoc: dict) -> list[str]:
+    """The chromosomes an experiment was built on, in variant catalog table order."""
+    built = {c for r in doc["results"] for c in r["files"]}
+    return [c["name"] for c in cdoc["chromosomes"] if c["name"] in built]
+
+
+def add_split(store: qs.Store, exp_id: str, level: int = ZSTD_LEVEL) -> dict:
+    """Give an experiment built before the split objects existed its `search_index_parts`,
+    `search_index_trans_only` and `counts`, from the search index it already names, and rewrite its
+    pointer (objects first). Returns the new pointer."""
+    doc = {k: v for k, v in store.load("experiments", exp_id).items() if k not in SPLIT_KEYS}
+    parts = split_index(store, load_index(store, doc), _chroms_of(doc, store.load("variant_catalogs", doc["catalog"])), level)
+    out = {}
+    for k, v in doc.items():            # right after `search_index`, as `build` writes them
+        out[k] = v
+        if k == "search_index":
+            out |= parts
+    store.write_pointer("experiments", exp_id, out)
+    return out
+
+
+def check_split(store: qs.Store, doc: dict, cdoc: dict) -> list[str]:
+    """The browser's parts agree with the search index: one part per chromosome built, each holding
+    exactly that chromosome's rows with the ord runs its entry lists, the trans-only rows likewise, and
+    `counts` recomputed from the index. Failures as strings (empty = pass)."""
+    where = f"experiments/{doc.get('id')}"
+    if not isinstance(doc.get("search_index_parts"), dict) or "counts" not in doc or "search_index_trans_only" not in doc:
+        return [f"{where}: no search_index_parts, search_index_trans_only or counts (the browser reads these; "
+                f"`python -m pipeline.results add-split`)"]
+    names = [p["file"] for p in doc["search_index_parts"].values()] + [doc["search_index"]]
+    if doc["search_index_trans_only"]:
+        names.append(doc["search_index_trans_only"]["file"])
+    if not all((store.immutable / n).exists() for n in names):
+        return []                       # missing objects are reported by validate already
+    index = load_index(store, doc)
+    fails = []
+    try:
+        parts, trans_only = index_parts(index, _chroms_of(doc, cdoc))
+    except ValueError as e:
+        return [f"{where}: {e}"]
+    if set(parts) != set(doc["search_index_parts"]):
+        fails.append(f"{where}: search_index_parts chromosomes {sorted(doc['search_index_parts'])} != chromosomes built {sorted(parts)}")
+    want = dict(parts)
+    if trans_only.num_rows or doc["search_index_trans_only"]:
+        want["trans-only"] = trans_only
+    got = {c: e for c, e in doc["search_index_parts"].items()}
+    if doc["search_index_trans_only"]:
+        got["trans-only"] = doc["search_index_trans_only"]
+    for c, e in got.items():
+        if c not in want:
+            fails.append(f"{where} search index part {c}: no such rows in the index")
+            continue
+        t = decode_arrow((store.immutable / e["file"]).read_bytes(), f"{where} search index part {c}")
+        if not t.equals(want[c]):
+            fails.append(f"{where} search index part {c}: rows differ from the search index")
+        if e.get("rows") != t.num_rows or e.get("ords") != ord_ranges(t.column("ord").to_pylist()):
+            fails.append(f"{where} search index part {c}: rows or ords in the pointer do not describe the part")
+    if doc["counts"] != type_counts(index):
+        fails.append(f"{where}: counts {doc['counts']} != recomputed {type_counts(index)}")
+    return fails
+
+
 # ---- readers ----------------------------------------------------------------------------------
 def load_index(store: qs.Store, doc: dict) -> pa.Table:
     return decode_arrow((store.immutable / doc["search_index"]).read_bytes(), "search index")
@@ -838,7 +967,14 @@ def main(argv: list[str] | None = None) -> int:
     b.add_argument("--id", required=True)
     b.add_argument("--catalog", required=True)
     b.add_argument("--annotation", required=True)
+    s = sub.add_parser("add-split", help="give a stored experiment its search index parts and counts (rewrites its pointer)")
+    s.add_argument("--store", required=True, type=Path)
+    s.add_argument("--id", required=True)
     args = ap.parse_args(argv)
+    if args.cmd == "add-split":
+        doc = add_split(qs.Store(args.store), args.id)
+        print(json.dumps({"parts": len(doc["search_index_parts"]), "counts": doc["counts"]}))
+        return 0
     from .common import CHROMS
     doc = build(qs.Store(args.store), args.id, args.tables, args.catalog, args.annotation, CHROMS)
     print(json.dumps({k: v for k, v in doc.items() if k not in ("hits",)}, indent=1))

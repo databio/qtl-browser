@@ -3,12 +3,13 @@
  * qtlstore (SPEC.md section 9's rule: a phenotype covers a site when `var_start <= vidx <
  * var_start + n_var`). Never on page load, because a span can reach several MB.
  *
- * The covering phenotypes come from the search index alone, with no request. For each phenotype
+ * The covering phenotypes come from the chromosome's search index part, already read for the page. For each phenotype
  * type the scan reads one span of its results file, from the first covering block to the end of
  * the last; both spans go out together. Only block headers are read, plus each covering block's
  * one raw pair at the variant's row and that row's credible-set record; nothing is decompressed.
  */
-import { lit, rows, type Row } from './db'
+import type { Row } from './db'
+import { geneInfo, phenotypesCovering } from './gene-index'
 import { EQTL_TYPE, fetchDecoded, getStore, resultsFile, SQTL_TYPE } from './store'
 import { blockHeader, PackError, scanBlockRow, type VariantRecord } from './store-decode'
 
@@ -47,11 +48,12 @@ const yieldToPage = () => new Promise<void>(r => setTimeout(r, 0))
 async function planSpan(v: VariantRecord, phenotypeType: string): Promise<Span | null> {
   const s = await getStore()
   if (!s.results.get(phenotypeType)?.files[v.chr]) return null
-  const cover = await rows<Covering>(`SELECT p.phenotype_id, p.gene_id, g.name AS symbol, g.tss, p.significant, p.blk_off, p.blk_len
-    FROM phenotypes p LEFT JOIN genes g USING (gene_id)
-    WHERE p.phenotype_type = ${lit(phenotypeType)} AND p.chr = ${lit(v.chr)}
-      AND p.var_start <= ${v.vidx} AND ${v.vidx} < p.var_start + p.n_var
-    ORDER BY p.blk_off`)
+  const phen = (await phenotypesCovering(phenotypeType, v.chr, v.vidx)).filter(p => p.blk_off != null && p.blk_len != null)
+  const cover: Covering[] = await Promise.all(phen.map(async p => {
+    const g = p.gene_id ? await geneInfo(p.gene_id, v.chr) : null
+    return { phenotype_id: p.phenotype_id, gene_id: p.gene_id, symbol: g?.name ?? null, tss: g?.tss ?? null, significant: p.significant,
+      blk_off: p.blk_off!, blk_len: p.blk_len! }
+  }))
   if (!cover.length) return null
   const off = cover[0].blk_off
   const len = cover[cover.length - 1].blk_off + cover[cover.length - 1].blk_len - off
@@ -59,7 +61,7 @@ async function planSpan(v: VariantRecord, phenotypeType: string): Promise<Span |
     ref: { gene_id: c.gene_id ?? c.phenotype_id, symbol: c.symbol, tss: c.tss, phenotype_id: c.phenotype_id, significant: c.significant } })) }
 }
 
-/** The spans for a variant, from the search index alone: no network. */
+/** The spans for a variant, from the chromosome's search index part (read once per session). */
 export async function planScan(v: VariantRecord): Promise<ScanPlan> {
   const [e, s] = await Promise.all([planSpan(v, EQTL_TYPE), planSpan(v, SQTL_TYPE)])
   return { chr: v.chr, vidx: v.vidx, position: v.position, e, s, bytes: (e?.len ?? 0) + (s?.len ?? 0), sPending: false }
@@ -89,7 +91,7 @@ async function scanType(plan: ScanPlan, span: Span | null, phenotypeType: string
   const st = await getStore()
   const f = resultsFile(st, phenotypeType, plan.chr)
   const bytes = await fetchDecoded(splicing ? 'store:scan-sqtl' : 'store:scan-eqtl', { chr: plan.chr, vidx: plan.vidx },
-    f.name, f.expect, span.off, span.len, b => b, splicing ? 'store:scan-sqtl-decode' : 'store:scan-eqtl-decode')
+    f.name, span.off, span.len, b => b, splicing ? 'store:scan-sqtl-decode' : 'store:scan-eqtl-decode')
   return walkSpan(bytes, span, plan.vidx, f.dof, (ref, r) => {
     const base = { gene_id: ref.gene_id, symbol: ref.symbol, tss_distance: ref.tss == null ? NaN : v.position - ref.tss,
       pval_nominal: r.pval, slope: r.slope, slope_se: r.se, af: v.af, pip: r.pip, cs_id: r.csId }

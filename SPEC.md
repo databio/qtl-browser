@@ -8,8 +8,8 @@ like v0. This document is the byte-level contract for what the builders write to
 |---|---|
 | `pipeline/qtlstore.py` | object names, the 64-byte v1 header, variant catalog identity, orientation, `Store.validate`, store maintenance (`remove-experiment`, `gc`, `crosscat`) |
 | `pipeline/catalog.py` | a variant catalog: per-chromosome variants files, variant index, rsID index |
-| `pipeline/annotation.py` | a gene/exon annotation object |
-| `pipeline/results.py` | an experiment: results files, hits files, search index, trans objects |
+| `pipeline/annotation.py` | a gene/exon annotation object, its per-chromosome genes and exon models, and its gene lookup |
+| `pipeline/results.py` | an experiment: results files, hits files, search index and its per-chromosome parts, trans objects |
 | `pipeline/gwas.py` | an experiment's GWAS object: per-chromosome GWAS files, the GWAS index and the bin summary |
 | `pipeline/dof.py` | the degrees-of-freedom fit an experiment records |
 | `pipeline/packfmt_v1.py` | the v1 codec pieces (zstd framing, variant page header, results block, quantizers, SNP codes, hits, trans and GWAS frames) |
@@ -31,7 +31,7 @@ variant index (vidx) and the rsID index. It is not the **eQTL Catalogue**, the E
 the experiments comes from; this document spells that one out in full every time.
 
 **Status.** Builders and `Store.validate` exist and pass on a genome-wide two-experiment store
-(`/scratch/ns5bc/qtl-browser/store-genome-v1e` on Rivanna: TOPCHeF, with its trans results and the DCM
+(`/scratch/ns5bc/qtl-browser/store-genome-v1f` on Rivanna: TOPCHeF, with its trans results and the DCM
 GWAS, and GTEx v8 heart LV). Marked **(future)** below: the VRS-id index and `store.json` refget URLs.
 A browser reader for v1 is being written in `ui/`; this document is its reference.
 
@@ -73,13 +73,13 @@ files exist when it runs. A reader that starts from any level never meets a dang
 **`store.json`:**
 
 ```json
-{"name": "store-genome-v1e", "format_version": 1, "refget": [],
+{"name": "store-genome-v1f", "format_version": 1, "refget": [],
  "variant_catalogs": ["gtex_v8_heart_lv_grch38", "topchef_grch38"],
  "annotations": ["gencode_v34", "gencode_v39"],
  "experiments": ["gtex_v8_heart_lv", "topchef"]}
 ```
 
-(The genome-wide two-experiment store on Rivanna, `/scratch/ns5bc/qtl-browser/store-genome-v1e/`.)
+(The genome-wide two-experiment store on Rivanna, `/scratch/ns5bc/qtl-browser/store-genome-v1f/`.)
 The pointer level of variant catalogs is the directory `variant_catalogs/` and the `store.json` key
 `variant_catalogs` (stores built before 2026-09-24 used `catalogs`). An experiment names its variant
 catalog in its own key `catalog` (section 8).
@@ -112,7 +112,8 @@ pointer that names it.
 | `qbh` | hits file, one per (experiment, chromosome) | 7 |
 | `qbr` | rsID index, one per variant catalog | 8 |
 | `qbx` | variant index, one per variant catalog | 9 |
-| `arrow.zst` | annotation gene table, annotation exon table, experiment search index, GWAS bin summary | no header |
+| `qgl` | gene lookup, one per annotation | 10 |
+| `arrow.zst` | annotation gene and exon tables and their per-chromosome genes and exon models, experiment search index and its per-chromosome parts, GWAS bin summary | no header |
 
 Kind 3 is unused in v1 (v0's detail-less sQTL kind). Kinds 4-6 keep v0's numbers for the same
 content (GWAS, GWAS index, trans) with v1 layouts. The codec module is `pipeline/packfmt_v1.py`
@@ -124,7 +125,7 @@ collects every string anywhere in a pointer that matches the name pattern; those
 
 ## 4. File header, v1 (64 bytes)
 
-Every binary object (`qbv`, `qbe`, `qbg`, `qgi`, `qbt`, `qbh`, `qbr`, `qbx`) starts with this header.
+Every binary object (`qbv`, `qbe`, `qbg`, `qgi`, `qbt`, `qbh`, `qbr`, `qbx`, `qgl`) starts with this header.
 Struct `<4sBBH8sIII32s4x>` (`qtlstore._HEADER`).
 
 | offset | type | field |
@@ -150,10 +151,19 @@ Struct `<4sBBH8sIII32s4x>` (`qtlstore._HEADER`).
 | 7 hits | records | variants per frame (1024) | the chromosome | that sequence's digest |
 | 8 rsID index | records | records per block (4096) | `all` | the **collection** digest |
 | 9 variant index | chromosomes | variants per page (512) | `all` | the **collection** digest |
+| 10 gene lookup | buckets (1024) | 0 | `all` | the annotation's `identity_digest` |
 
 `seq_digest` is the one field v1 adds: a file found alone says which exact sequence its positions
 index. For the kinds whose chromosome is `all` (5, 6, 8, 9) the same 32 bytes carry the seqcol
-collection digest instead, since they span sequences.
+collection digest instead, since they span sequences. The gene lookup (kind 10) indexes no sequence,
+so they carry the identity digest of the annotation it was built from.
+
+**What a reader checks.** `Store.validate` checks every header against its pointer at build time
+(section 14). The browser does not send a separate request for a header: it checks a header only
+where one arrives inside bytes it reads anyway (the gene lookup's directory, a hits file's frame
+table, a whole-object read). A range read at a pointer-given offset trusts the pointer, which is
+what the content-addressed name and `validate` guarantee, and the decoders reject bytes that are
+not what the offsets promise (block magic and length, zstd framing, record counts).
 
 **Reader rules** (`parse_file_header`): magic `QTLB`; version 1; header length 64; bytes 60-63
 zero; chromosome non-empty, ASCII, no inner NUL; `seq_digest` matches `^[A-Za-z0-9_-]{32}$`.
@@ -364,11 +374,15 @@ none, else `gencode_v34`.
 ```json
 {"id": "gencode_v34", "identity_digest": "<32>",
  "genes": "<digest>.arrow.zst", "exons": "<digest>.arrow.zst",
+ "chroms": {"chr1": {"genes": "<digest>.arrow.zst", "exon_models": "<digest>.arrow.zst"}, "...": {}},
+ "lookup": "<digest>.qgl",
  "n_genes": 0, "n_transcripts": 0, "n_exons": 0,
  "source": {"file": "gencode.v34.annotation.gtf.gz", "name": "...", "version": "...", "url": "...", "md5": "...", "size": 0}}
 ```
 
-No timestamp: the same GTF gives a byte-identical pointer.
+No timestamp: the same GTF gives a byte-identical pointer. `genes` and `exons` are the canonical
+tables; `chroms` and `lookup` are derived from them (below) for readers that need one chromosome or
+one gene, and are not part of the identity.
 
 ### Tables
 
@@ -380,6 +394,45 @@ No timestamp: the same GTF gives a byte-identical pointer.
 - From GTF `gene` and `exon` records only. `_PAR_Y` genes are dropped (they would repeat a
   `gene_id`). A gene id without an integer version suffix is an error. Both quoted and bare GTF
   attribute values are read, so `exon_number` is the real ordinal (v0 stored 0).
+
+### Per-chromosome objects and the gene lookup
+
+A gene page needs one gene: its row, its exon model, its neighbours for the gene track. Reading the
+whole-genome tables for that costs 12 MB (the exon table alone is 11 MB for GENCODE v34), so the
+builder also writes (`annotation.split`, which `build` and `add-split` both call):
+
+- **`chroms[chr].genes`**: the `genes` rows of that chromosome, same schema and order. Every
+  chromosome of `genes` has one.
+- **`chroms[chr].exon_models`**: one row per one of those genes, in the same order: `gene_id`
+  string, `exon_starts` list<int32>, `exon_ends` list<int32>, the gene's **collapsed exon model**:
+  the union of its transcripts' exons as sorted intervals, an exon merged into the previous one when
+  its start is at or before that one's end (touching exons, `start = end + 1`, stay apart). Empty
+  lists for a gene with no exon records. GENCODE v34: chr1 254 KB, chr7 125 KB, all 2.6 MB. The
+  transcript-level table split by chromosome would be 1.0 MB for chr1, which is why the per-chromosome
+  object holds the model rather than the rows. Genes and models are two objects so a reader of gene
+  rows alone (a region's gene list) does not download exon models.
+- **`lookup`** (kind 10, `.qgl`): gene id and symbol to chromosome, for a reader that is given a gene
+  name and does not yet know which chromosome's objects to read.
+
+**Gene lookup layout.** `[64-byte header][u32 offset[B + 1]][bucket 0][bucket 1]...` with B = 1024
+(header count). Bucket `b` is bytes `offset[b] .. offset[b + 1] - 1`; `offset[0] = 64 + 4 (B + 1)`,
+`offset[B]` is the object size, and an empty bucket has zero bytes. A bucket is an Arrow object
+(section 1: an Arrow IPC stream in one zstd frame) with rows `key` string, `gene_id` string, `name`
+string, `chr` string, `tss` int32, sorted by `(key, gene_id)`.
+
+- Every gene has a row under the key of its `gene_id`, and one under the key of its `name` when that
+  is non-empty and differs. A key may have several rows (a symbol shared by several genes).
+- **Key**: the string with ASCII `a`-`z` upper-cased and every other character unchanged
+  (`annotation.lookup_key`), so JavaScript and Python agree without Unicode case rules.
+- **Bucket**: FNV-1a 32 over the key's UTF-8 bytes (offset basis `0x811C9DC5`, prime `0x01000193`),
+  modulo B (`annotation.lookup_bucket`). Pinned vectors, checked in both `test_annotation.py` and
+  `npm run store-check`: `"" -> 453`, `"A" -> 716` (FNV-1a `0xC40BF6CC`), `"FLNC" -> 208`,
+  `"ENSG00000128591" -> 414`, `"HLA-DRB1" -> 280`, `"Y_RNA" -> 828`, `"Ä" -> 834`.
+- **Lookup**: read bytes `0 .. 64 + 4 (B + 1) - 1` once (header and offsets, 4.2 KB), then the
+  key's bucket (about 2 KB), and keep the rows whose `key` equals the key.
+
+A reader that needs every gene (a whole gene list, a search box) reads `genes` whole, one request,
+rather than every chromosome's object.
 
 ### Annotation identity digest
 
@@ -438,6 +491,10 @@ kind: one code path and one block layout serve every type.
  "allele_orientation_source": "topchef_refcheck_a2_is_ref",
  "significance": {"column": "p_perm", "op": "<", "threshold": 0.05},
  "search_index": "<digest>.arrow.zst",
+ "search_index_parts": {"chr21": {"file": "<digest>.arrow.zst", "rows": 986, "ords": [[0, 189], [703, 1498]]}},
+ "search_index_trans_only": {"file": "<digest>.arrow.zst", "rows": 53, "ords": [[686, 702], [3565, 3600]]},
+ "counts": {"ge": {"phenotypes": 686, "with_rows": 686, "significant": 372, "significant_genes": 372},
+            "leafcutter": {"phenotypes": 2862, "with_rows": 2862, "significant": 512, "significant_genes": 204}},
  "n_phenotypes": 0,
  "unplaced": {"count": 0, "examples": []},
  "hits": {"chr21": "<digest>.qbh"},
@@ -590,6 +647,22 @@ no block for it in any results file. Only trans-only phenotypes have `chr` null.
 No annotation columns, and no schema metadata listing pack hashes (v0's `qtl_browser.packs`):
 content-addressed names already pin every object. When `phenotypes.has_nominal` exists the
 builder fails if it disagrees with the nominal rows it found.
+
+**Parts.** The same rows split for readers that need one chromosome (`results.split_index`, which
+`build` and `add-split` both call): `search_index_parts[chr]` holds the rows whose `chr` is that
+chromosome, one part per chromosome built (empty ones included), and `search_index_trans_only`
+the rows whose `chr` is null (null when there are none). Each is an Arrow object with the search
+index's schema and its rows in `ord` order; `rows` is its row count and `ords` its rows' `ord`
+values as sorted inclusive `[first, last]` runs, so a reader holding an `ord` (from a hits record)
+knows which part to read without reading any. Because rows are ordered by phenotype type first, a
+chromosome's part has one run per phenotype type. TOPCHeF: chr1 322 KB, chr7 166 KB, all 3.0 MB.
+
+A gene page reads the part of its gene's annotation chromosome, so a phenotype placed on another
+chromosome than its gene would not show there (TOPCHeF and GTEx have none).
+
+**`counts`**, per phenotype type, over its phenotypes with a cis result (`chr` set) (`results.type_counts`):
+`phenotypes`, `with_rows` (`n_var` set), `significant`, and `significant_genes` (distinct non-null
+`gene_id` among the significant). The summary line a landing page prints, so it reads no index.
 
 ### Hits file (kind 7, `.qbh`)
 
@@ -924,6 +997,20 @@ empty failure list with non-empty notes is a partial pass.**
 11. Every trans object is tiled by its frames as the search index places them (from byte 64 to the
     end, no gap or overlap, as many frames as the pointer's `n_phenotypes`), and each gene's frames
     in it form one contiguous range (`results.check_trans_layout`, section 9).
+12. Every annotation has `chroms` and `lookup`: one `chroms` entry per chromosome of `genes`, each
+    `genes` object equal to that chromosome's rows and each `exon_models` object equal to the models
+    recomputed from `exons`; the lookup has kind 10, chromosome `all` and the annotation's
+    `identity_digest`, its offsets tile it, and every bucket equals what `lookup_buckets` makes of
+    `genes` (`annotation.check_split`).
+13. Every experiment with a search index has `search_index_parts`, `search_index_trans_only` and
+    `counts`: one part per chromosome built, each equal to that chromosome's index rows with `rows`
+    and `ords` describing it, the trans-only part likewise, and `counts` equal to `type_counts` of
+    the index (`results.check_split`).
+
+`python -m pipeline.annotation add-split --store DIR --id ID` and `python -m pipeline.results
+add-split --store DIR --id ID` give a store built before 12 and 13 its derived objects, from the
+objects it already has, by the same code the builders run; the pointer is rewritten and no other
+object changes.
 
 Every header check also checks the kind: a variants file must be kind 1.
 
@@ -977,6 +1064,7 @@ TOPCHeF object byte for byte as it was (pipeline/README.md, "Experiment modulari
 | GWAS | kinds 4, 5; `ea`/`nea` as given | kinds 4, 5; ref/alt oriented, `af` ALT, same lossless codes (section 10) |
 | GWAS bins | `gwas_dcm_bins.json` at the bucket root, columnar JSON, fixed name | an Arrow object named from `gwas.bins`, same bins and values (section 10) |
 | variant catalog identity | none | `identity_digest` |
+| what a first gene page reads | the whole `search_index` (1.9 MB) | one lookup bucket, its chromosome's genes, exon models and index part (sections 6, 8) |
 
 ## 17. Where v0 lives
 
