@@ -1,76 +1,94 @@
 # qtl-browser
 
-Static browser for the TOPCHeF cis/trans eQTL and sQTL summary statistics (Murray et al. 2026,
-medRxiv 10.64898/2026.01.12.26343934), with the Jurgens et al. 2024 DCM GWAS alongside for
-colocalization views. All queries run in the browser with DuckDB-WASM over range-read parquet;
-there is no server.
+A web browser for heart QTL results: the TOPCHeF cis and trans eQTL and sQTL summary statistics
+(Murray et al. 2026, medRxiv 10.64898/2026.01.12.26343934), the GTEx v8 heart left ventricle
+results from the eQTL Catalogue, and the Jurgens et al. 2024 DCM GWAS for colocalization views.
+
+There is no server. The data is a **qtlstore**: a folder of files, each named by the hash of its
+own bytes, with every position tied to a refget reference sequence. The site is a static React app
+that reads those files with plain HTTP range requests and decodes them in the browser. `SPEC.md`
+describes the store byte by byte.
+
+Live site: https://topchef.databio.org
 
 ## Layout
 
 | Path | What |
 |---|---|
-| `data/raw/` | `sources.yaml` lists every input (Zenodo QTL archives, GENCODE v34, dbSNP b157, DCM GWAS) with URLs, versions, and checksums; `download.py` fetches and verifies them. Everything else here is gitignored. |
-| `pipeline/` | Python build that turns `data/raw/` into browser-ready parquet in `data/derived/`, plus `manifest.json`. `config.yaml` holds paths, the significance rule, window sizes. `figures.py` makes quick-look PNGs. |
-| `ui/` | Vite + React + TypeScript app: Tailwind 4 and DaisyUI 5, DuckDB-WASM, Mosaic/vgplot plots. |
-| `plans/` | Dated plans with decision ledgers and implementation logs. |
+| `SPEC.md` | The qtlstore format (v1): store layout and object names, the file header, variant catalogs, annotations, allele orientation, results, search index, hits, trans, GWAS, and what `Store.validate` checks. |
+| `pipeline/` | Python code that builds the store. Adapters turn each study into standard input tables (`pipeline/CONTRACT.md`); `qtlstore.py`, `catalog.py`, `annotation.py`, `results.py` and `gwas.py` write the store. `pipeline/README.md` explains every step. |
+| `*.sbatch` | Slurm jobs for Rivanna: `adapter.sbatch` (adapter, TOPCHeF gate, contract check), `store.sbatch` (store build, validate, v0 comparison), `bench_store.sbatch` (format benchmark), `build.sbatch` (shared input tables). |
+| `ui/` | The browser app: Vite, React, TypeScript, Tailwind 4 and DaisyUI 5, DuckDB-WASM, Mosaic plots. |
+| `ui/bench/` | Browser smoke suites for the gene, variant and trans pages, and a Playwright harness that measures what a gene page costs. |
+| `data/raw/` | `sources.yaml` lists every input with URLs, versions and checksums; `download.py` fetches them. The data itself is not in git. |
+| `plans/` | Dated plans from earlier work. |
 
-## Setup
+## Build the store
+
+The build runs on Rivanna, where the inputs live. It goes in four stages:
+
+1. **Adapters** turn each study into contract tables: `sbatch adapter.sbatch` (TOPCHeF, the eQTL
+   Catalogue, the DCM GWAS).
+2. **Store**: `sbatch store.sbatch` builds the annotation, variant catalog and results for each
+   experiment into one store.
+3. **Checks**: `Store.validate` (run by `store.sbatch`), `verify_v0` (the TOPCHeF store against the
+   frozen v0 build), and the TOPCHeF acceptance gate plus the contract check (run by
+   `adapter.sbatch`).
+4. **Benchmark**: `sbatch bench_store.sbatch` compares v0 and v1 sizes and read speed; the smoke
+   suites in `ui/bench/` check the pages in a browser.
+
+`pipeline/README.md` has the exact commands and variables. The current whole-genome store is
+`/scratch/ns5bc/qtl-browser/store-genome-v1f` on Rivanna.
+
+Local setup:
 
 ```bash
-uv sync                              # python deps
-data/raw/download.py                 # ~45 GB of inputs; resumable, md5-verified
-uv run python -m pipeline build      # -> data/derived/ (~7 GB), skips finished steps
-uv run python -m pipeline validate   # counts vs the preprint, rsID checks, row-group pruning
-
-cd ui && npm install
-npm run dev                          # serves ../data/derived at /data with Range support
-npm run build && npm run preview     # production bundle, same data plugin
+uv sync                                   # Python dependencies (includes gtars for refget)
+uv run python -m pipeline.test_qtlstore   # one of the test suites; pipeline/README.md lists them all
 ```
 
-`ui/.env.production` points production builds at the R2 bucket through `VITE_DATA_BASE`;
-`VITE_DATA_BASE= npm run build` (empty) makes a bundle that reads `/data` on its own origin.
+## Run the site locally
+
+```bash
+cd ui && npm install
+QTL_DATA_DIR=/path/to/store VITE_DATA_BASE= npm run dev     # serves the store at /data with Range support
+```
+
+`ui/bench/README.md` shows how to copy a small store from Rivanna and run the smoke suites.
 
 ## Deploy
 
+The data lives in the Backblaze B2 bucket `cloud-databio` under `qtl-browser/`, served at
+`https://cloud2.databio.org/qtl-browser`. The site is a Cloudflare Workers static-assets project
+(`ui/wrangler.jsonc`) in the databio account, at https://topchef.databio.org.
+
+**Known issue (from Sam):** `cloud2.databio.org` sends no `ETag` or `Last-Modified`, and Chromium
+stores a 206 (range) response only with a strong validator, so range reads are re-fetched on every
+visit instead of coming from the browser cache. Whole-file reads are cached normally.
+
+The full steps, with credentials and checks, are in the cloud-management repo:
+`~/workspaces/assistant/cloud-management/backblaze/qtl-browser.md`. In short: upload the store
+(`immutable/` files first, the pointer files and `store.json` last), then build and deploy the app:
+
 ```bash
-# .env at the repo root (gitignored): R2_ACCESS_KEY_ID and R2_SECRET_ACCESS_KEY,
-# an R2 API token with Object Read & Write on the bucket. Run from the repo root.
-uv run python -m pipeline.upload cors                # CORS rule from pipeline/config.yaml
-uv run python -m pipeline.upload sync --dryrun       # then without --dryrun; re-runnable
-uv run python -m pipeline.upload check               # HEAD + range GET on the public URL
+cd ui
+VITE_DATA_BASE=https://cloud2.databio.org/qtl-browser npm run build
+npx wrangler deploy
 ```
 
-Bucket, endpoint, public URL, allowed origins, and excludes are the `r2:` block in
-`pipeline/config.yaml`. Setting the CORS policy needs an Admin token or the dashboard
-(`upload.py cors --print` gives the JSON to paste).
-
-The UI is a Cloudflare Workers static-assets project built from the repo: root directory
-`ui`, build `npm run build`, deploy `npx wrangler deploy`, with `ui/wrangler.jsonc` naming
-`dist` and the single-page-application fallback. Workers caps assets at 25 MiB, so the DuckDB
-wasm modules are not bundled; the app loads DuckDB-WASM's jsDelivr bundles, as drumbeat-viewer
-does.
+`ui/.env.production` already holds that `VITE_DATA_BASE`, so a plain `npm run build` reads the same
+bucket. `VITE_DATA_BASE= npm run build` (empty) makes a bundle that reads `/data` on its own origin.
 
 ## Data notes
 
-- `manifest.json`, written last by the pipeline and published at the bucket root with the
-  parquet, is the provenance record: build time, pipeline commit, significance rule, source
-  versions, and for every table its path, row count, bytes, file count, columns, and whether
-  the app loads it whole at startup or by range reads. The About page shows only the counts,
-  source versions, and build date from it.
-- Coordinates GRCh38; genes GENCODE v34; rsIDs from dbSNP by position and alleles.
-- eGene / sQTL intron: permutation p < 0.05, the preprint's wording (10,220 eGenes vs the
-  paper's 10,241; 13,540 sQTL introns, exact).
-- Nominal cis tables are partitioned by chromosome and a 100-gene TSS bin, one row group per
-  phenotype (gene for eQTL, intron for sQTL), so a gene page or a selected intron fetches a
-  ~90 KB footer and its own row group. `gene_detail` holds the gene row, collapsed exons, and
-  tested introns in one row per gene, partitioned the same way.
-- eQTL nominal rows are kept for every tested gene; sQTL nominal rows only for the 13,540
-  significant introns (`sqtl_nominal` in `pipeline/config.yaml`), which keeps the bucket near
-  7 GB for the R2 free tier instead of 16. Every intron keeps its permutation row.
-- The 21 eQTL and 4 sQTL colocalized genes are hard-coded from the authors' list until the coloc
-  tables (PP.H4, sentinels) are shared; `coloc.parquet` is an empty stub for them.
-- DCM GWAS: Jurgens 2024 biobanks-only meta-analysis (5,022 cases / 932,941 controls), the set
-  the preprint's figures were drawn from although its Methods cite the full meta-analysis
-  (9,365 / 946,368). Position-sorted parquet for LocusCompare plus a 5 Mb-binned table for
-  the landing track; `pipeline/config.yaml` `dcm_gwas` picks the file, and the full-meta build
-  is parked at `data/derived/_full/gwas_meta/`.
+- Coordinates are GRCh38, tied to the reference by refget sequence digests. TOPCHeF genes are
+  GENCODE v34; GTEx genes are GENCODE v39.
+- Alleles are stored as `ref`/`alt` against the reference, with allele frequency and effect size
+  for the ALT allele.
+- eGene / sQTL intron: permutation p < 0.05, the preprint's wording.
+- QTL values are rounded to keep files small; `SPEC.md` gives the error bounds. Exact values are in
+  the source releases. GWAS values are not rounded.
+- DCM GWAS: Jurgens 2024 biobanks-only meta-analysis (5,022 cases / 932,941 controls), the set the
+  preprint's figures were drawn from.
+- The v0 format (one study, `manifest.json`) is retired. Its spec and measurements are in the
+  `analysis` repo at `qtlb-format/docs/`; `SPEC.md` section 17 says where the frozen v0 build lives.

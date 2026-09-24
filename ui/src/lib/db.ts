@@ -1,24 +1,27 @@
 /**
  * DuckDB-WASM bootstrap. One database, one connection, shared by plain queries and by the
- * Mosaic coordinator. Only `search_index` is loaded whole; everything else is range-read from
- * `DATA_BASE` per query.
+ * Mosaic coordinator.
+ *
+ * DuckDB holds only the tables a page materializes from qtlstore reads: a gene's locus window and
+ * GWAS window (gene.ts), trans rows (trans.ts), for the plots and the paged tables. Gene lookups,
+ * lists and search are plain JS (gene-index.ts), so the engine is started only by a page that
+ * draws or pages such a table: the gene and variant pages start it at mount, alongside their
+ * first data requests, and nothing starts it on Home, the gene list or a region.
  */
 import * as duckdb from '@duckdb/duckdb-wasm'
-
-export const DATA_BASE: string =
-  (import.meta.env.VITE_DATA_BASE as string | undefined)?.replace(/\/$/, '') || `${window.location.origin}/data`
 
 export type Row = Record<string, unknown>
 
 let dbPromise: Promise<{ db: duckdb.AsyncDuckDB; con: duckdb.AsyncDuckDBConnection }> | null = null
+const failureListeners = new Set<(e: Error) => void>()
+
+/** Called with the error when the engine fails to start (App shows it above the page). */
+export function onDBFailure(cb: (e: Error) => void): () => void {
+  failureListeners.add(cb)
+  return () => { failureListeners.delete(cb) }
+}
 
 async function boot() {
-  // the search index is one plain fetch started now, alongside the wasm download, and handed
-  // to DuckDB as an in-memory file: one request instead of nine range reads after boot
-  const indexBytes = fetch(`${DATA_BASE}/search_index.parquet`).then(r => {
-    if (!r.ok) throw new Error(`search_index.parquet: ${r.status}`)
-    return r.arrayBuffer()
-  })
   // wasm and worker from jsDelivr (the 36 MB module is over the Workers asset limit). The
   // worker script is cross-origin, so it is loaded through a same-origin blob shim.
   const bundle = await duckdb.selectBundle(duckdb.getJsDelivrBundles())
@@ -28,43 +31,24 @@ async function boot() {
   const db = new duckdb.AsyncDuckDB(logger, worker)
   await db.instantiate(bundle.mainModule, bundle.pthreadWorker)
   URL.revokeObjectURL(workerUrl)
-  // DuckDB-WASM defaults to downloading whole HTTP files (forceFullHTTPReads) unless told
-  // otherwise; this is what makes every parquet read a Range request (HTTP 206) against R2
-  await db.open({ filesystem: { forceFullHTTPReads: false, allowFullHTTPReads: true, reliableHeadRequests: true } })
-  // every table file is registered under its relative path: DuckDB then opens it by name and
-  // skips the HEAD it would otherwise send to resolve a raw URL on every query
-  for (const f of TABLE_FILES) await db.registerFileURL(f, `${DATA_BASE}/${f}`, duckdb.DuckDBDataProtocol.HTTP, false)
-  await db.registerFileBuffer('search_index.parquet', new Uint8Array(await indexBytes))
   const con = await db.connect()
-  // footers are fetched once per file per session
-  await con.query(`SET parquet_metadata_cache = true`).catch(() => {})
-  await con.query(`CREATE TABLE search_index AS SELECT * FROM read_parquet('search_index.parquet')`)
-  await db.dropFile('search_index.parquet').catch(() => {})   // the table holds it now
-  // the per-gene tables are partitioned by chromosome and TSS bin; the index knows every bin
-  const bins = (await con.query(`SELECT DISTINCT chr, bin FROM search_index WHERE bin IS NOT NULL`)).toArray()
-  for (const r of bins) {
-    for (const t of BINNED_TABLES) {
-      const f = `${t}/chr=${r.chr}/bin=${r.bin}/data.parquet`
-      await db.registerFileURL(f, `${DATA_BASE}/${f}`, duckdb.DuckDBDataProtocol.HTTP, false)
-    }
-  }
+  // nothing here needs an extension; fail loudly rather than reach out to extensions.duckdb.org
+  await con.query(`SET autoinstall_known_extensions = false`).catch(() => {})
+  await con.query(`SET autoload_known_extensions = false`).catch(() => {})
   return { db, con }
 }
 
-/** The data contract with the pipeline: single-file tables, the chromosome-partitioned ones
- *  (one file per chromosome), and the chromosome + bin ones (registered once the index is
- *  loaded). Exact paths throughout, since there is no directory listing over HTTP. */
-const CHROMS = [...Array.from({ length: 22 }, (_, i) => `chr${i + 1}`), 'chrX']
-const BINNED_TABLES = ['gene_detail', 'cis_eqtl_nominal', 'cis_sqtl_nominal']
-const TABLE_FILES: string[] = [
-  'genes.parquet', 'splice_phenotypes.parquet', 'credible_sets.parquet', 'coloc.parquet',
-  'gwas_dcm_bins.parquet', 'gene_annotation.parquet', 'exons.parquet', 'variants_by_rsid.parquet',
-  ...['gwas_dcm', 'variants_by_position', 'trans_pairs', 'trans_by_variant']
-    .flatMap(t => CHROMS.map(c => `${t}/chr=${c}/data.parquet`)),
-]
-
+/** The engine, started on first use; a failed start is reported to `onDBFailure` listeners and
+ *  forgotten, so the next call retries. */
 export function getDB() {
-  if (!dbPromise) dbPromise = boot()
+  if (!dbPromise) {
+    const p = boot()
+    dbPromise = p
+    p.catch((e: Error) => {
+      if (dbPromise === p) dbPromise = null
+      for (const cb of failureListeners) cb(e)
+    })
+  }
   return dbPromise
 }
 
@@ -91,11 +75,6 @@ export function lit(s: string): string {
   return `'${s.replace(/'/g, "''")}'`
 }
 
-export function parquet(path: string): string {
-  // by registered name, not URL (see boot)
-  return `read_parquet('${path}', hive_partitioning=false)`
-}
-
 // ---- Mosaic ---------------------------------------------------------------------------------
 import { coordinator, wasmConnector } from '@uwdata/mosaic-core'
 
@@ -111,16 +90,25 @@ export function getCoordinator() {
   return mosaicReady.then(() => coordinator())
 }
 
-let tableSeq = 0
-/** Materialize a query as an in-memory table: one range read, then every query against it
- *  (Mosaic plots, paged tables, CSV export) is local. Used for a gene's cis window and its
- *  trans rows. Returns the table name; caller drops it when done. */
-export async function materialize(sql: string, prefix = 'locus'): Promise<string> {
+/** Creates the DuckDB table `name` from an Arrow IPC stream, or empty from a column list
+ *  (`position INTEGER, ...`). The DuckDB worker runs one request at a time, so a no-op query first
+ *  separates waiting for it (another table's insert, say) from the insert itself: measured as
+ *  store:worker-wait and store:insert, with `detail.part` naming the table. */
+export async function insertArrow(name: string, source: Uint8Array | string, detail: Record<string, unknown>): Promise<void> {
   const { con } = await getDB()
-  const name = `${prefix}_${++tableSeq}`
-  await con.query(`CREATE TABLE ${name} AS ${sql}`)
-  return name
+  const tw = performance.now()
+  await con.query('SELECT 1')
+  const t0 = performance.now()
+  performance.measure('store:worker-wait', { start: tw, end: t0, detail })
+  // an IPC stream, not insertArrowTable: duckdb-wasm serializes a Table with its own apache-arrow copy (^17, the app has ^21)
+  if (typeof source === 'string') await con.query(`CREATE TABLE ${name} (${source})`)
+  else await con.insertArrowFromIPCStream(source, { name, create: true })
+  performance.measure('store:insert', { start: t0, end: performance.now(), detail })
 }
+
+let tableSeq = 0
+/** A fresh in-memory table name; every table the app creates takes its name from here. */
+export const tableName = (prefix: string) => `${prefix}_${++tableSeq}`
 
 export async function dropTable(name: string) {
   const { con } = await getDB()

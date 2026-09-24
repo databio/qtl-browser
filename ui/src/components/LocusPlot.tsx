@@ -2,11 +2,12 @@ import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import * as vg from '@uwdata/vgplot'
 import { Selection } from '@uwdata/mosaic-core'
-import { dropTable, getCoordinator, getDB, lit, materialize, parquet } from '@/lib/db'
+import { dropTable, getCoordinator, getDB } from '@/lib/db'
 import { CS_COLORS, CS_DOMAIN, CS_SWATCH_CLIP, CS_SYMBOLS, isDark } from '@/lib/plot-theme'
-import type { SearchHit } from '@/lib/queries'
+import type { CredibleSetRow, Exon, SearchHit } from '@/lib/queries'
 import { CompareSkeleton, LocusSkeleton } from '@/components/plot-skeleton'
-import { nominalFile, nominalRows, type CredibleSetRow, type Exon } from '@/lib/queries'
+import { credibleSets, locusTable, type GenePack } from '@/lib/gene'
+import { useStoreInfo } from '@/contexts/store-context'
 import GeneTrack from '@/components/GeneTrack'
 import LocusCompare from '@/components/LocusCompare'
 import { clearPlotHover, onPlotPointerMove, useHoverOverlay, type HoverLookup, type HoverRow } from '@/lib/plot-hover'
@@ -16,10 +17,12 @@ import ExportMenu from '@/components/ExportMenu'
 
 export interface LocusSpec {
   hit: SearchHit
+  /** the open gene (gene.ts): its eQTL block, variants range, and intron blocks */
+  pack: GenePack
   qtlType: 'e' | 's'
   phenotypeId?: string
   tss: number
-  exons: Exon[]                              // collapsed model of the gene, from gene_detail
+  exons: Exon[]                              // collapsed model of the gene, from the annotation
   intron?: { start: number; end: number }
 }
 const MARGIN_LEFT = 48
@@ -47,8 +50,6 @@ export function hoverInteractor(link: Selection) {
 export const INK = { light: '#52514e', dark: '#c3c2b7' }
 export const SURFACE = { light: '#ffffff', dark: '#1b1a1a' }
 
-/** The position the linked hover selection currently holds (the `nearest` interactor's single
- *  field), mirrored into React state: null when no variant is under the pointer. */
 export function useHoveredVariant(link: Selection | null): number | null {
   const [pos, setPos] = useState<number | null>(null)
   useEffect(() => {
@@ -61,19 +62,12 @@ export function useHoveredVariant(link: Selection | null): number | null {
   return pos
 }
 
-/** Handlers and cursor class that make a plot host open the hovered variant's page on click:
- *  plain click navigates, cmd/ctrl/shift or middle click opens a tab, like the table rows.
- *
- *  The click is assembled from pointerdown and pointerup on the host rather than from the
- *  browser's click event: Mosaic swaps the whole SVG whenever it redraws (resize, theme, and
- *  the nearest interactor re-publishes on the first pointer event of each new SVG, pointerdown
- *  included), and a mousedown whose element is detached by mouseup never becomes a click. */
 export interface VariantClick {
   className: string
   onPointerDown: (e: React.PointerEvent) => void
   onPointerUp: (e: React.PointerEvent) => void
 }
-const CLICK_SLOP = 4   // px of pointer travel between down and up beyond which it is a drag, not a click
+const CLICK_SLOP = 4
 export function useVariantClick(link: Selection | null, href: (position: number) => string | null): VariantClick {
   const open = useOpenPath()
   const hovered = useHoveredVariant(link)
@@ -94,40 +88,6 @@ export function useVariantClick(link: Selection | null, href: (position: number)
       open(to, e)
     },
   }
-}
-
-/** One cis window as a table for the plots: -log10 p, credible-set class, a tooltip label, and
- *  the DCM GWAS statistics for variants present there (matched on position and alleles in
- *  either orientation, GWAS beta re-signed to the QTL effect allele A1). Ordered so
- *  credible-set variants are drawn last (on top). */
-function locusSQL(spec: LocusSpec): string {
-  const where = [`q.gene_id = ${lit(spec.hit.gene_id)}`, spec.phenotypeId ? `q.phenotype_id = ${lit(spec.phenotypeId)}` : null]
-    .filter(Boolean).join(' AND ')
-  const lo = spec.tss - 1_000_000, hi = spec.tss + 1_000_000
-  return `
-    SELECT q.position,
-           -- p underflows to 0 for a few extreme variants: place them just above the largest finite value
-           CASE WHEN q.pval_nominal = 0 THEN max(-log10(nullif(q.pval_nominal, 0))) OVER () * 1.05 ELSE -log10(q.pval_nominal) END AS nlp,
-           q.pval_nominal = 0 AS clipped,
-           q.pval_nominal, q.slope, q.slope_se, q.af, q.pip, q.cs_id, q.rs_number, q.A1, q.A2,
-           q.tss_distance, q.ma_samples, q.ma_count,
-           coalesce(q.cs_id::VARCHAR, 'none') AS cs,
-           g.p AS gwas_p, -log10(g.p) AS gwas_nlp,
-           CASE WHEN g.ea = q.A1 THEN g.beta ELSE -g.beta END AS gwas_beta,
-           coalesce('rs' || q.rs_number, q.position::VARCHAR) || '  ' || q.A1 || '/' || q.A2
-             || chr(10) || CASE WHEN q.pval_nominal = 0 THEN 'p = 0 (underflow; drawn above the maximum)' ELSE 'p = ' || format('{:.2e}', q.pval_nominal) END
-             || chr(10) || 'slope ' || format('{:.3f}', q.slope) || ' ± ' || format('{:.3f}', q.slope_se)
-             || chr(10) || 'AF ' || format('{:.3f}', q.af)
-             || CASE WHEN q.pip IS NULL THEN '' ELSE chr(10) || 'PIP ' || format('{:.3f}', q.pip) || ' (set ' || q.cs_id || ')' END
-             || CASE WHEN g.p IS NULL THEN '' ELSE chr(10) || 'DCM GWAS p = ' || format('{:.2e}', g.p) || ', beta ' || format('{:+.3f}', CASE WHEN g.ea = q.A1 THEN g.beta ELSE -g.beta END) || ' (A1 as effect allele)' END AS label
-    FROM ${nominalRows([nominalFile(spec.hit, spec.qtlType)])} q
-    LEFT JOIN (SELECT * FROM ${parquet(`gwas_dcm/chr=${spec.hit.chr}/data.parquet`)} WHERE position BETWEEN ${lo} AND ${hi}) g
-      ON g.position = q.position AND ((g.ea = q.A1 AND g.nea = q.A2) OR (g.ea = q.A2 AND g.nea = q.A1))
-    WHERE ${where}
-    -- the GWAS lists some indels in both allele orientations as separate records: keep one per
-    -- QTL variant, preferring the orientation that matches the QTL alleles as written
-    QUALIFY row_number() OVER (PARTITION BY q.position, q.A1, q.A2 ORDER BY (g.ea = q.A1) DESC NULLS LAST, g.p) = 1
-    ORDER BY q.cs_id IS NOT NULL, q.position`
 }
 
 /** -log10 p against position for one cis window. Dots colored by credible-set membership,
@@ -220,8 +180,9 @@ export default function LocusPlot({ spec, onCount, onLegend, onActions, onCredib
     ;(async () => {
       try {
         await getCoordinator()
-        table = await materialize(locusSQL(spec))
-        if (!alive) return
+        // the gene's requests left when the page opened the gene; the sQTL tab adds its introns' span
+        table = await locusTable(spec.pack, spec.qtlType, spec.phenotypeId)
+        if (!alive) { dropTable(table); return }
         onTable?.(table)
         const { con } = await getDB()
         const agg = (await con.query(`SELECT count(*) AS n, max(nlp) AS ymax FROM ${table}`)).toArray()[0]
@@ -232,21 +193,15 @@ export default function LocusPlot({ spec, onCount, onLegend, onActions, onCredib
         hoverIndex.current = new Map((await con.query(`SELECT position, rs_number, nlp, gwas_nlp, label FROM ${table}`)).toArray()
           .map(r => [Number(r.position), {
             rs_number: r.rs_number == null ? null : Number(r.rs_number),
-            nlp: Number(r.nlp), gwas_nlp: r.gwas_nlp == null ? null : Number(r.gwas_nlp), label: String(r.label),
+            nlp: Number(r.nlp), gwas_nlp: r.gwas_nlp == null ? null : Number(r.gwas_nlp), label: r.label == null ? '' : String(r.label),
           }]))
         if (!alive) return
         if (onCredibleSets) {
-          // the window already holds every variant's set and PIP: the credible-set table comes
-          // from it instead of a second range read of credible_sets.parquet
-          const cs = (await con.query(`
-            SELECT position, A1, A2, CASE WHEN rs_number IS NULL THEN NULL ELSE 'rs' || rs_number END AS rsid, af, cs_id, pip
-            FROM ${table} WHERE cs_id IS NOT NULL ORDER BY cs_id, pip DESC`)).toArray()
+          // every membership from the block's credible-set records (no extra request): a variant
+          // in two sets is listed under both, while the locus table keeps its higher-PIP one
+          const cs: CredibleSetRow[] = await credibleSets(spec.pack, spec.qtlType, spec.phenotypeId)
           if (!alive) return
-          onCredibleSets(cs.map(r => {
-            const o: Record<string, unknown> = {}
-            for (const [k, v] of Object.entries(r.toJSON())) o[k] = typeof v === 'bigint' ? Number(v) : v
-            return { ...o, qtl_type: spec.qtlType, phenotype_id: spec.phenotypeId ?? spec.hit.gene_id, chr: spec.hit.chr } as CredibleSetRow
-          }))
+          onCredibleSets(cs)
         }
         // one explicit y domain shared with the LocusCompare panel so the two y axes coincide
         setYMax(Math.max(1, Number(agg.ymax)) * 1.04)
@@ -330,6 +285,7 @@ export default function LocusPlot({ spec, onCount, onLegend, onActions, onCredib
       brushInteractor.current = interactors.find(i => i.selection === brushSel) ?? null
       setState('ready')
       setReadyFor(key)
+      performance.mark('locus:drawn', { detail: key })
     } catch (e) {
       console.error(e)
       setState('error')
@@ -338,6 +294,8 @@ export default function LocusPlot({ spec, onCount, onLegend, onActions, onCredib
   }, [tableName, link, brushSel, width, dark, yMax, spec.tss, spec.hit.chr])
 
   const compareCol = useRef<HTMLDivElement>(null)
+  // no GWAS object in this data release (SPEC section 10): the QTL-versus-GWAS panel says so
+  const hasGwas = useStoreInfo()?.hasGwas ?? false
   const stem = `${spec.hit.symbol ?? spec.hit.gene_id}${spec.phenotypeId ? '_' + spec.phenotypeId.split(':').slice(0, 3).join('_') : ''}`
   useEffect(() => {
     // the buttons stay in place while a locus loads, disabled, so the header does not reflow
@@ -350,11 +308,11 @@ export default function LocusPlot({ spec, onCount, onLegend, onActions, onCredib
         </label>
         <ExportMenu disabled={state !== 'ready'} background={dark ? SURFACE.dark : SURFACE.light} targets={[
           { label: showTrack ? 'Locus plot with gene track' : 'Locus plot', name: `${stem}_locus`, el: () => column.current },
-          { label: 'QTL versus GWAS', name: `${stem}_locuscompare`, el: () => compareCol.current },
+          ...(hasGwas ? [{ label: 'QTL versus GWAS', name: `${stem}_locuscompare`, el: () => compareCol.current }] : []),
         ]} />
       </>
     )
-  }, [state, dark, stem, showTrack]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [state, dark, stem, showTrack, hasGwas]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // the popup sits above the scatter when there is room, else below it; it never takes the pointer
   const rect = anchor.current
@@ -390,7 +348,10 @@ export default function LocusPlot({ spec, onCount, onLegend, onActions, onCredib
       {/* the right column is reserved from the start so the scatter measures its final width;
           the panel is a square the height of the scatter so the two plots share a top and bottom */}
       <div ref={compareCol} className="shrink-0" style={{ width: SCATTER_H }}>
-        {state === 'ready' && tableName && link && brushSel
+        {!hasGwas
+          ? <div className="flex h-full items-center rounded-lg border border-base-300 p-4 text-center text-sm text-base-content/60" style={{ height: SCATTER_H }}>
+              QTL versus DCM GWAS: not available in this data release yet.</div>
+          : state === 'ready' && tableName && link && brushSel
           ? <LocusCompare table={tableName} dark={dark} size={Math.min(SCATTER_H, Math.max(width, 200))} yDomain={[0, yMax]} link={link} brush={brushSel} click={click} lookup={lookup} />
           : <CompareSkeleton />}
       </div>

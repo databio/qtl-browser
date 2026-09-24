@@ -1,10 +1,16 @@
-"""Steps 3-4: collect distinct tested variants, then assign rsIDs from dbSNP."""
+"""Steps 3-4: collect distinct tested variants, then assign rsIDs from dbSNP.
+
+Which archives hold the tested variants, and how each one names its alleles, is TOPCHeF knowledge
+and lives in `adapters/topchef.py`; this file only knows how to take a distinct set of (chr,
+position, A1, A2) and hang a dbSNP rsID on it.
+"""
 import gzip
 import shutil
 import subprocess
 
 import pyarrow as pa
 
+from .adapters import topchef
 from .common import CHROMS, Config, connect, log, write_parquet
 
 
@@ -15,10 +21,8 @@ def collect(cfg: Config) -> None:
     get null alleles unless the same position appears in trans_sQTL. A position never gets
     both an allele-bearing and a null-allele row."""
     con = connect(cfg)
-    srcs = ["cis_eQTL_nominal", "cis_sQTL_nominal", "cis_eQTL_permutation", "cis_sQTL_permutation",
-            "cis_eQTL_SuSiE", "cis_sQTL_SuSiE"]
     union = " UNION ALL ".join(
-        f"SELECT chr, position, A1, A2 FROM read_parquet('{cfg.raw_glob(s)}')" for s in srcs
+        f"SELECT chr, position, A1, A2 FROM read_parquet('{cfg.raw_glob(s)}')" for s in topchef.cis_sources()
     )
     out = cfg.tmp / "variants_raw.parquet"
     log("variants_collect: scanning cis files for distinct (chr, position, A1, A2), then trans files for positions outside cis")
@@ -27,9 +31,9 @@ def collect(cfg: Config) -> None:
             WITH cis AS (SELECT DISTINCT chr, position::INTEGER AS position, A1, A2 FROM ({union})),
             cispos AS (SELECT DISTINCT chr, position FROM cis),
             ts AS (SELECT DISTINCT chr, position::INTEGER AS position, A1, A2
-                   FROM read_parquet('{cfg.raw_glob('trans_sQTL')}')),
+                   FROM read_parquet('{topchef.archive_glob(cfg, 's', 'trans')}')),
             te AS (SELECT DISTINCT split_part(variant_id, ':', 1) AS chr, split_part(variant_id, ':', 2)::INTEGER AS position
-                   FROM read_parquet('{cfg.raw_glob('trans_eQTL')}')),
+                   FROM read_parquet('{topchef.archive_glob(cfg, 'e', 'trans')}')),
             trans_alleles AS (SELECT * FROM ts ANTI JOIN cispos USING (chr, position)),
             trans_noallele AS (
                 SELECT chr, position, NULL::VARCHAR AS A1, NULL::VARCHAR AS A2
@@ -66,7 +70,10 @@ def _accession_map(cfg: Config) -> dict[str, str]:
 
 def rsid(cfg: Config) -> None:
     if shutil.which("bcftools") is None:
-        raise SystemExit("bcftools not found; install with `brew install bcftools` (plan D6)")
+        raise SystemExit("bcftools not found. It comes from a bulker crate, not a package manager: "
+                         "`bulker activate bulker/qtlb-format.yaml` in the qtlb-format analysis "
+                         "project, which pins bcftools 1.24. On Rivanna an sbatch script must also "
+                         "`module load apptainer` for bulker to find its container runtime.")
     con = connect(cfg)
     acc = _accession_map(cfg)
     chr_to_acc = {v: k for k, v in acc.items()}
@@ -90,12 +97,21 @@ def rsid(cfg: Config) -> None:
                 for (p,) in rows:
                     fh.write(f"{a}\t{p}\n")
 
-    # 2. stream dbSNP once, keep only records at tested positions
+    # 2. stream dbSNP once, keep only records at tested positions.
+    #
+    #    -T streams the whole 29.5 GB VCF; -R seeks with the tabix index instead. For a genome-wide
+    #    build -T wins, because the targets are dense enough that seeking costs more than reading.
+    #    For a CHROMS subset (a smoke build) the targets cover a few percent of the genome and -R
+    #    turns nine minutes into seconds, which is the difference between a usable debug loop and a
+    #    useless one. Both flags select the same records; only the access pattern differs.
+    subset = len(CHROMS) < 23
+    flag = "-R" if subset else "-T"
     if not matched.exists():
-        log("variants_rsid: streaming dbSNP VCF through bcftools (this is the long step)")
+        log(f"variants_rsid: {'seeking' if subset else 'streaming'} the dbSNP VCF through bcftools "
+            f"({flag}, {len(CHROMS)} chromosome(s))" + ("" if subset else "; this is the long step"))
         with gzip.open(matched, "wt") as out:
             p = subprocess.Popen(
-                ["bcftools", "query", "-T", str(targets), "-f", "%CHROM\t%POS\t%ID\t%REF\t%ALT\n", str(cfg.dbsnp_vcf)],
+                ["bcftools", "query", flag, str(targets), "-f", "%CHROM\t%POS\t%ID\t%REF\t%ALT\n", str(cfg.dbsnp_vcf)],
                 stdout=subprocess.PIPE, text=True,
             )
             n = 0
@@ -121,9 +137,12 @@ def rsid(cfg: Config) -> None:
         JOIN acc_map m ON m.acc = d.acc
     """)
     con.execute(f"CREATE TABLE v AS SELECT * FROM '{raw}'")
+    # arg_min, not min: two separate min()s take the text of one dbSNP record and the number of
+    # another, so the rsID text stops matching its own rs_number (14,803 variants before this fix).
+    # `bypos` below already used arg_min.
     con.execute("""
         CREATE TABLE exact AS
-        SELECT v.chr, v.position, v.A1, v.A2, min(d.rsid) AS rsid, min(d.rs_number) AS rs_number
+        SELECT v.chr, v.position, v.A1, v.A2, arg_min(d.rsid, d.rs_number) AS rsid, min(d.rs_number) AS rs_number
         FROM v JOIN dbsnp d ON d.chr = v.chr AND d.position = v.position
          AND ((v.A2 = d.ref AND v.A1 = d.alt) OR (v.A1 = d.ref AND v.A2 = d.alt))
         GROUP BY 1,2,3,4
@@ -151,10 +170,9 @@ def rsid(cfg: Config) -> None:
         for m, n in stats:
             log(f"variants_rsid: {'cis       ' if in_cis else 'trans-only'} {m:9s} {n:>12,} ({100 * n / total:.2f}%)")
 
-    rg = cfg["row_group_sizes"]["variants"]
-    for c in CHROMS:
-        t = con.execute("SELECT * FROM variants WHERE chr = ? ORDER BY position, A1, A2", [c]).fetch_arrow_table()
-        write_parquet(t, cfg.derived / "variants_by_position" / f"chr={c}" / "data.parquet", rg, stats_columns=["position"])
-    t = con.execute("SELECT * FROM variants WHERE rs_number IS NOT NULL ORDER BY rs_number").fetch_arrow_table()
-    write_parquet(t, cfg.derived / "variants_by_rsid.parquet", rg, stats_columns=["rs_number", "rsid"])
-    log("variants_rsid: wrote variants_by_position/ and variants_by_rsid.parquet")
+    # one build intermediate, in the order the packs read it. The browser gets the variants files
+    # and the rsID index instead (SPEC sections 4 and 14), so no per-chromosome or rsID-keyed copy
+    # is written any more.
+    t = con.execute("SELECT * FROM variants ORDER BY chr, position, A1, A2").fetch_arrow_table()
+    write_parquet(t, cfg.tables / "variants.parquet", 200_000, stats_columns=["chr", "position"])
+    log(f"variants_rsid: wrote _tables/variants.parquet, {t.num_rows:,} variants")

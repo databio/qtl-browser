@@ -43,6 +43,17 @@ sources:
       - {url: https://api.kpndataregistry.org/api/d/CQyqth, file: DCM_GWAS.zip, size: 2246624753}
       - {url: https://api.kpndataregistry.org/api/d/FEvoa4, file: README.txt}
 
+  - name: grch38
+    description: GRCh38 primary assembly with no alt contigs and chr-prefixed names, the sequences the refgetstore digests (pipeline/steps_refget.py, config.yaml reference.fasta); seqcol collection EiFob05aCWgVU_B_Ae0cypnQut3cxUP1, 195 sequences
+    version: GCA_000001405.15 GRCh38 no-alt analysis set (seqs_for_alignment_pipelines.ucsc_ids)
+    dir: grch38
+    files:
+      # md5checksums.txt in the same directory lists every file, and download.py's md5_url reads the
+      # first token of whatever it fetches, so the checksum is copied in literally
+      - url: https://ftp.ncbi.nlm.nih.gov/genomes/all/GCA/000/001/405/GCA_000001405.15_GRCh38/seqs_for_alignment_pipelines.ucsc_ids/GCA_000001405.15_GRCh38_no_alt_analysis_set.fna.gz
+        size: 872949833
+        md5: a08035b6a6e31780e96a34008ff21bd6
+
   - name: dbsnp
     description: dbSNP GRCh38 VCF with tabix index, for rsID lookup of chr:pos:A1:A2; assembly report maps RefSeq accessions (NC_000001.11) to chr names
     version: build 157 on GRCh38.p14 (NCBI latest_release as of 2026-09-03)

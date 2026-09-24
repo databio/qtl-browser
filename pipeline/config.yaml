@@ -12,6 +12,20 @@ dbsnp_assembly_report: dbsnp_b157/GCF_000001405.40_GRCh38.p14_assembly_report.tx
 dcm_gwas: dcm_gwas_jurgens2024/DCM_GWAS/Jurgens_DCM_GWAS_META_BiobanksOnly.tsv.gz
 gwas_bin_bp: 5000000     # landing-track windows (plan: 5 Mb regardless of what the track shows)
 
+# Refget anchor (steps_refget.py): the sequences every position sits on, named by digest.
+reference:
+  assembly: GRCh38
+  # GRCh38 primary assembly, no alt contigs, chr-prefixed names like the Zenodo rows
+  fasta: grch38/GCA_000001405.15_GRCh38_no_alt_analysis_set.fna.gz
+  store: data/derived/_refget       # local refgetstore. May be a symlink to a store built
+                                    # elsewhere, so long as it holds the collection below.
+  store_url: null                   # a remote refgetstore URL instead of the local build
+  collection: EiFob05aCWgVU_B_Ae0cypnQut3cxUP1   # seqcol digest of the GRCh38 no-alt analysis set (195 sequences)
+  chromosomes: [chr1, chr2, chr3, chr4, chr5, chr6, chr7, chr8, chr9, chr10, chr11, chr12, chr13, chr14,
+                chr15, chr16, chr17, chr18, chr19, chr20, chr21, chr22, chrX, chrM]
+  allele_check:
+    min_match_fraction: 0.999       # cis variants whose A1 or A2 is the reference base(s)
+
 # significance rule (plan D2): permutation p-value < 0.05, the paper's wording
 sig_column: pval_perm
 sig_threshold: 0.05
@@ -21,48 +35,14 @@ workers: 3
 duckdb_memory_limit: 6GB
 duckdb_threads: 4
 
-# tested genes per nominal / gene_detail partition file: bin = rank of the gene's TSS within its
-# chromosome, integer-divided by this; stored in genes and search_index (plan 2026-09-04-gene-bins)
+# tested genes per nominal build-intermediate file, by TSS rank (the `bin` column of genes). The
+# TOPCHeF acceptance gate reads those files as the v0 eQTL rows.
 nominal_bin_genes: 100
 
-row_group_sizes:
-  trans: 5000      # a gene's trans rows span 1-2 groups (~350 KB) instead of one 1.4 MB group; per-chr footers ~150 KB
-  variants: 10000  # a one-row rsID / position lookup reads ~340 KB instead of 1.8-4.4 MB; rsid footer ~550 KB (one file)
-  gwas: 10000      # ~3 Mb per group, so a 2 Mb cis window reads one or two groups for LocusCompare
-
-# which introns get nominal cis-sQTL rows: `all` (10.8 GB) or `significant` (1.8 GB, the
-# 13,540 introns with pval_perm < 0.05). Every intron keeps its permutation row regardless.
+# which introns get rows in the _tables/cis_sqtl_nominal build intermediate: `all` (10.8 GB) or
+# `significant` (1.8 GB, the 13,540 introns with pval_perm < 0.05). The TOPCHeF adapter and the gate
+# read every intron from the raw file instead. Every intron keeps its permutation row regardless.
 sqtl_nominal: significant
-
-# Cloudflare R2 bucket the browser reads from (pipeline/upload.py). Credentials come from
-# R2_ACCESS_KEY_ID / R2_SECRET_ACCESS_KEY in the environment, never from here.
-r2:
-  bucket: qtl-browser
-  endpoint: https://02604ac525a365f5ff995694d8c3da5a.r2.cloudflarestorage.com
-  public_url: https://pub-50e5b2fc28324ce29d894eba50691039.r2.dev
-  allowed_origins:            # after changing, re-run `upload.py cors` (or paste `cors --print` into the dashboard)
-    - https://qtl-browser.topchef.workers.dev
-    - http://localhost:5173
-    - http://localhost:4173
-  exclude:                    # relative to data/derived; everything else is uploaded
-    - "_*/*"
-    - ".done/*"
-    - "*.log"
-    - "*.tmp.parquet"
-
-# genes the preprint reports as colocalized with the DCM GWAS (coloc PP.H4 > 0.8), from the
-# authors; the landing track draws them from coloc_loci.json. The same list is in ui/src/lib/coloc.ts
-# for the gene-page chips until the authors' coloc table replaces both.
-coloc_genes:
-  eqtl: [VPREB3, SYNPO2L, SQLE, SMARCB1, SKI, PROM1, PRKCA, PJVK, MYOZ1, MTSS1, MMP11, MAP3K7CL,
-         LMF1, LINC00964, FLNC, CRIM1-DT, CRIM1, CDKN1A, CAMK2D, ADAMTS7P3, ACTN2]
-  sqtl: [SYNPO2L, CAMK2D, TKT, LMF1]
-
-# counts reported in the preprint, used by the validate step (tolerance is fractional)
-paper_counts:
-  egenes: 10241
-  sqtl_sig_phenotypes: 13540
-  tolerance: 0.02
 
 # paper-named variants that must resolve to these rsIDs through the variants table
 paper_variants:
@@ -72,3 +52,57 @@ paper_variants:
   chr10:73661450: rs10824026   # MYOZ1 / SYNPO2L (paper eQTL text says 73,646,383, a typo; that is rs3740293. sQTL text and dbSNP agree on 73,661,450)
   chr4:113537246: rs734348     # CAMK2D
   chr16:918717: rs9889137      # LMF1
+
+# The frozen v0 pack format. `dof` is TOPCHeF's published Student-t degrees of freedom, which the
+# TOPCHeF adapter reports; the gate (adapters/verify_topchef.py) reads the DuckDB limits and the sample
+# genes; test_packfmt's real-data case reads the page size and zstd level.
+packs:
+  duckdb_memory_limit: 4GB
+  duckdb_threads: 4
+  dof: {eqtl: 435, sqtl: 480}      # Student-t degrees of freedom; readers derive slope from slope_se and p
+  variant_page_size: 512            # variants per page in the variants file
+  zstd_level: 19
+  # sample genes for the gate's pack comparison
+  check_genes:
+    - ENSG00000128591       # FLNC, bin 7, 6,050 variants
+    - ENSG00000229618       # AC011287.1, largest chr7 window, 10,419 variants
+    - ENSG00000121716       # PILRB, smallest chr7 p (8e-133), large-step case
+    - ENSG00000286192       # AC069288.1, sQTL-only, zero pairs
+    - ENSG00000157933       # SKI, chr1
+    - ENSG00000077522       # ACTN2, chr1
+    - ENSG00000142798       # HSPG2, chr1
+    - ENSG00000268575       # AL031282.2, chr1, sQTL only
+    - ENSG00000131374       # TBC1D5, chr3, wider intron run
+    - ENSG00000145349       # CAMK2D, chr4
+    - ENSG00000049656       # CLPTM1L, chr5
+    - ENSG00000204314       # PRRT1, chr6
+    - ENSG00000177791       # MYOZ1, chr10
+    - ENSG00000166317       # SYNPO2L, chr10
+    - ENSG00000103227       # LMF1, chr16
+    - ENSG00000238039       # AC244197.2, chrX
+  # sQTL sample genes for the gate: every intron of these genes
+  sqtl_check_genes:
+    - ENSG00000145349       # CAMK2D, chr4, 14 introns
+    - ENSG00000166317       # SYNPO2L, chr10, 7 introns
+    - ENSG00000103227       # LMF1, chr16, 9 introns
+    - ENSG00000142798       # HSPG2, chr1, 40 introns (the most for one gene)
+    - ENSG00000268575       # AL031282.2, chr1, sQTL only, 27 introns
+
+# eQTL Catalogue adapter (pipeline/adapters/eqtl_catalogue.py): one entry per experiment, keyed by
+# the experiment id its tables go under (`_tables/<id>/`). Paths are absolute (brickyard on
+# Rivanna); QTLB_EQTLCAT_ROOT overrides `root`.
+eqtl_catalogue:
+  gtex_v8_heart_lv:
+    root: /project/shefflab/brickyard/datasets_downloaded/eqtl_catalogue/r6
+    release: r6
+    study: QTS000015                       # GTEx v8
+    datasets: {ge: QTD000256, leafcutter: QTD000260}
+    # which sumstats file is the nominal table: `.all` exists only for ge; leafcutter has `.cc`
+    # (fine-mapped introns only), and there is no genome-wide splicing file in r6 or r8
+    nominal: {ge: all, leafcutter: cc}
+    # every intron of every cluster, with its gene: Zenodo 7850746, md5 97799c8c4b8379866d6ae4cfba72b6e3
+    # (the brick's fetch.sh fetches and checks it)
+    leafcutter_metadata: /project/shefflab/brickyard/datasets_downloaded/eqtl_catalogue/zenodo_7850746/leafcutter_QTD000260_Ensembl_105_phenotype_metadata.tsv.gz
+    gene_annotation: gencode_v39           # Ensembl 105
+    n_samples: 382
+    significance: {column: p_perm, op: "<", threshold: 0.05}

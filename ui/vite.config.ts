@@ -6,12 +6,14 @@ import { createReadStream, statSync } from 'node:fs'
 import { join, normalize } from 'node:path'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 
-const DATA_DIR = fileURLToPath(new URL('../data/derived', import.meta.url))
+/** The local qtlstore (store.json, pointers, immutable/) served at /data. `QTL_DATA_DIR` points it
+ *  at a store anywhere on disk, e.g. a copy of a Rivanna build in /tmp. */
+const DATA_DIR = process.env.QTL_DATA_DIR || fileURLToPath(new URL('../data/store', import.meta.url))
 
 /**
- * Serve ../data/derived at /data in `vite` and `vite preview`, with HTTP Range support, the
- * way R2 will serve it in production. This replaces a public/ symlink, which `vite build`
- * would copy wholesale (15 GB) into dist/.
+ * Serve DATA_DIR at /data in `vite` and `vite preview`, with HTTP Range support, the way B2
+ * (cloud2.databio.org) serves it in production. This replaces a public/ symlink, which `vite build` would copy
+ * wholesale into dist/.
  */
 function serveDerivedData(): Plugin {
   const handler = (req: IncomingMessage, res: ServerResponse, next: () => void) => {
@@ -25,7 +27,21 @@ function serveDerivedData(): Plugin {
     const type = file.endsWith('.json') ? 'application/json' : 'application/octet-stream'
     res.setHeader('Accept-Ranges', 'bytes')
     res.setHeader('Content-Type', type)
+    // Chromium stores a 206 only when the response carries a strong validator, so without one `warm`
+    // re-downloads every range. Size and mtime identify a local file. Production (cloud2.databio.org)
+    // must send one too; see the deploy notes in README.md.
+    const st = statSync(file)
+    res.setHeader('ETag', `"${st.size.toString(16)}-${Math.floor(st.mtimeMs).toString(16)}"`)
+    res.setHeader('Last-Modified', new Date(st.mtimeMs).toUTCString())
+    // the production headers (SPEC section 3, set at upload to B2): an immutable/ name
+    // carries the file's content hash, so a rebuilt file is a new URL and the old one can be cached
+    // forever; everything else revalidates. Harness cold runs use a fresh browser context.
+    res.setHeader('Cache-Control', rel.startsWith('immutable/') ? 'public, max-age=31536000, immutable' : 'no-cache')
     const range = /^bytes=(\d*)-(\d*)$/.exec(req.headers.range ?? '')
+    if (req.headers.range !== undefined && !range) {
+      // multi-range or malformed: refuse rather than fall through to the whole file
+      res.statusCode = 416; res.setHeader('Content-Range', `bytes */${size}`); return res.end()
+    }
     if (range) {
       const start = range[1] ? Number(range[1]) : Math.max(0, size - Number(range[2]))
       const end = range[1] && range[2] ? Math.min(Number(range[2]), size - 1) : range[1] ? size - 1 : size - 1

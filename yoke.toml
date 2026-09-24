@@ -1,0 +1,58 @@
+# Yoke session config for qtl-browser. The build runs on Rivanna, where the raw
+# data lives in the brickyard; this laptop keeps only code.
+#
+# No env_files here on purpose. The environment for this work is owned by the
+# qtlb-format project in the analysis repo (env/on-cluster.env). Two copies of
+# the same env drift, and the build itself reads pipeline/config.yaml, not the
+# environment.
+name = "qtl-browser"
+remote = "riva"
+remote_cwd = "/home/ns5bc/scratch/qtl-browser-live"
+
+# Live code sync for iterating without a push.
+#
+# It lands in ~/scratch/qtl-browser-live, NOT in ~/code/qtl-browser. That second
+# path is a real git checkout, and `default_ignores` excludes `.git`, so syncing
+# onto it would rewrite a git working tree through a channel git cannot see. See
+# refgenie-registry/yoke.toml for the four ways that broke a nightly build. A
+# directory is either a checkout or a sync target, never both.
+#
+# one-way-safe: the laptop is authoritative and nothing flows back. The build
+# writes tens of GB under data/, which must never be dragged onto the laptop.
+# Not one-way-replica: the remote copy legitimately holds things the laptop does
+# not (brick symlinks, .venv, _refget), and replica would delete them.
+#
+# As of yoke 0.2.0 everything in `flags` is passed to `mutagen sync create`
+# untouched -- yoke validates none of it, so any mutagen option works here.
+# `default_ignores = true` adds --ignore-vcs, *.pyc and __pycache__.
+#
+# `data` is ignored whole, and must stay that way. On the laptop data/raw holds
+# symlinks into /media/nsheff/passport4 and /media/nsheff/t5; on Rivanna the
+# same names are symlinks into /project/shefflab/brickyard. Syncing that
+# directory would overwrite the remote's brick links with laptop paths that do
+# not exist there, and take the build's inputs with them.
+#
+# The cost is that data/raw/sources.yaml and data/raw/download.py are tracked in
+# git but never reach the remote, and `pipeline.annotation` reads sources.yaml
+# for provenance. Copy those two files to the sync target by hand once per new
+# remote:
+#
+#   scp data/raw/sources.yaml data/raw/download.py riva:~/scratch/qtl-browser-live/data/raw/
+#
+# Do not "fix" this by narrowing the ignore to data/derived: that re-exposes the
+# symlinks above. Without sources.yaml an annotation's pointer records only the
+# GTF file name, not its release and md5.
+[[syncs]]
+name   = "live"
+local  = "."
+remote = "riva:~/scratch/qtl-browser-live"
+default_ignores = true
+flags = [
+    "--mode=one-way-safe",
+    "--ignore=data",
+    "--ignore=.venv",
+    "--ignore=node_modules",
+    "--ignore=ui/dist",
+    "--ignore=ui/bench/out",
+    "--ignore=*.log",
+]

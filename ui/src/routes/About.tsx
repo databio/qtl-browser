@@ -3,19 +3,24 @@ import { Page } from '@/components/page'
 import { PageHeader } from '@/components/page-header'
 import { KvTable } from '@/components/kv-table'
 import { PIPELINE, PREPRINT, ZENODO } from '@/lib/links'
-import { useManifest } from '@/contexts/manifest-context'
+import { seqcolCollectionUrl } from '@/lib/chrom-sizes'
+import { useStoreInfo } from '@/contexts/store-context'
+import { roundingFacts } from '@/lib/rounding'
+import { NOT_YET } from '@/components/states'
 
 const GWAS_PAPER = 'https://doi.org/10.1038/s41588-024-01975-5'
 const CVDKP = 'https://kp4cd.org/dataset_downloads/mi'
-const SEQCOL = 'https://seqcolapi.databio.org'
-const REPO = 'https://github.com/sanghoonio/qtl-browser'
+const SEQCOL = seqcolCollectionUrl()
+const REPO = 'https://github.com/databio/qtl-browser'
 
 export default function About() {
-  const m = useManifest()
+  const m = useStoreInfo()
   const sources = m?.sources ?? {}
-  const tables = m?.tables ?? {}
   const counts = m?.counts ?? {}
-  const gwas = m?.gwas_dcm ?? null
+  const g = m?.experiment.gwas?.source
+  const gwas = g?.file ? { file: g.file, n_cases: g.n_cases ?? 0, n_controls: g.n_controls ?? 0 } : null
+  const bins = m?.experiment.gwas?.bins ?? null
+  const rounding = roundingFacts(m)
   const gwasSet = gwas?.file.includes('BiobanksOnly') ? 'biobank-only meta-analysis' : gwas?.file.includes('MTAG') ? 'MTAG analysis' : 'meta-analysis'
   return (
     <Page>
@@ -35,9 +40,16 @@ export default function About() {
             <ul>
               <li><strong>eGene, sQTL intron</strong>: permutation p-value below 0.05. An sGene has at least one significant intron. A Benjamini-Hochberg q-value on the beta-approximated permutation p is listed alongside.</li>
               <li><strong>Lead variant</strong>: the variant with the smallest nominal p-value in the cis window, ±1 Mb of the transcription start site.</li>
-              <li><strong>Credible sets and PIP</strong>: SuSiE 95% credible sets; PIP is the posterior inclusion probability. A variant in two sets of one phenotype is shown with its higher-PIP membership.</li>
-              <li><strong>A1 and A2</strong>: A1 is the effect allele, the minor allele in TOPCHeF; A2 is the reference allele. Slopes are in standard-deviation units of the phenotype per A1 allele.</li>
-              <li><strong>Splice phenotypes</strong>: leafcutter intron excision ratios, shown as intron coordinates and strand. Introns sharing a splice site share a cluster. Every tested intron has its permutation result; per-variant nominal statistics are stored for the significant introns only.</li>
+              <li><strong>Credible sets and PIP</strong>: SuSiE 95% credible sets; PIP is the posterior inclusion probability. A variant in two sets of one phenotype is listed under both in the credible-set table; the locus plot and cis table show its higher-PIP membership.</li>
+              <li><strong>A1 and A2</strong>: variants are stored against the GRCh38 reference, so A2 is the reference
+                allele and A1 the alternate. Allele frequencies and slopes are A1's; slopes are in standard-deviation
+                units of the phenotype per A1 allele.</li>
+              {rounding && <li><strong>Rounded values</strong>: per-variant p-values, slopes, standard errors, and allele
+                frequencies are stored in compressed form, so a p-value shown here can differ from the source by up to{' '}
+                {rounding.pPct}%{rounding.slopeSe && <> and a slope by up to {rounding.slopeSe} standard errors</>}. Gene-level
+                results and the DCM GWAS values are exact, and <ExternalLink href={ZENODO}>exact per-variant values are on
+                Zenodo</ExternalLink>.</li>}
+              <li><strong>Splice phenotypes</strong>: leafcutter intron excision ratios, shown as intron coordinates and strand. Introns sharing a splice site share a cluster. Every tested intron has its permutation result and its per-variant nominal statistics.</li>
               <li><strong>Colocalized loci</strong>: the 21 eQTL and 4 sQTL genes with coloc PP.H4 above 0.8 against the DCM GWAS. PJVK and CDKN1A are not eGenes by the permutation rule; their colocalization used nominal statistics.</li>
             </ul>
             <h2>Coordinates and identifiers</h2>
@@ -52,9 +64,10 @@ export default function About() {
               <ExternalLink href={GWAS_PAPER}>Jurgens et al. 2024</ExternalLink>
               {gwas && <> ({gwas.n_cases.toLocaleString()} cases, {gwas.n_controls.toLocaleString()} controls)</>} from the{' '}
               <ExternalLink href={CVDKP}>Cardiovascular Disease Knowledge Portal</ExternalLink>. Variants are matched on GRCh38
-              position and alleles in either orientation, and the GWAS effect is signed to the QTL effect allele. The landing
-              track shows the strongest GWAS p-value per 5 Mb window, red where the window holds a genome-wide significant
-              variant; the gene page panel plots every shared variant in the cis window.
+              position and alleles in either orientation, and the GWAS effect is signed to the QTL effect allele.{' '}
+              {bins ? <>The landing track shows the strongest GWAS p-value per {bins.bin_bp / 1e6} Mb window, red where the
+                window holds a genome-wide significant variant; the gene page panel plots every shared variant in the cis window.</>
+                : <>The gene page panel plots every shared variant in the cis window.</>}
             </p>
           </div>
 
@@ -62,18 +75,17 @@ export default function About() {
             <KvTable title="Counts" align="right" rows={[
               { label: 'Genes tested', value: counts.genes_tested?.toLocaleString() },
               { label: 'eGenes', value: counts.egenes?.toLocaleString() },
-              { label: 'Splice phenotypes tested', value: (tables.splice_phenotypes?.rows ?? 0).toLocaleString() },
+              { label: 'Splice phenotypes tested', value: counts.splice_phenotypes_tested?.toLocaleString() },
               { label: 'Significant sQTL introns', value: `${counts.sqtl_sig_phenotypes?.toLocaleString()} in ${counts.sqtl_sig_genes?.toLocaleString()} genes` },
-              { label: 'Variants in cis windows', value: (counts.variants_cis ?? tables.variants_by_position?.rows ?? 0).toLocaleString() },
+              { label: 'Variants in cis windows', value: counts.variants_cis?.toLocaleString() },
               { label: 'Variants seen only in trans', value: (counts.variants_trans_only ?? 0).toLocaleString() },
-              { label: 'DCM GWAS variants', value: (tables.gwas_dcm?.rows ?? 0).toLocaleString() },
+              { label: 'DCM GWAS variants', value: counts.gwas_variants?.toLocaleString() ?? NOT_YET },
+              { label: 'trans pairs', value: counts.trans_pairs?.toLocaleString() ?? NOT_YET },
             ]} />
           )}
 
-          {/* per-table rows, sizes, and columns stay in manifest.json next to the data; only the build date is shown */}
           <KvTable
-            title={<>Data versions{m?.built && <span className="ml-1.5 font-normal normal-case tracking-normal text-base-content/50">
-              (updated {String(m.built).slice(0, 10)})</span>}</>}
+            title="Data versions"
             rows={Object.entries(sources).map(([k, v]) => ({ label: k, value: <span><span className="font-medium text-base-content">{v.version}</span> · {v.description}</span> }))} />
 
           <div className="flex flex-wrap gap-x-4 text-sm">

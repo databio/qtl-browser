@@ -16,8 +16,9 @@ export function fmtInt(x: unknown): string {
   return Number(x).toLocaleString('en-US')
 }
 
+/** Empty when there is no slope (a results set without dof stores none: SPEC section 8). */
 export function fmtSlopeSE(slope: unknown, se: unknown): string {
-  if (slope == null) return ''
+  if (slope == null || Number.isNaN(slope)) return ''
   return `${fmtNum(slope)} ± ${fmtNum(se)}`
 }
 
@@ -43,4 +44,11 @@ export function fmtPhenotype(id: string): string {
   const m = /^(chr[^:]+):(\d+):(\d+):(clu_\d+)_([+-?])(?::|$)/.exec(id)
   if (!m) return id
   return `${m[1]}:${Number(m[2]).toLocaleString('en-US')}–${Number(m[3]).toLocaleString('en-US')} (${m[5]})`
+}
+
+/** Byte counts for the cis-scan button: the span a click will download. */
+export function fmtBytes(n: number): string {
+  if (n >= 1e6) return `${(n / 1e6).toFixed(1)} MB`
+  if (n >= 1e3) return `${Math.round(n / 1e3)} KB`
+  return `${n} B`
 }

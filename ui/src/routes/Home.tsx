@@ -6,11 +6,11 @@ import SentenceLines from '@/components/SentenceLines'
 import { Page } from '@/components/page'
 import { COLOC_EQTL_GENES, COLOC_SQTL_GENES } from '@/lib/coloc'
 import { PREPRINT, ZENODO } from '@/lib/links'
-import { useManifest } from '@/contexts/manifest-context'
+import { useStoreInfo } from '@/contexts/store-context'
 import { fmtInt } from '@/lib/format'
 
 export default function Home() {
-  const counts = useManifest()?.counts ?? null
+  const counts = useStoreInfo()?.counts ?? null
 
   return (
     <Page>
@@ -18,7 +18,7 @@ export default function Home() {
         <h1 className="text-4xl font-extralight tracking-tight">TOPCHeF</h1>
         <SentenceLines className="mt-2.75 text-sm text-base-content/55" sentences={[
           'Expression and splicing QTL mapped in left-ventricle tissue from failing and non-failing human hearts.',
-          // the counts come from the manifest fetch; hold the line's height until then so the
+          // the counts come from the store's search index; hold the line's height until then so the
           // search bar and track do not move down when it lands
           counts ? `${fmtInt(counts.egenes)} eGenes and ${fmtInt(counts.sqtl_sig_phenotypes)} significant sQTL introns across ${fmtInt(counts.genes_tested)} tested genes; ${COLOC_EQTL_GENES.length} eGenes and ${COLOC_SQTL_GENES.length} sGenes colocalize with dilated cardiomyopathy (DCM) risk.` : ' ',
           <>

@@ -5,7 +5,8 @@ import { Pager } from '@/components/pager'
 import { Empty, TableSkeleton } from '@/components/states'
 import { fmtInt, fmtNum, fmtP, fmtPhenotype, fmtSlopeSE } from '@/lib/format'
 import { transAll, transCount, transRows, type TransQuery, type TransRow } from '@/lib/queries'
-import { downloadCSV } from '@/lib/csv'
+import { downloadCSV, roundedCsvName } from '@/lib/csv'
+import { transRoundingDetail, useTransRoundingFacts } from '@/lib/rounding'
 import { ROW_LINK, ROW_LINK_TEXT, useRowLink } from '@/lib/row-link'
 
 /** Sortable, filterable page through a materialized trans table. Each change is one local
@@ -24,6 +25,7 @@ export default function TransTable({ table, qtlType, keyedBy = 'gene', fileStem 
     ? `/gene/${r.gene_id}${r.qtl_type === 's' ? '?tab=sqtl' : ''}`
     : `/variant/${r.rsid ?? `${r.variant_chr}:${r.position}`}`
   const [sort, setSort] = useState<SortState>({ by: 'pval', order: 'asc' })
+  const rounding = useTransRoundingFacts()
   const [maxP, setMaxP] = useState('')
   const [search, setSearch] = useState('')
   const [offset, setOffset] = useState(0)
@@ -61,7 +63,7 @@ export default function TransTable({ table, qtlType, keyedBy = 'gene', fileStem 
     const cols = byVariant
       ? ['qtl_type', 'gene_id', 'symbol', 'phenotype_id', 'gene_chr', 'gene_tss', ...stats]
       : [...(qtlType === 's' ? ['phenotype_id'] : []), 'variant_chr', 'position', 'rsid', 'af', ...stats]
-    downloadCSV(`${fileStem}.csv`, await transAll(query()), cols)
+    downloadCSV(roundedCsvName(fileStem), await transAll(query()), cols)
   }
 
   const R = { align: 'right' as const }
@@ -70,7 +72,7 @@ export default function TransTable({ table, qtlType, keyedBy = 'gene', fileStem 
     : [...(qtlType === 's' ? [{ w: 'w-40' }] : []), { w: 'w-24' }, { w: 'w-20' }, { w: 'w-10', ...R }, { w: 'w-14', ...R }, { w: 'w-20', ...R }, { w: 'w-10', ...R }]
 
   return (
-    <div className="space-y-2">
+    <div className="space-y-2" data-trans-total={data !== null ? (all ?? undefined) : undefined}>
       <div className="flex flex-wrap items-center gap-2">
         <label className="input input-bordered input-sm flex h-8 w-56 items-center gap-2 rounded-lg">
           <SearchIcon className="size-4 shrink-0 opacity-50" />
@@ -85,7 +87,9 @@ export default function TransTable({ table, qtlType, keyedBy = 'gene', fileStem 
           <option value="1e-8">p ≤ 1e-8</option>
           <option value="1e-10">p ≤ 1e-10</option>
         </select>
-        <button className="btn btn-sm h-8 gap-1.5 rounded-lg border-base-300 font-medium" onClick={exportCSV} disabled={!table || total === 0}><Download className="size-3.5" /> CSV</button>
+        {/* as on the cis table: the note is in the section description, the title rides with the file */}
+        <button className="btn btn-sm h-8 gap-1.5 rounded-lg border-base-300 font-medium" title={rounding ? transRoundingDetail(rounding) : undefined}
+          onClick={exportCSV} disabled={!table || total === 0}><Download className="size-3.5" /> CSV</button>
       </div>
       {data === null ? <TableSkeleton columns={skel} rows={3} /> : all === 0 ? <Empty label="No trans associations." /> : total === 0 ? <Empty label={byVariant ? 'No genes match.' : 'No variants match.'} /> : (
         <>
