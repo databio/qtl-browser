@@ -192,7 +192,7 @@ export default function LocusPlot({ spec, onCount, onLegend, onActions, onCredib
         hoverIndex.current = new Map((await con.query(`SELECT position, rs_number, nlp, gwas_nlp, label FROM ${table}`)).toArray()
           .map(r => [Number(r.position), {
             rs_number: r.rs_number == null ? null : Number(r.rs_number),
-            nlp: Number(r.nlp), gwas_nlp: r.gwas_nlp == null ? null : Number(r.gwas_nlp), label: String(r.label),
+            nlp: Number(r.nlp), gwas_nlp: r.gwas_nlp == null ? null : Number(r.gwas_nlp), label: r.label == null ? '' : String(r.label),
           }]))
         if (!alive) return
         if (onCredibleSets) {

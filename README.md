@@ -43,9 +43,19 @@ npm run bench:compare -- bench/results/baseline-live.json bench/results/<label>-
 
 ## Deploy
 
-**Every command below that writes to the bucket needs Sam's explicit go-ahead.** He owns the bucket,
-the R2 token, and the Workers project. `cors --print`, `inventory`, `budget`, `check`, any
-`--dryrun`, and a bare `prune` are read-only and safe to run at any time.
+**Where the data actually lives.** Production builds read the packs from
+`https://cloud2.databio.org/qtl-browser` (`ui/.env.production`), a Backblaze B2 bucket that Nathan
+owns and uploads to by his own process, served through Cloudflare. `pipeline/upload.py` and the
+`r2:` block in `pipeline/config.yaml` still target the Cloudflare R2 bucket, which holds the old
+parquet build behind `qtl-browser.topchef.workers.dev` and is slated to be turned off. A B2 profile
+for `upload.py` is a follow-up; until it lands, the commands below deploy to a bucket the live site
+does not read. One thing to fix on the B2 side: `cloud2.databio.org` sends no `ETag` or
+`Last-Modified`, and Chromium stores a 206 only with a strong validator, so pack ranges are
+re-fetched on every visit.
+
+**Every command below that writes to the bucket needs Sam's explicit go-ahead.** He owns the R2
+bucket, its token, and the topchef Workers project. `cors --print`, `inventory`, `budget`, `check`,
+any `--dryrun`, and a bare `prune` are read-only and safe to run at any time.
 
 A deploy is staged, rehearsed, then switched. New files go up before old ones come down, so the
 site keeps serving the old build until one small file, `manifest.json`, is replaced.

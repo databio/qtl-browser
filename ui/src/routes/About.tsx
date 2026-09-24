@@ -42,7 +42,8 @@ export default function About() {
                 statistics in the cis plots, tables, and CSV files are stored rounded. −log10 p is within {rounding.nlp} of the
                 exact value, so a p-value is off by at most {rounding.pPct}%. Standard errors are within {rounding.sePct}%.
                 Slopes are rebuilt from the rounded p-value and standard error, and are within {rounding.slopeSe} standard
-                errors of the exact slope. Allele frequencies are within {rounding.af}. Gene-level results (lead variant,
+                errors of the exact slope. Allele frequencies are rounded within {rounding.af}, and a variant page's
+                "lead variant for" table is rounded likewise. On a gene page the gene-level results (lead variant,
                 permutation p, q-value) are exact, and the DCM GWAS values are stored as published.{' '}
                 <ExternalLink href={ZENODO}>Exact per-variant values are on Zenodo.</ExternalLink></li>}
               <li><strong>Splice phenotypes</strong>: leafcutter intron excision ratios, shown as intron coordinates and strand. Introns sharing a splice site share a cluster. Every tested intron has its permutation result and its per-variant nominal statistics.</li>

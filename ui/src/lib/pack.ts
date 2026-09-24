@@ -226,7 +226,8 @@ const locusSQL = (qtl: string, gwas: string) => `
            CASE WHEN g.ea = q.A1 THEN g.beta ELSE -g.beta END AS gwas_beta,
            coalesce('rs' || q.rs_number, q.position::VARCHAR) || '  ' || q.A1 || '/' || q.A2
              || chr(10) || CASE WHEN q.pval_nominal = 0 THEN 'p = 0 (underflow; drawn above the maximum)' ELSE 'p = ' || format('{:.2e}', q.pval_nominal) END
-             || chr(10) || 'slope ' || format('{:.3f}', q.slope) || ' ± ' || format('{:.3f}', q.slope_se)
+             -- the slope is rebuilt from p and SE, so a p = 0 row has none; a NULL here would NULL the whole label
+             || chr(10) || CASE WHEN q.slope IS NULL THEN 'slope not recoverable (p underflow)' ELSE 'slope ' || format('{:.3f}', q.slope) || ' ± ' || format('{:.3f}', q.slope_se) END
              || chr(10) || 'AF ' || format('{:.3f}', q.af)
              || CASE WHEN q.pip IS NULL THEN '' ELSE chr(10) || 'PIP ' || format('{:.3f}', q.pip) || ' (set ' || q.cs_id || ')' END
              || CASE WHEN g.p IS NULL THEN '' ELSE chr(10) || 'DCM GWAS p = ' || format('{:.2e}', g.p) || ', beta ' || format('{:+.3f}', CASE WHEN g.ea = q.A1 THEN g.beta ELSE -g.beta END) || ' (A1 as effect allele)' END AS label

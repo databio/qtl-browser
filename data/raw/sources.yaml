@@ -1,0 +1,55 @@
+# Raw data sources for the TOPCHeF QTL browser.
+# Consumed by data/raw/download.py. Edit this file to add or bump a source;
+# the script never hard-codes a URL or version.
+#
+# Per file: `url` (or `file` combined with the source's `url_base`), optional
+# `md5` (literal) or `md5_url` (fetch and read), optional `size` in bytes.
+# Files are written to <dest>/<source dir>/<basename>.
+
+dest: data/raw
+
+sources:
+
+  - name: topchef_qtl
+    description: TOPCHeF TensorQTL cis/trans e/sQTL summary statistics (Murray et al. 2026, medRxiv 10.64898/2026.01.12.26343934)
+    version: Zenodo record 21382723 (2026-07-15), latest of concept DOI 10.5281/zenodo.17932666; v1 was 17932667
+    license: CC-BY-4.0
+    dir: zenodo_21382723
+    url_base: https://zenodo.org/api/records/21382723/files/{file}/content
+    files:
+      - {file: cis_eQTL_permutation.tar.gz, size: 1973464,    md5: 75a418d0c9f485f3a0ffd398eec9a0f5}
+      - {file: cis_eQTL_SuSiE.tar.gz,       size: 3626831,    md5: f494cbd0d8151f7abb5f66b43f9ba23f}
+      - {file: cis_eQTL_nominal.tar.gz,     size: 2692264934, md5: 6cfee90b66716930f02b23741f0a4fc6}
+      - {file: cis_sQTL_permutation.tar.gz, size: 8360521,    md5: a60edd22d3d7e82d3358347a953572b2}
+      - {file: cis_sQTL_SuSiE.tar.gz,       size: 2999134,    md5: 349833de192bf494e19f799d4c97dc20}
+      - {file: cis_sQTL_nominal.tar.gz,     size: 9402643515, md5: 229e7c452644235161ce8785bb0dd6da}
+      - {file: trans_eQTL.tar.gz,           size: 72716690,   md5: d16c71114f6eebf957dfe0e32270acfa}
+      - {file: trans_sQTL.tar.gz,           size: 475084664,  md5: 7d51c77fcb611b39808cab3d8ef7105a}
+
+  - name: gencode
+    description: GENCODE gene annotation, the release TOPCHeF quantified against (gene symbols, TSS, strand, biotype)
+    version: v34 (GRCh38.p13)
+    dir: gencode_v34
+    files:
+      - url: https://ftp.ebi.ac.uk/pub/databases/gencode/Gencode_human/release_34/gencode.v34.annotation.gtf.gz
+        size: 43164654
+        md5: 53901912df1002aae5a173cb505399d7
+
+  - name: dcm_gwas
+    description: Jurgens et al. 2024 dilated cardiomyopathy GWAS meta-analysis (Nat Genet, doi 10.1038/s41588-024-01975-5), the study TOPCHeF colocalized against; zip holds the main META plus noBiobanks, BiobanksOnly, NICM, and MTAG files with GRCh37 and GRCh38 coordinates
+    version: CVD Knowledge Portal release Jurgens2024_DCM_EU (kp4cd.org/dataset_downloads/mi), fetched 2026-09-04
+    dir: dcm_gwas_jurgens2024
+    files:
+      - {url: https://api.kpndataregistry.org/api/d/CQyqth, file: DCM_GWAS.zip, size: 2246624753}
+      - {url: https://api.kpndataregistry.org/api/d/FEvoa4, file: README.txt}
+
+  - name: dbsnp
+    description: dbSNP GRCh38 VCF with tabix index, for rsID lookup of chr:pos:A1:A2; assembly report maps RefSeq accessions (NC_000001.11) to chr names
+    version: build 157 on GRCh38.p14 (NCBI latest_release as of 2026-09-03)
+    dir: dbsnp_b157
+    url_base: https://ftp.ncbi.nih.gov/snp/latest_release/VCF/{file}
+    files:
+      - {file: GCF_000001405.40.gz,     size: 29552227779, md5_url: https://ftp.ncbi.nih.gov/snp/latest_release/VCF/GCF_000001405.40.gz.md5}
+      - {file: GCF_000001405.40.gz.tbi,                    md5_url: https://ftp.ncbi.nih.gov/snp/latest_release/VCF/GCF_000001405.40.gz.tbi.md5}
+      - url: https://ftp.ncbi.nih.gov/snp/latest_release/release_notes.txt
+      - url: https://ftp.ncbi.nlm.nih.gov/genomes/all/GCF/000/001/405/GCF_000001405.40_GRCh38.p14/GCF_000001405.40_GRCh38.p14_assembly_report.txt

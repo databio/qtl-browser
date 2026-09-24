@@ -164,7 +164,9 @@ def run(cfg: Config, force: bool = False) -> None:
     ]:
         for c in CHROMS:
             src = cfg.raw_dir(src_dir) / pat.format(c=c)
-            out = cfg.derived / out_dir / f"chr={c}"          # bin=<n>/data.parquet files go inside
+            # under _tables/, where pack_eqtl, manifest, and packcheck read it; nothing the browser
+            # fetches lives here
+            out = cfg.tables / out_dir / f"chr={c}"           # bin=<n>/data.parquet files go inside
             if not src.exists():
                 log(f"nominal: missing raw file {src.name}, skipping")
                 continue
