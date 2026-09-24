@@ -9,7 +9,7 @@ import { roundingFacts } from '@/lib/rounding'
 const GWAS_PAPER = 'https://doi.org/10.1038/s41588-024-01975-5'
 const CVDKP = 'https://kp4cd.org/dataset_downloads/mi'
 const SEQCOL = 'https://seqcolapi.databio.org'
-const REPO = 'https://github.com/sanghoonio/qtl-browser'
+const REPO = 'https://github.com/databio/qtl-browser'
 
 export default function About() {
   const m = useManifest()
@@ -38,14 +38,10 @@ export default function About() {
               <li><strong>Lead variant</strong>: the variant with the smallest nominal p-value in the cis window, ±1 Mb of the transcription start site.</li>
               <li><strong>Credible sets and PIP</strong>: SuSiE 95% credible sets; PIP is the posterior inclusion probability. A variant in two sets of one phenotype is listed under both in the credible-set table; the locus plot and cis table show its higher-PIP membership.</li>
               <li><strong>A1 and A2</strong>: A1 is the effect allele, the minor allele in TOPCHeF; A2 is the reference allele. Slopes are in standard-deviation units of the phenotype per A1 allele.</li>
-              {rounding && <li><strong>Rounded values</strong>: to keep a gene page to a few small downloads, per-variant
-                statistics in the cis plots, tables, and CSV files are stored rounded. −log10 p is within {rounding.nlp} of the
-                exact value, so a p-value is off by at most {rounding.pPct}%. Standard errors are within {rounding.sePct}%.
-                Slopes are rebuilt from the rounded p-value and standard error, and are within {rounding.slopeSe} standard
-                errors of the exact slope. Allele frequencies are rounded within {rounding.af}, and a variant page's
-                "lead variant for" table is rounded likewise. On a gene page the gene-level results (lead variant,
-                permutation p, q-value) are exact, and the DCM GWAS values are stored as published.{' '}
-                <ExternalLink href={ZENODO}>Exact per-variant values are on Zenodo.</ExternalLink></li>}
+              {rounding && <li><strong>Rounded values</strong>: per-variant p-values, slopes, standard errors, and allele
+                frequencies are stored in compressed form, so a p-value shown here can differ from the source by up to{' '}
+                {rounding.pPct}% and a slope by up to {rounding.slopeSe} standard errors. Gene-level results and the DCM
+                GWAS values are exact, and <ExternalLink href={ZENODO}>exact per-variant values are on Zenodo</ExternalLink>.</li>}
               <li><strong>Splice phenotypes</strong>: leafcutter intron excision ratios, shown as intron coordinates and strand. Introns sharing a splice site share a cluster. Every tested intron has its permutation result and its per-variant nominal statistics.</li>
               <li><strong>Colocalized loci</strong>: the 21 eQTL and 4 sQTL genes with coloc PP.H4 above 0.8 against the DCM GWAS. PJVK and CDKN1A are not eGenes by the permutation rule; their colocalization used nominal statistics.</li>
             </ul>
