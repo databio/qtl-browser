@@ -62,6 +62,10 @@ The data lives in the Backblaze B2 bucket `cloud-databio` under `qtl-browser/`, 
 `https://cloud2.databio.org/qtl-browser`. The site is a Cloudflare Workers static-assets project
 (`ui/wrangler.jsonc`) in the databio account, at https://topchef.databio.org.
 
+**Known issue (from Sam):** `cloud2.databio.org` sends no `ETag` or `Last-Modified`, and Chromium
+stores a 206 (range) response only with a strong validator, so range reads are re-fetched on every
+visit instead of coming from the browser cache. Whole-file reads are cached normally.
+
 The full steps, with credentials and checks, are in the cloud-management repo:
 `~/workspaces/assistant/cloud-management/backblaze/qtl-browser.md`. In short: upload the store
 (`immutable/` files first, the pointer files and `store.json` last), then build and deploy the app:
