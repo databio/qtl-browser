@@ -33,7 +33,8 @@ the experiments comes from; this document spells that one out in full every time
 **Status.** Builders and `Store.validate` exist and pass on a genome-wide two-experiment store
 (`/scratch/ns5bc/qtl-browser/store-genome-v1f` on Rivanna: TOPCHeF, with its trans results and the DCM
 GWAS, and GTEx v8 heart LV). Marked **(future)** below: the VRS-id index and `store.json` refget URLs.
-A browser reader for v1 is being written in `ui/`; this document is its reference.
+The browser reader for v1 is `ui-topchef/` (deployed) and `ui/` (the general multi-study fork);
+this document is their reference.
 
 ## 1. Conventions
 
@@ -59,11 +60,13 @@ A browser reader for v1 is being written in `ui/`; this document is its referenc
   store.json                    mutable: name, format version, ids at each pointer level, refget URLs
   immutable/<digest>.<ext>      every object; <digest> = sha512t24u of the object's bytes
   variant_catalogs/<id>.json    mutable pointer: one variant catalog
+  overlaps/<id>.json            mutable pointer: one catalog overlap index (section 19), derived
   annotations/<id>.json         mutable pointer: one gene annotation release
   experiments/<id>.json         mutable pointer: one experiment (variant catalog + annotation + results)
 ```
 
-Three mutable levels; everything else is content-addressed. This mirrors a refgetstore
+Four mutable levels; everything else is content-addressed. `overlaps/` is derived: it can be
+rebuilt from the catalogs, and a store without it is complete. This mirrors a refgetstore
 (`rgstore.json` -> `collections/` -> `sequences/`) on purpose.
 
 **Write order.** Objects first, then pointers, then `store.json`. `Store.write_pointer` refuses a
@@ -113,6 +116,7 @@ pointer that names it.
 | `qbr` | rsID index, one per variant catalog | 8 |
 | `qbx` | variant index, one per variant catalog | 9 |
 | `qgl` | gene lookup, one per annotation | 10 |
+| `qbo` | catalog overlap index, one per store (section 19) | 11 |
 | `arrow.zst` | annotation gene and exon tables and their per-chromosome genes and exon models, experiment search index and its per-chromosome parts, GWAS bin summary | no header |
 
 Kind 3 is unused in v1 (v0's detail-less sQTL kind). Kinds 4-6 keep v0's numbers for the same
@@ -1043,7 +1047,7 @@ TOPCHeF object byte for byte as it was (pipeline/README.md, "Experiment modulari
 | | v0 | v1 |
 |---|---|---|
 | scope | one study | N experiments over M variant catalogs |
-| naming | `<stem>.<16 hex of sha256>.<ext>`, `manifest.json` | `<sha512t24u>.<ext>`, three pointer levels + `store.json` |
+| naming | `<stem>.<16 hex of sha256>.<ext>`, `manifest.json` | `<sha512t24u>.<ext>`, four pointer levels + `store.json` |
 | header | 32 bytes, version 0 | 64 bytes, version 1, `seq_digest` added, reserved 4 bytes at 60 |
 | genome | only in `manifest.reference` | in every header, plus variant catalog table checked against a refgetstore |
 | alleles | `A1`/`A2` as given | `ref`/`alt`, ref = reference base, `af`/`beta` ALT-relative |
@@ -1082,6 +1086,134 @@ the R2 upload) is in this repo's git history at commit `c62bca3`.
 
 ## 18. Open
 
-1. `store.json` `refget` URLs are written empty; the VRS-id index is reserved, not built.
+1. `store.json` `refget` URLs are written empty; the VRS-id index is reserved, not built. The
+   overlap index (section 19) matches sites across catalogs *within* one store; VRS ids would match
+   them across stores, and are still the thing that is missing.
 2. The v0 bridges (`pipeline/verify_v0.py`, `pipeline/bench_store.py`, `pipeline/adapters/verify_topchef.py`,
    with `packfmt_v0.py` and `packtool.py`) go away with the frozen v0 build.
+
+## 19. Catalog overlap index
+
+One object per store (`overlap.build`), naming a set of variant catalogs and recording, for every
+site any of them holds, which of them hold it. It answers three questions the store could otherwise
+only answer by merging catalogs by hand: whether a site is in a given catalog, how far two catalogs
+overlap, and what a site's vidx is in another catalog. `crosscat` (section 11) samples and checks;
+this indexes and counts.
+
+The index is **derived**: it can be rebuilt from the catalogs at any time, and a store without one
+is complete. It is not part of any catalog's or experiment's identity.
+
+### `overlaps/<id>.json`
+
+```json
+{"id": "grch38_heart", "object": "<digest>.qbo",
+ "collection_digest": "EiFob05aCWgVU_B_Ae0cypnQut3cxUP1",
+ "catalogs": [{"id": "gtex_v8_heart_lv_grch38", "identity_digest": "<32>", "n_sites": 9613073},
+              {"id": "topchef_grch38", "identity_digest": "<32>", "n_sites": 9182261}],
+ "mask_width": 1, "chunk": 65536, "union": 0,
+ "pairs": [{"a": "gtex_v8_heart_lv_grch38", "b": "topchef_grch38",
+            "shared": 0, "jaccard": 0.0, "a_only": 0, "b_only": 0}],
+ "by_chrom": {"chr22": {"union": 148485, "shared": {"gtex_v8_heart_lv_grch38|topchef_grch38": 110598}}},
+ "conflicts": {"shared_positions_no_shared_allele_pair": 0, "examples": []},
+ "normalisation_suspects": {"count": 0, "examples": []}}
+```
+
+- `catalogs` is sorted by id and **fixes the bit order**: catalog *i* in this list is bit *i* of
+  every mask. Its `identity_digest` is copied at build time, which is what makes a stale index
+  detectable: rebuild a catalog and its digest changes, and `validate` fails rather than the index
+  silently describing a store that no longer exists.
+- Every catalog named must be in the store and carry the same `collection_digest`. An index never
+  spans sequence collections: sites on different references are not comparable (section 7).
+- `pairs` is every unordered pair, `by_chrom` the same per chromosome. Both are O(k²) in this
+  document and in nothing else.
+- `conflicts` counts positions where two catalogs both have a site but share no `(ref, alt)` pair.
+  These are ordinarily real: different variants at one position. They are reported because a sudden
+  rise in them is the signature of an ingestion that got allele orientation wrong.
+- `normalisation_suspects` are indel pairs in different catalogs, within a short window, with the
+  same length change and no shared allele pair — candidates for one event written two ways
+  (section 5 does not require left-aligned indels). **A suspect is not a verdict**: confirming one
+  needs the reference, so the count is a prompt to look, never a claim of identity.
+
+### Object (kind 11, `.qbo`)
+
+```
+[64-byte header][directory][union pages][mask chunks]
+```
+
+Header: chromosome `all`, count = catalogs (k, 1..64), page size = union sites per page (512),
+`n_cis` 0, `seq_digest` = the collection digest.
+
+**Union order** is section 5's canonical order — chromosomes by `seq_digest` in ASCII order, then
+`pos`, then `ref`, then `alt`, byte-wise — the same order `catalog_identity` digests. It is
+deliberately not any catalog's vidx order, and a reader must not assume the two agree.
+
+**Directory** (`overlap.encode_directory`), all u32 unless stated:
+
+```
+0    4 bytes  magic "QBO1"
+4    u32      n_union            sites in the union
+8    u32      page_size P        (512)
+12   u32      chunk              union sites per mask chunk (65536)
+16   u32      n_chunks           ceil(n_union / chunk)
+20   u8       mask_width         bytes per mask: 1, 2, 4 or 8
+21   u8       k                  catalogs (= header count)
+22   2 bytes  reserved, zero
+24   u32      n_chrom
+28   per chromosome, in ASCII seq_digest order:
+       32 bytes seq_digest, u32 n_union_chrom, u32 first_union_index
+     u32 page_off[n_pages + 1]            byte offset of each union page; last = mask area start
+     u32 page_first_position[n_pages]
+     u32 chunk_off[n_chunks + 1]          byte offset of each mask chunk; last = file size
+     u32 prefix[k][n_chunks]              set bits of catalog i strictly before chunk c
+     per catalog i, u32 n_breaks[i], then n_breaks[i] x {u32 union_index, u32 vidx}
+```
+
+**Union pages** never span chromosomes: each chromosome starts a new page, so a chromosome with
+`n` union sites has `ceil(n / P)` pages and `page_first_position` is a position on that chromosome.
+Pages hold the site key only — position delta, allele code, heap — in the layout of a
+variants page (section 5) with the attribute columns omitted. No `af`, `ma_samples`, `ma_count`,
+`rs_number` or `match`: those describe a cohort, not a site, and they live in the catalogs.
+
+**Mask chunks**: one zstd frame per chunk, decompressing to `mask_width * n` bytes for the chunk's
+`n` union sites. Mask bit *i* is set when catalog *i* holds that site. `mask_width` is the smallest
+of 1, 2, 4, 8 that holds k bits. Masks repeat heavily — most sites sit in all catalogs or in one
+recurring subset — so a chunk usually compresses far below a byte a site.
+
+### Membership, rank and vidx
+
+**Membership** is one chunk read: chunk `u // chunk`, mask at offset `(u % chunk) * mask_width`.
+
+**Rank** — how many of catalog *i*'s sites precede union index `u` — is
+`prefix[i][u // chunk]` plus the set bits of *i* in that chunk below `u % chunk`. One table lookup
+and a scan bounded by one chunk.
+
+**vidx is not rank.** A catalog numbers each chromosome's cis sites first, sorted by
+`(pos, ref, alt)`, and then its trans-only sites, sorted the same way; union order interleaves the
+two. So rank gives the site's index among that catalog's sites *in canonical order*, which equals
+its vidx only on chromosomes with no trans-only site. The breakpoint table carries the correction:
+`{union_index, vidx}` pairs marking the start of each run over which `vidx - rank` is constant.
+A reader takes the last breakpoint at or below `u` and returns `vidx_first + (rank(i, u) -
+rank(i, union_index_first))`. A catalog whose chromosomes are all cis has one breakpoint per
+chromosome; TOPCHeF, with 19 trans-only sites on chr22, has a handful more.
+
+An implementation that returns `rank` as a vidx passes every test built from a catalog with no
+trans-only section, and is wrong on TOPCHeF. `test_overlap.py` pins the case.
+
+### What `Store.validate` checks
+
+14. Every overlap pointer names catalogs that are in the store, each with the pointer's recorded
+    `identity_digest` and a `collection_digest` equal to the pointer's; the object's header has kind
+    11, chromosome `all`, that collection digest, and count = k; `mask_width` is the smallest legal
+    width for k; the directory's chromosome list is the union of the catalogs' chromosomes in ASCII
+    `seq_digest` order; the union decodes to exactly the merge of the catalogs' sites; each
+    catalog's set-bit count equals its `n_sites`; `prefix` agrees with a scan of the masks; and
+    every breakpoint reproduces the vidx the catalog's own pages give for that site.
+
+`gc` never deletes an object an overlap pointer names.
+
+### Scale
+
+The mask ceiling is **64 catalogs**; past that the masks should become one bitmap per catalog and
+this section needs rewriting rather than stretching. The union grows sub-linearly in the number of
+catalogs — on chr22 two catalogs union to 1.08x the larger of them — so it approaches the variant
+set of the imputation panel the studies share, not the sum of their sites.

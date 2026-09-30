@@ -53,6 +53,13 @@ for e in $EXPERIMENTS; do
   echo "results $EXP done $(date -Is)"
 done
 set +e
+# the catalog overlap index (SPEC section 19), over every catalog in the store. It is derived, so it
+# is rebuilt whenever the catalogs may have changed and always before validate, which fails on an
+# index whose catalogs carry a different identity than the one it was built against.
+# OVERLAP= (empty) skips it; OVERLAP=<id> names it.
+OVERLAP="${OVERLAP-grch38}"
+[ -n "$OVERLAP" ] && T overlap uv run python -m pipeline.overlap build --store "$STORE" --id "$OVERLAP"
+
 T validate uv run python - "$STORE" <<'EOF'
 import sys
 from pathlib import Path

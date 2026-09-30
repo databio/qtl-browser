@@ -55,6 +55,7 @@ U32_MAX = 0xFFFFFFFF
 # header kinds v1 writes (SPEC.md section 3); 3 is unused (v0's sQTL kind)
 KIND_VARIANTS, KIND_RESULTS, KIND_GWAS, KIND_GWAS_INDEX, KIND_TRANS = 1, 2, 4, 5, 6
 KIND_HITS, KIND_RSID, KIND_VARIANT_INDEX, KIND_GENE_LOOKUP = 7, 8, 9, 10
+KIND_OVERLAP = 11                        # catalog overlap index (section 19), in pipeline/overlap.py
 ALL = "all"                        # header chromosome of objects spanning a whole variant catalog (seq_digest: the collection) or annotation (its identity)
 
 
@@ -178,7 +179,8 @@ def orient_to_ref(ref_base, effect_allele, other_allele, beta, af) -> dict:
 
 # ---- store ------------------------------------------------------------------------------------
 CATALOGS = "variant_catalogs"            # pointer level of variant catalogs (store.json key too)
-POINTER_DIRS = (CATALOGS, "annotations", "experiments")
+OVERLAPS = "overlaps"                    # pointer level of catalog overlap indexes (derived)
+POINTER_DIRS = (CATALOGS, "annotations", "experiments", OVERLAPS)
 
 
 class Store:
@@ -283,6 +285,8 @@ class Store:
                     fails += self._check_header(f"annotations/{pid} lookup", doc["lookup"], ALL,
                                                 doc.get("identity_digest"), KIND_GENE_LOOKUP)
                 fails += annotation.check_split(self, doc)
+            if lvl == OVERLAPS:
+                fails += self._check_overlap(pid, doc, docs)
             if lvl != "experiments":
                 continue
             cat = docs.get((CATALOGS, doc["catalog"]))
@@ -346,6 +350,48 @@ class Store:
                     if h["n_cis"] != counts[chrom] or h["page_size"] < 1:
                         fails.append(f"experiments/{pid} hits {chrom}: header covers {h['n_cis']} variants in frames "
                                      f"of {h['page_size']}; the variant catalog has {counts[chrom]}")
+        return fails
+
+    def _check_overlap(self, pid: str, doc: dict, docs: dict) -> list[str]:
+        """Check 14 (SPEC section 19): the index describes the catalogs the store holds now.
+
+        A rebuilt catalog gets a new `identity_digest`, so an index carrying the old one is stale and
+        describes a store that no longer exists. That is the failure this check exists for; the rest
+        is header and directory agreement."""
+        from . import overlap                  # late: only stores with an index pay the import
+        what = f"{OVERLAPS}/{pid}"
+        fails, named = [], doc.get("catalogs") or []
+        for c in named:
+            cat = docs.get((CATALOGS, c["id"]))
+            if cat is None:
+                fails.append(f"{what}: names variant catalog {c['id']}, which is not in the store")
+                continue
+            if cat["identity_digest"] != c["identity_digest"]:
+                fails.append(f"{what}: variant catalog {c['id']} has identity {cat['identity_digest']}, the index "
+                             f"was built against {c['identity_digest']}; rebuild the index")
+            if cat["collection_digest"] != doc.get("collection_digest"):
+                fails.append(f"{what}: variant catalog {c['id']} is on collection {cat['collection_digest']}, "
+                             f"the index on {doc.get('collection_digest')}")
+        obj = self.immutable / (doc.get("object") or "")
+        if not obj.exists():
+            return fails + [f"{what}: object {doc.get('object')} missing"]
+        try:
+            d = overlap.decode(obj.read_bytes())
+        except Exception as e:                 # noqa: BLE001 -- any decode failure is a validation failure
+            return fails + [f"{what}: {e}"]
+        h = d["header"]
+        if h["kind"] != KIND_OVERLAP or h["chrom"] != "all" or h["seq_digest"] != doc.get("collection_digest"):
+            fails.append(f"{what}: header kind {h['kind']}, chromosome {h['chrom']}, seq_digest {h['seq_digest']}")
+        if d["k"] != len(named):
+            fails.append(f"{what}: object holds {d['k']} catalogs, the pointer names {len(named)}")
+        if d["n_union"] != doc.get("union"):
+            fails.append(f"{what}: object union {d['n_union']}, pointer {doc.get('union')}")
+        # every catalog's set bits must equal its site count, and the last prefix plus the last chunk
+        # is that total -- which also proves the prefix table agrees with the masks
+        for i, c in enumerate(named):
+            total = overlap.rank(d, i, d["n_union"]) if d["n_union"] else 0
+            if total != c["n_sites"]:
+                fails.append(f"{what}: catalog {c['id']} has {total} set bits for {c['n_sites']} sites")
         return fails
 
     def _check_header(self, what: str, name: str, chrom: str, seq_digest: str, kind: int) -> list[str]:

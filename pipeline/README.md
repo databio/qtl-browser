@@ -11,6 +11,7 @@ QTLB_DERIVED=<tree> sbatch adapter.sbatch                          # TOPCHeF ada
 QTLB_STORE=<store> EXPERIMENTS="topchef:<tree>/_tables/topchef" sbatch store.sbatch   # store build + validate + verify_v0
 QTLB_STORE=<store> sbatch bench_store.sbatch                       # v0 vs v1 sizes and read speed
 uv run python -m pipeline.qtlstore validate | remove-experiment ID | gc [--dry-run] | crosscat A B --store <store>
+uv run python -m pipeline.overlap build --store <store> --id <id> --catalogs A B ...   # catalog overlap index
 
 # the shared input tables the TOPCHeF adapter and its gate read (build.sbatch)
 uv run python -m pipeline steps                                    # list steps in order
@@ -19,7 +20,8 @@ uv run python -m pipeline build --step nominal --force
 
 # tests (no data needed)
 uv run python -m pipeline.test_qtlstore      # also test_catalog, test_annotation, test_results, test_dof,
-                                             # test_gtf, test_refcheck, adapters.test_topchef, adapters.test_eqtl_catalogue
+                                             # test_gtf, test_refcheck, test_overlap,
+                                             # adapters.test_topchef, adapters.test_eqtl_catalogue
 uv run python -m pipeline.test_packfmt --synthetic && uv run python -m pipeline.test_packtool   # the v0 reader
 
 uv run python -m pipeline.packtool header | blocks | block | variants | frames | trans | gwas | gwas-index | check ...   # inspect frozen v0 packs
@@ -47,6 +49,7 @@ writes into the frozen v0 tree (`adapter.sbatch` refuses it). Iterate with
 | Only the GWAS bin table (`gwas_bins.parquet`, v0's `gwas_dcm_bins.json` bins; seconds) | `ADAPTER=dcm_gwas STEPS="adapter contract" QTLB_DERIVED=<tree> sbatch adapter.sbatch --bins-only` | `adapters/dcm_gwas.py` |
 | Store build | `QTLB_CHROMS=all QTLB_STORE=<store> EXPERIMENTS="topchef:<tree>/_tables/topchef:gencode_v34 gtex_v8_heart_lv:<tree>/_tables/gtex_v8_heart_lv" CROSSCAT="topchef_grch38 gtex_v8_heart_lv_grch38" sbatch --time=6:00:00 --mem=64G store.sbatch` | `annotation.py`, `catalog.py`, `results.py`, `gwas.py`, `verify_v0.py` |
 | Store maintenance | `uv run python -m pipeline.qtlstore validate \| remove-experiment ID \| gc [--dry-run] \| crosscat A B --store <store>` | `qtlstore.py` |
+| Catalog overlap index | `uv run python -m pipeline.overlap build --store <store> --id <id> [--catalogs A B ...]` (run by `store.sbatch`; `OVERLAP=` skips it) | `overlap.py` |
 | Per-chromosome objects for a store built before them | `uv run python -m pipeline.annotation add-split --store <store> --id <annotation>`, then `uv run python -m pipeline.results add-split --store <store> --id <experiment>` (rewrites the pointer; no other object changes) | `annotation.py`, `results.py` |
 | Benchmark, v0 vs v1 | `QTLB_STORE=<store> sbatch bench_store.sbatch`; `EXPERIMENT=gtex_v8_heart_lv ... sbatch bench_store.sbatch --no-reads` for a study with no v0 twin | `bench_store.py` |
 
@@ -72,7 +75,7 @@ PASS/FAIL line per `CONTRACT.md` rule, exits 1 on any failure).
   read medians/p95 for gene and intron blocks, the gene page's trans table and GWAS window, and startup cost;
   writes `bench_store.{json,md}` under `/scratch/ns5bc/qtl-browser/bench/`. Results are kept in the
   `results_analysis/qtlb_format` brick under `data/` (genome-wide: `data/format_v0_v1_2026-09-24/`).
-  The browser side has its own smoke suites and gene-page benchmark in `ui/bench/`.
+  The browser side has its own smoke suites and gene-page benchmark in `ui-topchef/bench/`.
 
 ### Experiment modularity
 
@@ -83,6 +86,14 @@ uv run python -m pipeline.qtlstore remove-experiment gtex_v8_heart_lv --store <s
 uv run python -m pipeline.qtlstore gc --store <store> [--dry-run]                      # delete objects no pointer names
 uv run python -m pipeline.qtlstore validate --store <store>
 ```
+
+The **catalog overlap index** (`overlap.py`, SPEC.md section 19) records, for every site any of the
+store's variant catalogs holds, which of them hold it: membership in one read, a catalog's vidx for a
+shared site, and exact pairwise overlap counts written into the pointer, so the statistics need no
+object read. It is derived -- rebuild it any time, and a store without one is complete -- and it is
+rebuilt before `validate`, which fails on an index whose catalogs no longer carry the identity it was
+built against. Its pointer also counts positions two catalogs hold with no shared allele pair, and
+indels that may be one event written two ways; the latter are suspects to look at, never a verdict.
 
 `remove-experiment` deletes only `experiments/<id>.json` and rewrites `store.json`; the experiment's
 variant catalog and annotation pointers stay (another experiment may use them; delete those pointer
