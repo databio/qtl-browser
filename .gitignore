@@ -14,11 +14,12 @@ data/**
 .venv/
 __pycache__/
 
-# ui app
-ui/node_modules/
-ui/dist/
-ui/bench/out/
-ui/bench/results/
+# ui apps (ui-topchef is the deployed one, ui the general multi-study fork; each also has its own
+# .gitignore covering node_modules and dist)
+ui*/node_modules/
+ui*/dist/
+ui*/bench/out/
+ui*/bench/results/
 
 # R / RStudio session files
 .Rhistory
