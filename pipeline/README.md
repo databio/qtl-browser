@@ -75,7 +75,7 @@ PASS/FAIL line per `CONTRACT.md` rule, exits 1 on any failure).
   read medians/p95 for gene and intron blocks, the gene page's trans table and GWAS window, and startup cost;
   writes `bench_store.{json,md}` under `/scratch/ns5bc/qtl-browser/bench/`. Results are kept in the
   `results_analysis/qtlb_format` brick under `data/` (genome-wide: `data/format_v0_v1_2026-09-24/`).
-  The browser side has its own smoke suites and gene-page benchmark in `ui-topchef/bench/`.
+  The browser side has its own smoke suites and gene-page benchmark in `ui/bench/`.
 
 ### Experiment modularity
 

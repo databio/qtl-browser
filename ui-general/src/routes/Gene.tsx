@@ -11,6 +11,8 @@ import { Segmented } from '@/components/segmented'
 import { DetailSkeleton, Empty, TableSkeleton, TabSkeleton, Unavailable } from '@/components/states'
 import CredibleSetTable from '@/components/CredibleSetTable'
 import CisTable from '@/components/CisTable'
+import { colocLocus, type LocusColoc } from '@/lib/coloc-abf'
+import { sliceRun } from '@/lib/store-decode'
 import TransTable from '@/components/TransTable'
 import LocusPlot, { LocusLegend } from '@/components/LocusPlot'
 import { COLOC_EQTL_GENES, COLOC_SQTL_GENES } from '@/lib/coloc'
@@ -151,14 +153,72 @@ function GeneTable({ g }: { g: GeneRow }) {
   return <div className="mb-8 grid items-start gap-4 md:grid-cols-2"><KvTable rows={geneRows(g, annotation)} /></div>
 }
 
-/** Reserved slot for the coloc results (PP.H4, sentinel) against the Jurgens 2024 DCM GWAS.
- *  The Zenodo record has single-trait SuSiE fine-mapping only, so until the authors share
- *  the coloc tables the section can only restate the hard-coded gene list. */
-function ColocSection({ sym, qtlType }: { sym: string; qtlType: 'e' | 's' }) {
+/**
+ * coloc.abf against the Jurgens 2024 DCM GWAS, computed here from the two windows the page has
+ * already downloaded (lib/coloc-abf.ts) -- no extra request, and about a millisecond.
+ *
+ * The preprint used coloc.abf, so these are comparable to its table; at coloc's default priors
+ * they reproduce its gene list exactly (every listed gene above 0.8, every other below 0.65).
+ * `credible95` is shown beside PP.H4 on purpose: where the shared-variant posterior is spread over
+ * tens of variants, PP.H4 is a claim about the region and is also the regime where the p12 prior
+ * does much of the work, so the two numbers have to be read together.
+ */
+function ColocSection({ sym, qtlType, gp, phenotypeId }: {
+  sym: string; qtlType: 'e' | 's'; gp: GenePack; phenotypeId?: string
+}) {
   const listed = (qtlType === 'e' ? COLOC_EQTL_GENES : COLOC_SQTL_GENES).includes(sym)
+  const hasGwas = useStoreInfo()?.hasGwas ?? false
+  const [res, setRes] = useState<LocusColoc | null | 'running'>('running')
+  useEffect(() => {
+    let alive = true
+    setRes('running')
+    Promise.all([qtlType === 's' && phenotypeId ? gp.intron(phenotypeId) : gp.block, gp.variants, gp.gwasCols])
+      .then(([block, range, gwas]) => {
+        const run = block && range && block.varStart != null ? sliceRun(range, block.varStart, block.nRows, block) : null
+        if (alive) setRes(colocLocus(block, run, gwas))
+      })
+      .catch((e: Error) => { console.error(e); if (alive) setRes(null) })
+    return () => { alive = false }
+  }, [gp, qtlType, phenotypeId])
+
+  const note = listed ? 'Reported as colocalized in the preprint (PP.H4 > 0.8).' : 'Not reported as colocalized in the preprint.'
   return (
-    <SectionPanel title="GWAS colocalization" description="coloc with the Jurgens et al. 2024 DCM GWAS.">
-      <Empty label={listed ? 'Reported as colocalized (PP.H4 > 0.8); coloc statistics not yet available.' : 'No reported colocalization.'} />
+    <SectionPanel title="GWAS colocalization"
+      description={<>coloc.abf against the Jurgens et al. 2024 DCM GWAS, computed from this window. {note}</>}>
+      {!hasGwas ? <Unavailable what="DCM GWAS data" />
+        : res === 'running' ? <TableSkeleton columns={[{ w: 'w-16' }, { w: 'w-12', align: 'right' }]} rows={5} />
+        : res === null ? <Empty label="No variants in this window are shared with the DCM GWAS." />
+        : (
+          /* labelWidth: these labels are longer than the page's other KvTables and the values are
+             short numbers, so the label column gets the room the value column does not need */
+          <div className="grid items-start gap-4 md:grid-cols-2">
+            <KvTable align="right" labelWidth="w-52" rows={[
+              { label: 'H0 · no causal variant', value: fmtNum(res.pp[0], 3) },
+              { label: 'H1 · QTL only', value: fmtNum(res.pp[1], 3) },
+              { label: 'H2 · GWAS only', value: fmtNum(res.pp[2], 3) },
+              { label: 'H3 · distinct variants', value: fmtNum(res.pp[3], 3) },
+              { label: 'H4 · shared variant',
+                value: <span className="font-medium text-base-content">{fmtNum(res.pp[4], 3)}</span> },
+            ]} />
+            <KvTable align="right" labelWidth="w-52" rows={[
+              // "coloc" rather than plain "credible set": the SuSiE section above is single-trait
+              // fine-mapping of the QTL, with LD and several possible signals, while this is the
+              // shared-variant posterior under H4, with no LD and one causal variant. The two
+              // coincide only where the locus is sharp, and the names must not suggest otherwise.
+              { label: 'coloc 95% credible set', value: `${fmtInt(res.credible95)} variant${res.credible95 === 1 ? '' : 's'}` },
+              { label: 'Top shared variant', value: (() => {
+                const id = res.top.rsNumber ? `rs${res.top.rsNumber}` : `${gp.hit.chr}:${res.top.position}`
+                return <Link className="link-quiet tabular-nums" to={`/variant/${id}`}>{id}</Link>
+              })() },
+              { label: 'Top variant posterior', value: fmtNum(res.top.snpPP4, 3) },
+              { label: 'Shared with the GWAS', value: `${fmtInt(res.nShared)} of ${fmtInt(res.nQtlRows)}` },
+              ...(res.nNotTested ? [{ label: 'Not tested here', value: fmtInt(res.nNotTested) }] : []),
+              ...(res.nUnderflow ? [{ label: 'p underflowed', value: <span className="text-warning">{fmtInt(res.nUnderflow)}</span> }] : []),
+              ...(res.nNoStats ? [{ label: 'No standard error', value: fmtInt(res.nNoStats) }] : []),
+              { label: 'Priors', value: <span className="tabular-nums">p1 {res.priors.p1} · p2 {res.priors.p2} · p12 {res.priors.p12}</span> },
+            ]} />
+          </div>
+        )}
     </SectionPanel>
   )
 }
@@ -208,7 +268,7 @@ function EqtlTab({ hit, gp, d, transTable }: { hit: SearchHit; gp: GenePack; d: 
       <SectionPanel title="SuSiE 95% credible sets">
         {cs === null ? <TableSkeleton columns={[{ w: 'w-4' }, { w: 'w-12' }, { w: 'w-8', align: 'right' }, { w: 'w-24' }, { w: 'w-10', align: 'right' }, { w: 'w-10', align: 'right' }, { w: 'w-16', align: 'right' }]} rows={2} /> : <CredibleSetTable rows={cs} />}
       </SectionPanel>
-      <ColocSection sym={sym} qtlType="e" />
+      <ColocSection sym={sym} qtlType="e" gp={gp} />
       <SectionPanel title="cis associations" description={<>Every variant within ±1 Mb of the TSS; rows tinted when the variant is in a credible set. <RoundingNote /> Click a row to open the variant.</>}>
         <CisTable table={locus.name} failed={locus.failed} chr={hit.chr} qtlType="e" fileStem={`${sym}_cis_eqtl`} />
       </SectionPanel>
@@ -290,7 +350,7 @@ function SqtlIntrons({ hit, gp, d, transTable, phens }: { hit: SearchHit; gp: Ge
           <SectionPanel title="SuSiE 95% credible sets">
             {cs === null ? <TableSkeleton columns={[{ w: 'w-4' }, { w: 'w-12' }, { w: 'w-8', align: 'right' }, { w: 'w-24' }, { w: 'w-10', align: 'right' }, { w: 'w-10', align: 'right' }, { w: 'w-16', align: 'right' }]} rows={2} /> : <CredibleSetTable rows={cs} />}
           </SectionPanel>
-          <ColocSection sym={sym} qtlType="s" />
+          <ColocSection sym={sym} qtlType="s" gp={gp} phenotypeId={sel.phenotype_id} />
           <SectionPanel title="cis associations" description={<>Every variant within ±1 Mb of the TSS for <b className="font-medium text-base-content/80">this intron</b>; rows tinted when the variant is in a credible set. <RoundingNote /> Click a row to open the variant.</>}>
             <CisTable table={locus.name} failed={locus.failed} chr={hit.chr} qtlType="s" phenotypeId={sel.phenotype_id} fileStem={`${sym}_${sel.cluster_id}_${sel.intron_start}_${sel.intron_end}_cis_sqtl`} />
           </SectionPanel>

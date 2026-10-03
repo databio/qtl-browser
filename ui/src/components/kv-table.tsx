@@ -2,8 +2,17 @@ import type { ReactNode } from 'react'
 
 export type KvRow = { label: string; value: ReactNode }
 
-/** Two-column key/value metadata table: bordered, zebra-striped. */
-export function KvTable({ title, rows, align = 'left' }: { title?: ReactNode; rows: KvRow[]; align?: 'left' | 'right' }) {
+/**
+ * Two-column key/value metadata table: bordered, zebra-striped.
+ *
+ * `labelWidth` is the label column's preferred width (auto table layout, so it is a preference, not
+ * a cap). The default suits the page's usual short labels; a table with longer labels and short
+ * numeric values wants more, because side by side in a grid there is no slack for the column to
+ * grow into and every label wraps instead.
+ */
+export function KvTable({ title, rows, align = 'left', labelWidth = 'w-44' }: {
+  title?: ReactNode; rows: KvRow[]; align?: 'left' | 'right'; labelWidth?: string
+}) {
   if (!rows.length) return null
   return (
     <div className="space-y-2">
@@ -13,7 +22,7 @@ export function KvTable({ title, rows, align = 'left' }: { title?: ReactNode; ro
           <tbody>
             {rows.map(({ label, value }, i) => (
               <tr key={label} className={i % 2 === 1 ? 'bg-base-200' : ''}>
-                <td className="w-44 align-top font-medium text-base-content/60">{label}</td>
+                <td className={`${labelWidth} align-top font-medium text-base-content/60`}>{label}</td>
                 <td className={`text-base-content/70 ${align === 'right' ? 'text-right tabular-nums' : ''}`}>{value}</td>
               </tr>
             ))}

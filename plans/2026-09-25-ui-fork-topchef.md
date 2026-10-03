@@ -2,7 +2,7 @@
 date: 2026-09-25
 status: complete
 model: Claude Opus 5 (1M context)
-description: Fork the browser into ui-topchef (the deployed TOPCHeF app) and ui (general multi-study), on the refget branch and PR #2
+description: Fork the browser into ui (the deployed TOPCHeF app, unmoved) and ui-general (multi-study), on the refget branch and PR #2
 ---
 
 # Fork the UI: `ui-topchef` keeps shipping, `ui` goes multi-study
@@ -155,3 +155,27 @@ the deployed app even though both directories now hold the same content.
 **The one thing still open is the push gate**: Workers Builds root directory `ui` -> `ui-topchef` in
 the databio account, and the same setting in Sam's own topchef account, which builds from `main`.
 Nothing in this branch may be pushed until both are moved.
+
+## Inverted, 2026-10-02
+
+Sam flipped the naming: **`ui/` stays the deployed TOPCHeF app and the general fork is
+`ui-general/`**, to be renamed to `ui/` along with the deployment "in a week or so" once it has made
+progress. This is the inversion raised and declined on 2026-09-25, taken now that the coloc work has
+gone into the deployed app and the dashboard change has not happened.
+
+**It removes the push gate.** Workers Builds keeps root directory `ui`, which still holds the
+deployed app, so nothing in either Cloudflare account has to change before this branch is pushed.
+That was the only thing blocking it.
+
+**It moves the cost to the flip.** `ui-general/` becomes the deployed app at the rename, so it has
+to carry everything `ui/` does by then or the flip is a regression.
+
+The one divergence that existed -- the coloc.abf work (`lib/coloc-abf.ts`, `gwasCols` on
+`GenePack`, the computed `ColocSection`, the `KvTable` `labelWidth`) which landed in `ui/` after the
+fork -- was ported the same day, while it was four files and `diff -rq ui/src ui-general/src` was
+empty afterwards. From here the two diverge again with every change to either, and nothing checks:
+`diff -rq ui/src ui-general/src` is the whole audit, and it is worth running before the flip.
+
+References updated back: `README.md`, `pipeline/README.md`, `SPEC.md` §Status, `yoke.toml`,
+`.gitignore`, `ui/wrangler.jsonc` (its comment now records that the dashboard setting moves only at
+the flip), and `ui-general/README.md`.

@@ -14,7 +14,7 @@ data/**
 .venv/
 __pycache__/
 
-# ui apps (ui-topchef is the deployed one, ui the general multi-study fork; each also has its own
+# ui apps (ui is the deployed one, ui-general the multi-study fork; each also has its own
 # .gitignore covering node_modules and dist)
 ui*/node_modules/
 ui*/dist/

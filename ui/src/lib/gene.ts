@@ -32,6 +32,9 @@ export interface GenePack {
   /** request 3: the GWAS rows over the gene's window as a DuckDB table (empty without a GWAS or rows
    *  there); dropped when the gene leaves the cache */
   gwas: Promise<string>
+  /** the same window's decoded columns, for readers that do not go through SQL (coloc); null when
+   *  the experiment has no GWAS or no rows in the window. No extra request: one decode, two uses. */
+  gwasCols: Promise<GwasColumns | null>
   /** the genes row and exon model: no request beyond the two above and the chromosome's exon models */
   detail: Promise<GeneDetail>
   /** the sQTL tab: +1 request for the span of the gene's intron blocks, memoized */
@@ -64,8 +67,10 @@ export function loadGwasIndex(): Promise<GwasIndex | null> {
  *  allele after orientation), `nea` REF, and beta and eaf describe ALT (SPEC section 10). */
 const GWAS_DDL = 'position INTEGER, ea VARCHAR, nea VARCHAR, beta FLOAT, se FLOAT, p DOUBLE, eaf FLOAT, rsid VARCHAR, n INTEGER'
 
-/** The GWAS rows in [lo, hi] on the gene's chromosome, decoded once and inserted as a table. */
-async function gwasTable(hit: SearchHit, lo: number | null, hi: number | null): Promise<string> {
+/** The GWAS rows in [lo, hi] on the gene's chromosome, decoded once and inserted as a table. The
+ *  decoded columns come back alongside the table name: coloc (lib/coloc-abf.ts) reads them straight
+ *  rather than through SQL, and nothing re-fetches. */
+async function gwasTable(hit: SearchHit, lo: number | null, hi: number | null): Promise<{ name: string; cols: GwasColumns | null }> {
   const detail = { gene_id: hit.gene_id }
   const [s, index] = await Promise.all([getStore(), loadGwasIndex()])
   const f = gwasFile(s, hit.chr)
@@ -85,7 +90,7 @@ async function gwasTable(hit: SearchHit, lo: number | null, hi: number | null): 
   }), 'stream') : null
   const name = tableName('gwas')
   await insertArrow(name, ipc ?? GWAS_DDL, { ...detail, part: 'gwas' })
-  return name
+  return { name, cols }
 }
 
 // ---- rows of a block --------------------------------------------------------------------------
@@ -162,10 +167,12 @@ function openGene(hit: SearchHit): GenePack {
     return fetchDecoded('store:variants', detail0, f.name, off, len, (b, what) => decodeVariantRange(b, len, what))
   })
   // the GWAS window spans every run of the gene's phenotypes, as the variants range does
-  const gwas = phen.then(ps => {
+  const gwasBoth = phen.then(ps => {
     const runs = ps.filter(p => p.w_lo != null && p.w_hi != null)
     return gwasTable(hit, runs.length ? Math.min(...runs.map(p => p.w_lo!)) : null, runs.length ? Math.max(...runs.map(p => p.w_hi!)) : null)
   })
+  const gwas = gwasBoth.then(x => x.name)
+  const gwasCols = gwasBoth.then(x => x.cols)
   const detail = Promise.all([block, variants, exonModel(hit.gene_id, hit.chr)])
     .then(([b, v, ex]) => ({ gene: geneRow(hit, b, v), exons: ex }))
 
@@ -198,8 +205,8 @@ function openGene(hit: SearchHit): GenePack {
     return b
   })
   // consumers see each rejection when they await; these handlers only keep an unused one quiet
-  for (const p of [block, variants, gwas, detail]) p.catch(() => {})
-  return { hit, block, variants, gwas, detail, splice: () => loadIntrons().then(x => x.list), intron }
+  for (const p of [block, variants, gwas, gwasCols, detail]) p.catch(() => {})
+  return { hit, block, variants, gwas, gwasCols, detail, splice: () => loadIntrons().then(x => x.list), intron }
 }
 
 // the last few genes stay open, so tab switches and back navigation send no request
@@ -215,7 +222,7 @@ export function loadGene(hit: SearchHit): GenePack {
   const gp = openGene(hit)
   genes.set(key, gp)
   const forget = () => { if (genes.get(key) === gp) { genes.delete(key); release(gp) } }
-  for (const p of [gp.block, gp.variants, gp.gwas]) p.catch(forget)
+  for (const p of [gp.block, gp.variants, gp.gwas, gp.gwasCols]) p.catch(forget)
   while (genes.size > CACHE_SIZE) {
     const [k, old] = genes.entries().next().value as [string, GenePack]
     genes.delete(k)

@@ -33,7 +33,7 @@ the experiments comes from; this document spells that one out in full every time
 **Status.** Builders and `Store.validate` exist and pass on a genome-wide two-experiment store
 (`/scratch/ns5bc/qtl-browser/store-genome-v1f` on Rivanna: TOPCHeF, with its trans results and the DCM
 GWAS, and GTEx v8 heart LV). Marked **(future)** below: the VRS-id index and `store.json` refget URLs.
-The browser reader for v1 is `ui-topchef/` (deployed) and `ui/` (the general multi-study fork);
+The browser reader for v1 is `ui/` (deployed) and `ui-general/` (the general multi-study fork);
 this document is their reference.
 
 ## 1. Conventions
@@ -593,8 +593,10 @@ u8 cs_id, 3 zero bytes}` sorted strictly by `(row, cs_id)`, one zstd details fra
 
 - **Rows** are the vidx run `var_start .. var_start + n_rows - 1` covering every nominal row and
   every credible-set site of the phenotype. A vidx in the run the phenotype did not test is a
-  **null row**: nlp code 65535, SE code 0xFFFF. (For TOPCHeF every run is contiguous and has no
-  null rows.) A run never crosses the cis/trans-only boundary; the builder raises if it would.
+  **null row**: nlp code 65535, SE code 0xFFFF. A run is a contiguous vidx range by construction,
+  which does not make it free of null rows: TOPCHeF's FLNC run holds one, a catalog site inside the
+  window that the phenotype did not test and that is not a credible-set site either. A run never
+  crosses the cis/trans-only boundary; the builder raises if it would.
 - **A phenotype with no nominal rows and no credible sets** still gets a block with `n_rows` 0 and a
   search-index row, so a reader can say "no per-variant data published".
 - **Every v1 block has a details frame** (v0's detail-less kind 3 sQTL block is gone).
