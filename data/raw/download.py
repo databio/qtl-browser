@@ -10,8 +10,9 @@
     ./download.py --list          # show status without downloading
     ./download.py --config other.yaml
 
-Downloads resume (curl -C -), md5 is verified when the config gives one, and a
-file that another process is currently writing is skipped rather than clobbered.
+Downloads resume (curl -C -) only when the server proves it honours Range,
+md5 is verified when the config gives one, and a file that another process is
+currently writing is skipped rather than clobbered.
 """
 import argparse
 import hashlib
@@ -67,17 +68,68 @@ def status(dest: Path, entry: dict, md5: str | None) -> str:
     if being_written(dest):
         return "in-progress"
     size = entry.get("size")
-    if size is not None and dest.stat().st_size != size:
-        return "partial"
+    if size is not None:
+        have = dest.stat().st_size
+        if have > size:
+            return "oversize"
+        if have < size:
+            return "partial"
     if md5 is not None:
         return "verified" if md5_of(dest) == md5 else "md5-mismatch"
     return "present"
 
 
-def fetch(url: str, dest: Path) -> None:
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    cmd = ["curl", "-L", "--fail", "--retry", "5", "--retry-delay", "10", "-C", "-", "-o", str(dest), url]
+def honours_range(url: str) -> bool:
+    """True if the server answers a one byte Range request with 206.
+
+    We ask for one real byte instead of reading `Accept-Ranges` from a HEAD.
+    The header is only advisory, and these URLs redirect, so the host that
+    answers the HEAD is not always the host that serves the body.
+    """
+    out = subprocess.run(
+        ["curl", "-sL", "-o", os.devnull, "-w", "%{http_code}", "--max-time", "120", "-r", "0-0", url],
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    return out.endswith("206")
+
+
+def curl(url: str, dest: Path, resume: bool) -> None:
+    cmd = ["curl", "-L", "--fail", "--retry", "5", "--retry-delay", "10"]
+    if resume:
+        cmd += ["-C", "-"]
+    cmd += ["-o", str(dest), url]
     subprocess.run(cmd, check=True)
+
+
+def fetch(url: str, dest: Path, size: int | None = None) -> None:
+    """Download url to dest, resuming only when resuming is safe.
+
+    Do not drop this guard as redundant. On 2026-09-22 a 9.4 GB Zenodo file
+    died at 4.2 GB with curl exit 18. The next run resumed it with `-C -`,
+    Zenodo ignored the Range header and answered 200 with the whole file from
+    byte 0, and curl appended those bytes onto the 4.2 GB already on disk. The
+    result was a 13.4 GB file that still looked merely "partial", so the run
+    after that would have appended again. So: never append onto a file that is
+    already at or past its expected size, only resume when the server proves
+    it honours Range, and treat any overshoot as corruption.
+    """
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    have = dest.stat().st_size if dest.exists() else 0
+    if have and size is not None and have >= size:
+        print(f"  discarding    {dest.name} ({have} bytes, expected {size})")
+        dest.unlink()
+        have = 0
+    if have and not honours_range(url):
+        print(f"  no range      {dest.name}, server will not resume, starting over")
+        dest.unlink()
+        have = 0
+    curl(url, dest, resume=bool(have))
+    if size is not None and dest.exists() and dest.stat().st_size > size:
+        # The server said 206 to the probe but served the whole body anyway.
+        print(f"  overshot      {dest.name}, discarding and fetching from zero")
+        dest.unlink()
+        curl(url, dest, resume=False)
 
 
 def main() -> int:
@@ -108,9 +160,12 @@ def main() -> int:
             if st == "md5-mismatch":
                 print(f"  md5 mismatch, re-downloading {name}")
                 dest.unlink()
+            if st == "oversize":
+                print(f"  bigger than the {entry['size']} bytes expected, re-downloading {name}")
+                dest.unlink()
             print(f"  fetching      {name}  <- {url}")
             try:
-                fetch(url, dest)
+                fetch(url, dest, entry.get("size"))
             except subprocess.CalledProcessError as e:
                 print(f"  FAILED        {name} (curl exit {e.returncode})")
                 failures += 1
@@ -118,6 +173,7 @@ def main() -> int:
             st = status(dest, entry, md5)
             print(f"  {st:13s} {name}")
             if st not in ("verified", "present"):
+                print(f"  FAILED        {name} ({st} after downloading)")
                 failures += 1
     return 1 if failures else 0
 

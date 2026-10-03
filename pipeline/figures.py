@@ -10,7 +10,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 
-from .common import CHROMS, Config, log
+from .common import CHROMS, Config, log, register_search_index
 
 # dataviz reference palette: slot-1 blue for the series, two grays for alternating chromosomes
 BLUE, GRAY_A, GRAY_B, INK, GRID = "#2a78d6", "#b8b7b1", "#d6d5cf", "#52514e", "#e1e0d9"
@@ -39,9 +39,9 @@ def manhattan(cfg: Config) -> None:
     outdir.mkdir(parents=True, exist_ok=True)
     specs = [
         ("eqtl", "cis-eQTL: one point per gene at its lead variant",
-         f"SELECT chr, lead_position AS pos, pval_beta AS p, is_egene AS sig FROM '{cfg.derived / 'genes.parquet'}' WHERE tested"),
+         f"SELECT chr, lead_position AS pos, pval_beta AS p, is_egene AS sig FROM '{cfg.tables / 'genes.parquet'}' WHERE tested"),
         ("sqtl", "cis-sQTL: one point per splice phenotype at its lead variant",
-         f"SELECT chr, lead_position AS pos, pval_beta AS p, is_sqtl AS sig FROM '{cfg.derived / 'splice_phenotypes.parquet'}'"),
+         f"SELECT chr, lead_position AS pos, pval_beta AS p, is_sqtl AS sig FROM '{cfg.tables / 'splice_phenotypes.parquet'}'"),
     ]
     for name, title, sql in specs:
         df = con.execute(sql).df()
@@ -85,7 +85,8 @@ def density(cfg: Config, bin_bp: int = 1_000_000) -> None:
     con = duckdb.connect()
     offs = chrom_offsets(cfg)
     outdir = cfg.derived.parent / "figures"
-    df = con.execute(f"SELECT chr, tss, is_egene, n_sqtl_sig FROM '{cfg.derived / 'search_index.parquet'}' WHERE tested").df()
+    register_search_index(cfg, con)
+    df = con.execute("SELECT chr, tss, is_egene, n_sqtl_sig FROM search_index WHERE tested").df()
     df = df[df.chr.isin(offs)]
     df["x"] = df.chr.map(lambda c: offs[c][0]) + df.tss
     total = max(o + L for o, L in offs.values())

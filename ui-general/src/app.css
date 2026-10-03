@@ -1,0 +1,143 @@
+@import "tailwindcss";
+
+@plugin "@tailwindcss/typography";
+@plugin "daisyui";
+
+/* "Myocardium": oxblood primary (eQTL), slate blue secondary (sQTL), rose accent (both),
+   espresso ink on plain white. The error red is pushed toward orange so the GWAS bars and
+   alerts never read as the primary. Mock sheet: data/figures/theme_mocks.png */
+@plugin "daisyui/theme" {
+  name: "topchef";
+  default: true;
+  color-scheme: light;
+
+  --color-base-100: #ffffff;
+  --color-base-200: #f4f4f5;          /* neutral grays: the brand hue lives in primary/accent only */
+  --color-base-300: #e4e4e7;
+  --color-base-content: #211e1d;      /* near-neutral ink with a trace of warmth */
+
+  --color-primary: #7a1f2b;           /* oxblood */
+  --color-primary-content: #fbf5f4;
+  --color-secondary: #3f5f8a;         /* slate blue */
+  --color-secondary-content: #f3f6fa;
+  --color-accent: #cf6d8f;            /* rose, pinker than the primary so "both" stays distinct */
+  --color-accent-content: #fff5f8;
+  --color-neutral: #3a2a27;
+  --color-neutral-content: #f5efed;
+
+  --color-info: #3f6f9a;
+  --color-info-content: #f2f7fb;
+  --color-success: #3d7a4f;
+  --color-success-content: #f1f8f3;
+  --color-warning: #c98a2a;
+  --color-warning-content: #2b1d1a;
+  --color-error: #d84a30;             /* orange-red: distinct from the oxblood primary */
+  --color-error-content: #fff4f1;
+
+  --radius-selector: 0.25rem;
+  --radius-field: 0.25rem;
+  --radius-box: 0.5rem;
+  --border: 1px;
+}
+
+@plugin "daisyui/theme" {
+  name: "topchef-dark";
+  prefersdark: true;
+  color-scheme: dark;
+
+  --color-base-100: #1b1a1a;
+  --color-base-200: #151414;
+  --color-base-300: #2d2b2b;
+  --color-base-content: #ece9e7;
+
+  --color-primary: #d97b88;           /* oxblood lifted for dark */
+  --color-primary-content: #2a1216;
+  --color-secondary: #8fb0dc;         /* slate blue lifted */
+  --color-secondary-content: #12203a;
+  --color-accent: #e8a3b8;            /* rose lifted */
+  --color-accent-content: #3a1a26;
+  --color-neutral: #a3948e;
+  --color-neutral-content: #1f1615;
+
+  --color-info: #86b0d6;
+  --color-info-content: #10202f;
+  --color-success: #7fc08f;
+  --color-success-content: #0f2a17;
+  --color-warning: #e0b05a;
+  --color-warning-content: #2a1d08;
+  --color-error: #ef7a63;
+  --color-error-content: #2e120b;
+
+  --radius-selector: 0.25rem;
+  --radius-field: 0.25rem;
+  --radius-box: 0.5rem;
+  --border: 1px;
+}
+
+@layer base {
+  html,
+  body,
+  #root {
+    min-height: 100%;
+  }
+}
+
+/* In-content links (gene symbols, rsIDs, external references) stay in the ink color with a
+   quiet underline; the primary color is reserved for actions, the active nav item, and the
+   eQTL series. */
+/* data landing on the genome track: bars grow down from the baseline (staggered left to right
+   by the caller), markers rise in; both quick */
+@theme {
+  --animate-grow-down: grow-down 0.35s cubic-bezier(0.2, 0.8, 0.2, 1) both;
+  --animate-rise-in: rise-in 0.2s ease-out both;
+  @keyframes grow-down {
+    from { transform: scaleY(0); }
+    to { transform: scaleY(1); }
+  }
+  @keyframes rise-in {
+    from { opacity: 0; transform: translateY(3px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+}
+
+@utility link-quiet {
+  color: var(--color-base-content);
+  text-underline-offset: 2px;
+  &:hover {
+    text-decoration-line: underline;
+  }
+}
+
+/* Observable Plot draws its hover tips inside the SVG; let them extend past the plot box so a
+   tip near an edge (or in the narrow LocusCompare square) is not clipped. */
+.plot-host,
+.plot-host svg {
+  overflow: visible;
+}
+
+/* Linked hover across the locus scatter and the LocusCompare panel: both draw a ring for the
+   shared hovered variant, but the label (the overlay's text, see useHoverOverlay) shows only in
+   the plot under the pointer. The host toggles .plot-hovered from pointer events. */
+.plot-host:not(.plot-hovered) svg .hover-label {
+  display: none;
+}
+
+/* No drop shadows on buttons, sitewide (daisyui adds a subtle one by default). */
+.btn {
+  box-shadow: none !important;
+}
+
+/* Form controls share the light base-300 border used by tables, cards, and buttons, and a
+   neutral (not brand-colored) focus ring. */
+.input:not(:focus):not(:focus-within),
+.select:not(:focus):not(:focus-within),
+.textarea:not(:focus):not(:focus-within) {
+  border-color: var(--color-base-300);
+}
+.input:focus, .input:focus-within,
+.select:focus, .select:focus-within,
+.textarea:focus, .textarea:focus-within {
+  --input-color: color-mix(in oklab, var(--color-base-content) 45%, transparent);
+  border-color: color-mix(in oklab, var(--color-base-content) 45%, transparent);
+  outline-color: color-mix(in oklab, var(--color-base-content) 25%, transparent);
+}

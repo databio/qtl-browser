@@ -1,5 +1,9 @@
-// Cloudflare Workers static-assets deploy. Workers Builds: root directory `ui`, build command
-// `npm run build`, deploy command `npx wrangler deploy`. The SPA fallback for /gene/... paths
+// Cloudflare Workers static-assets deploy for the TOPCHeF site. Workers Builds: root directory
+// `ui`, build command `npm run build`, deploy command `npx wrangler deploy`. `ui-general/` is the
+// general multi-study browser and deliberately carries no wrangler config, so it cannot deploy over
+// this; the dashboard setting moves to it only when that directory takes over, which is also when
+// `ui-general/` has to already carry everything this one does.
+// The SPA fallback for /gene/... paths
 // is `not_found_handling`; a `public/_redirects` with `/* /index.html 200` is rejected by
 // Workers as a redirect loop, so there is none.
 {
