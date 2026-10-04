@@ -57,7 +57,7 @@ export default function CisTable({ table, failed, chr, qtlType, phenotypeId, fil
 
   async function exportCSV() {
     const all = await cisAll(query())
-    const cols = ['position', 'rsid', 'A1', 'A2', 'tss_distance', 'af', 'ma_samples', 'ma_count', 'pval_nominal', 'slope', 'slope_se', 'pip', 'cs_id']
+    const cols = ['position', 'rsid', 'A1', 'A2', 'tss_distance', 'af', 'ma_samples', 'ma_count', 'pval_nominal', 'beta', 'beta_se', 'pip', 'cs_id']
     downloadCSV(roundedCsvName(fileStem), all.map(r => ({ ...r, rsid: rsFromNumber(r.rs_number), phenotype_id: phenotypeId })), qtlType === 's' ? ['phenotype_id', ...cols] : cols)
   }
 
@@ -95,7 +95,7 @@ export default function CisTable({ table, failed, chr, qtlType, phenotypeId, fil
                   <SortableTh sortKey="af" label="AF" sort={sort} onSort={setSort} className="text-right" align="right" />
                   <SortableTh sortKey="ma_count" label="MA count" sort={sort} onSort={setSort} className="text-right" align="right" />
                   <SortableTh sortKey="pval_nominal" label="p" sort={sort} onSort={setSort} defaultOrder="asc" className="text-right" align="right" />
-                  <SortableTh sortKey="slope" label="Slope" sort={sort} onSort={setSort} className="text-right" align="right" />
+                  <SortableTh sortKey="beta" label="beta" sort={sort} onSort={setSort} className="text-right" align="right" />
                   <th className="text-right">SE</th>
                   <SortableTh sortKey="pip" label="PIP" sort={sort} onSort={setSort} className="text-right" align="right" />
                 </tr>
@@ -115,8 +115,8 @@ export default function CisTable({ table, failed, chr, qtlType, phenotypeId, fil
                     <td className="text-right tabular-nums text-base-content/60">{fmtNum(r.af)}</td>
                     <td className="text-right tabular-nums text-base-content/60">{r.ma_count}</td>
                     <td className="text-right tabular-nums">{fmtP(r.pval_nominal)}</td>
-                    <td className="text-right tabular-nums">{fmtNum(r.slope)}</td>
-                    <td className="text-right tabular-nums text-base-content/60">{fmtNum(r.slope_se)}</td>
+                    <td className="text-right tabular-nums">{fmtNum(r.beta)}</td>
+                    <td className="text-right tabular-nums text-base-content/60">{fmtNum(r.beta_se)}</td>
                     <td className="text-right tabular-nums">{r.pip != null ? fmtNum(r.pip) : ''}</td>
                   </tr>
                 ))}

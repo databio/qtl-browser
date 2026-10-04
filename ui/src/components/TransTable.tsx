@@ -3,7 +3,7 @@ import { Download, Search as SearchIcon } from 'lucide-react'
 import { SortableTh, type SortState } from '@/components/sortable-th'
 import { Pager } from '@/components/pager'
 import { Empty, TableSkeleton } from '@/components/states'
-import { fmtInt, fmtNum, fmtP, fmtPhenotype, fmtSlopeSE } from '@/lib/format'
+import { fmtInt, fmtNum, fmtP, fmtPhenotype, fmtBetaSE } from '@/lib/format'
 import { transAll, transCount, transRows, type TransQuery, type TransRow } from '@/lib/queries'
 import { downloadCSV, roundedCsvName } from '@/lib/csv'
 import { transRoundingDetail, useTransRoundingFacts } from '@/lib/rounding'
@@ -109,7 +109,7 @@ export default function TransTable({ table, qtlType, keyedBy = 'gene', fileStem 
                     <SortableTh sortKey="af" label="AF" sort={sort} onSort={setSort} className="text-right" align="right" />
                   </>}
                   <SortableTh sortKey="pval" label="p" sort={sort} onSort={setSort} defaultOrder="asc" className="text-right" align="right" />
-                  <SortableTh sortKey="beta" label="Beta ± SE" sort={sort} onSort={setSort} className="text-right" align="right" />
+                  <SortableTh sortKey="beta" label="beta ± SE" sort={sort} onSort={setSort} className="text-right" align="right" />
                   <SortableTh sortKey="r2" label="r²" sort={sort} onSort={setSort} className="text-right" align="right" />
                 </tr>
               </thead>
@@ -128,7 +128,7 @@ export default function TransTable({ table, qtlType, keyedBy = 'gene', fileStem 
                       <td className="text-right tabular-nums text-base-content/60">{fmtNum(r.af)}</td>
                     </>}
                     <td className="text-right tabular-nums">{fmtP(r.pval)}</td>
-                    <td className="text-right tabular-nums">{fmtSlopeSE(r.beta, r.beta_se)}</td>
+                    <td className="text-right tabular-nums">{fmtBetaSE(r.beta, r.beta_se)}</td>
                     <td className="text-right tabular-nums text-base-content/60">{fmtNum(r.r2)}</td>
                   </tr>
                 ))}

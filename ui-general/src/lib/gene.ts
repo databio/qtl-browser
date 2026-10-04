@@ -18,6 +18,7 @@ import { EQTL_TYPE, fetchDecoded, fetchObject, getStore, gwasFile, resultsFile, 
 import { csMembers, decodeGwasIndex, decodeGwasRange, decodeResultBlock, decodeVariantRange, gwasRange, readerColumns, sliceRun,
   type GwasColumns, type GwasIndex, type ResultBlock, type VariantRange } from './store-decode'
 import { dropTable } from './db'
+import { colocLocus, type LocusColoc } from './coloc-abf'
 import type { CredibleSetRow, Gene, GeneDetail, SearchHit, SplicePhenotype } from './queries'
 
 /** A phenotype with a block (every phenotype on a chromosome part has one; only trans-only ones do not). */
@@ -41,6 +42,9 @@ export interface GenePack {
   splice(): Promise<SplicePhenotype[]>
   /** one intron's block, from that span */
   intron(phenotypeId: string): Promise<ResultBlock>
+  /** coloc.abf for one phenotype against the experiment's GWAS, memoized; null without a GWAS or
+   *  without variants shared with it */
+  coloc(qtlType: 'e' | 's', phenotypeId?: string): Promise<LocusColoc | null>
 }
 
 // ---- the GWAS window --------------------------------------------------------------------------
@@ -104,14 +108,16 @@ function leadRow(block: ResultBlock | null, range: VariantRange | null) {
   for (let i = 0; i < run.n; i++) {
     if (run.position[i] !== lead.pos || run.ref[i] !== lead.ref || run.alt[i] !== lead.alt) continue
     const nan = (x: number) => (Number.isNaN(x) ? null : x)
-    return { pval: nan(block.pval[i]), slope: nan(block.slope[i]), se: nan(block.se[i]), af: nan(run.af[i]),
+    return { pval: nan(block.pval[i]), beta: nan(block.slope[i]), se: nan(block.se[i]), af: nan(run.af[i]),
       rsid: run.rsNumber[i] ? `rs${run.rsNumber[i]}` : null }
   }
   return null
 }
 
 /** The genes row the gene page prints: the annotation's fields, the eQTL block's details (group
- *  lead, permutation p, credible sets) and the lead's own nominal row. No q-value is stored in v1. */
+ *  lead, permutation p, credible sets) and the lead's own nominal row. v1 stores no q-value: the
+ *  Zenodo release publishes none either, and the one the v0 site showed was this repo's own
+ *  Benjamini-Hochberg over `pval_beta` (pipeline/steps_tables.py), which the contract drops. */
 function geneRow(hit: SearchHit, block: ResultBlock | null, range: VariantRange | null): Gene {
   const d = block?.details, g = d?.group ?? null, lead = g?.lead ?? null, row = leadRow(block, range)
   return {
@@ -120,8 +126,8 @@ function geneRow(hit: SearchHit, block: ResultBlock | null, range: VariantRange 
     tested: hit.tested, num_var: g?.n_variants ?? block?.nRows ?? null,
     lead_position: lead?.pos ?? null, lead_A1: lead?.alt ?? null, lead_A2: lead?.ref ?? null,
     lead_rsid: row?.rsid ?? null, lead_af: row?.af ?? null, lead_tss_distance: lead ? lead.pos - hit.tss : null,
-    slope: row?.slope ?? null, slope_se: row?.se ?? null, pval_nominal: row?.pval ?? null,
-    pval_perm: g?.p_perm ?? null, pval_beta: g?.p_beta ?? null, qval: null, is_egene: hit.is_egene,
+    beta: row?.beta ?? null, beta_se: row?.se ?? null, pval_nominal: row?.pval ?? null,
+    pval_perm: g?.p_perm ?? null, pval_beta: g?.p_beta ?? null, is_egene: hit.is_egene,
     n_credible_sets: d?.n_credible_sets ?? 0, n_trans_pairs: 0,
   }
 }
@@ -139,8 +145,8 @@ function spliceRow(hit: SearchHit, p: Placed, block: ResultBlock, range: Variant
     num_var: g?.n_variants ?? block.nRows,
     lead_position: lead?.pos ?? null, lead_A1: lead?.alt ?? null, lead_A2: lead?.ref ?? null, lead_rsid: row?.rsid ?? null,
     lead_af: row?.af ?? null, lead_tss_distance: lead ? lead.pos - hit.tss : null,
-    slope: row?.slope ?? null, slope_se: row?.se ?? null, pval_nominal: row?.pval ?? null,
-    pval_perm: g?.p_perm ?? p.p_perm, pval_beta: g?.p_beta ?? null, qval: null, is_sqtl: p.significant,
+    beta: row?.beta ?? null, beta_se: row?.se ?? null, pval_nominal: row?.pval ?? null,
+    pval_perm: g?.p_perm ?? p.p_perm, pval_beta: g?.p_beta ?? null, is_sqtl: p.significant,
     n_credible_sets: block.details.n_credible_sets, blk_off: p.blk_off, blk_len: p.blk_len,
   }
 }
@@ -204,9 +210,27 @@ function openGene(hit: SearchHit): GenePack {
     if (!b) throw new Error(`${hit.gene_id}: ${id} is not one of the gene's tested introns`)
     return b
   })
+
+  // coloc.abf for one phenotype, memoized: the gene page's panel and its locus plot both want it
+  // and it costs about 15 ms, nearly all of it aligning the two windows
+  const colocs = new Map<string, Promise<LocusColoc | null>>()
+  const coloc = (qtlType: 'e' | 's', phenotypeId?: string) => {
+    const key = `${qtlType}:${phenotypeId ?? ''}`
+    let p = colocs.get(key)
+    if (!p) {
+      p = Promise.all([qtlType === 's' && phenotypeId ? intron(phenotypeId) : block, variants, gwasCols])
+        .then(([b, range, g]) => {
+          const run = b && range && b.varStart != null ? sliceRun(range, b.varStart, b.nRows, b) : null
+          return colocLocus(b, run, g)
+        })
+      colocs.set(key, p)
+      p.catch(() => { if (colocs.get(key) === p) colocs.delete(key) })
+    }
+    return p
+  }
   // consumers see each rejection when they await; these handlers only keep an unused one quiet
   for (const p of [block, variants, gwas, gwasCols, detail]) p.catch(() => {})
-  return { hit, block, variants, gwas, gwasCols, detail, splice: () => loadIntrons().then(x => x.list), intron }
+  return { hit, block, variants, gwas, gwasCols, detail, splice: () => loadIntrons().then(x => x.list), intron, coloc }
 }
 
 // the last few genes stay open, so tab switches and back navigation send no request
@@ -251,10 +275,11 @@ const rawSource = (raw: string) => `(SELECT position, A1, A2,
   CASE WHEN ma_samples < 0 THEN NULL ELSE ma_samples END AS ma_samples,
   CASE WHEN ma_count < 0 THEN NULL ELSE ma_count END AS ma_count,
   CASE WHEN isnan(pval_nominal) THEN NULL ELSE pval_nominal END AS pval_nominal,
-  CASE WHEN isnan(slope) THEN NULL ELSE slope END AS slope,
-  CASE WHEN isnan(slope_se) THEN NULL ELSE slope_se END AS slope_se,
+  CASE WHEN isnan(beta) THEN NULL ELSE beta END AS beta,
+  CASE WHEN isnan(beta_se) THEN NULL ELSE beta_se END AS beta_se,
   CASE WHEN cs_id < 0 THEN NULL ELSE pip END AS pip,
-  CASE WHEN cs_id < 0 THEN NULL ELSE cs_id END AS cs_id
+  CASE WHEN cs_id < 0 THEN NULL ELSE cs_id END AS cs_id,
+  CASE WHEN isnan(coloc_pp) THEN NULL ELSE coloc_pp END AS coloc_pp
   FROM ${raw})`
 
 /** One cis window as a table for the plots: -log10 p, credible-set class, a tooltip label, and
@@ -268,18 +293,30 @@ const locusSQL = (qtl: string, gwas: string) => `
            CASE WHEN q.pval_nominal IS NULL THEN NULL
                 ELSE coalesce(-log10(nullif(q.pval_nominal, 0)), max(-log10(nullif(q.pval_nominal, 0))) OVER () * 1.05) END AS nlp,
            q.pval_nominal = 0 AS clipped,
-           q.pval_nominal, q.slope, q.slope_se, q.af, q.pip, q.cs_id, q.rs_number, q.A1, q.A2,
-           q.tss_distance, q.ma_samples, q.ma_count,
+           q.pval_nominal, q.beta, q.beta_se, q.af, q.pip, q.cs_id, q.rs_number, q.A1, q.A2,
+           q.tss_distance, q.ma_samples, q.ma_count, q.coloc_pp,
            coalesce(q.cs_id::VARCHAR, 'none') AS cs,
            g.p AS gwas_p, -log10(g.p) AS gwas_nlp,
            CASE WHEN g.ea = q.A1 THEN g.beta ELSE -g.beta END AS gwas_beta,
-           coalesce('rs' || q.rs_number, q.position::VARCHAR) || '  ' || q.A1 || '/' || q.A2
-             || chr(10) || CASE WHEN q.pval_nominal IS NULL THEN 'not tested' WHEN q.pval_nominal = 0 THEN 'p = 0 (underflow; drawn above the maximum)' ELSE 'p = ' || format('{:.2e}', q.pval_nominal) END
-             || CASE WHEN q.slope IS NULL THEN coalesce(chr(10) || 'SE ' || format('{:.3f}', q.slope_se), '')
-                     ELSE chr(10) || 'slope ' || format('{:.3f}', q.slope) || ' ± ' || format('{:.3f}', q.slope_se) END
-             || coalesce(chr(10) || 'AF ' || format('{:.3f}', q.af), '')
-             || CASE WHEN q.pip IS NULL THEN '' ELSE chr(10) || 'PIP ' || format('{:.3f}', q.pip) || ' (set ' || q.cs_id || ')' END
-             || CASE WHEN g.p IS NULL THEN '' ELSE chr(10) || 'DCM GWAS p = ' || format('{:.2e}', g.p) || ', beta ' || format('{:+.3f}', CASE WHEN g.ea = q.A1 THEN g.beta ELSE -g.beta END) || ' (A1 as effect allele)' END AS label
+           -- four lines at most: the variant, its QTL statistics, the two posteriors, the GWAS.
+           -- concat_ws skips NULL arguments, so an absent value leaves no separator behind, and
+           -- nullif('') drops a line whose every part is absent. coloc_pp is here because a dot's
+           -- radius cannot be read off exactly.
+           concat_ws(chr(10),
+             coalesce('rs' || q.rs_number, q.position::VARCHAR) || '  ' || q.A1 || '/' || q.A2,
+             concat_ws(' · ',
+               CASE WHEN q.pval_nominal IS NULL THEN 'not tested'
+                    WHEN q.pval_nominal = 0 THEN 'p = 0 (underflow; drawn above the max)'
+                    ELSE 'p = ' || format('{:.2e}', q.pval_nominal) END,
+               CASE WHEN q.beta IS NULL THEN CASE WHEN q.beta_se IS NULL THEN NULL ELSE 'SE ' || format('{:.3f}', q.beta_se) END
+                    ELSE 'beta ' || format('{:.3f}', q.beta) || ' ± ' || format('{:.3f}', q.beta_se) END,
+               CASE WHEN q.af IS NULL THEN NULL ELSE 'AF ' || format('{:.3f}', q.af) END),
+             nullif(concat_ws(' · ',
+               CASE WHEN q.pip IS NULL THEN NULL ELSE 'SuSiE PIP ' || format('{:.3f}', q.pip) || ' (set ' || q.cs_id || ')' END,
+               CASE WHEN q.coloc_pp IS NULL THEN NULL ELSE 'coloc posterior ' || format('{:.3f}', q.coloc_pp) END), ''),
+             CASE WHEN g.p IS NULL THEN NULL
+                  ELSE 'DCM GWAS p = ' || format('{:.2e}', g.p) || ', A1 beta '
+                       || format('{:+.3f}', CASE WHEN g.ea = q.A1 THEN g.beta ELSE -g.beta END) END) AS label
     FROM ${qtl} q
     LEFT JOIN ${gwas} g
       ON g.position = q.position AND ((g.ea = q.A1 AND g.nea = q.A2) OR (g.ea = q.A2 AND g.nea = q.A1))
@@ -291,16 +328,20 @@ const locusSQL = (qtl: string, gwas: string) => `
 /** The locus table of the gene's eQTL rows or one intron's sQTL rows, as an in-memory DuckDB
  *  table; the caller drops it. */
 export async function locusTable(gp: GenePack, qtlType: 'e' | 's', phenotypeId?: string): Promise<string> {
-  const [block, range, gwas] = await Promise.all([blockFor(gp, qtlType, phenotypeId), gp.variants, gp.gwas])
+  const [block, range, gwas, cl] = await Promise.all([blockFor(gp, qtlType, phenotypeId), gp.variants, gp.gwas,
+    gp.coloc(qtlType, phenotypeId).catch(() => null)])
   const detail = { gene_id: gp.hit.gene_id, phenotype_id: phenotypeId }
   const t0 = performance.now()
   if (block.varStart == null || !range) throw new Error(`${gp.hit.gene_id}: the ${qtlType === 'e' ? 'eQTL' : 'intron'} block has no rows`)
   const c = readerColumns(block, sliceRun(range, block.varStart, block.nRows, block, `${gp.hit.gene_id} variants range`), gp.hit.tss)
+  // all-NaN without a GWAS, which rawSource turns into NULLs and the plot reads as "no coloc layer"
+  const colocPp = cl?.perRow ?? new Float64Array(block.nRows).fill(NaN)
   const ipc = tableToIPC(new Table({
     position: makeVector(c.position), A1: vectorFromArray(c.a1, new Utf8()), A2: vectorFromArray(c.a2, new Utf8()),
     rs_number: makeVector(c.rsNumber), tss_distance: makeVector(c.tssDistance), af: makeVector(c.af),
     ma_samples: makeVector(c.maSamples), ma_count: makeVector(c.maCount), pval_nominal: makeVector(c.pval),
-    slope: makeVector(c.slope), slope_se: makeVector(c.se), pip: makeVector(c.pip), cs_id: makeVector(c.csId),
+    beta: makeVector(c.slope), beta_se: makeVector(c.se), pip: makeVector(c.pip), cs_id: makeVector(c.csId),
+    coloc_pp: makeVector(colocPp),
   }), 'stream')
   performance.measure('store:decode', { start: t0, end: performance.now(), detail: { ...detail, part: 'columns' } })
   const { con } = await getDB()

@@ -67,7 +67,7 @@ this document is their reference.
 
 Four mutable levels; everything else is content-addressed. `overlaps/` is derived: it can be
 rebuilt from the catalogs, and a store without it is complete. This mirrors a refgetstore
-(`rgstore.json` -> `collections/` -> `sequences/`) on purpose.
+(`rgstore.json` -> `collections/` -> `sequences/`).
 
 **Write order.** Objects first, then pointers, then `store.json`. `Store.write_pointer` refuses a
 pointer that names an object not yet in `immutable/`. `Store.write_store` lists whatever pointer
@@ -412,8 +412,8 @@ builder also writes (`annotation.split`, which `build` and `add-split` both call
   the union of its transcripts' exons as sorted intervals, an exon merged into the previous one when
   its start is at or before that one's end (touching exons, `start = end + 1`, stay apart). Empty
   lists for a gene with no exon records. GENCODE v34: chr1 254 KB, chr7 125 KB, all 2.6 MB. The
-  transcript-level table split by chromosome would be 1.0 MB for chr1, which is why the per-chromosome
-  object holds the model rather than the rows. Genes and models are two objects so a reader of gene
+  transcript-level table split by chromosome would be 1.0 MB for chr1, so the per-chromosome object
+  holds the model rather than the rows. Genes and models are two objects so a reader of gene
   rows alone (a region's gene list) does not download exon models.
 - **`lookup`** (kind 10, `.qgl`): gene id and symbol to chromosome, for a reader that is given a gene
   name and does not yet know which chromosome's objects to read.
@@ -1133,8 +1133,8 @@ is complete. It is not part of any catalog's or experiment's identity.
   rise in them is the signature of an ingestion that got allele orientation wrong.
 - `normalisation_suspects` are indel pairs in different catalogs, within a short window, with the
   same length change and no shared allele pair — candidates for one event written two ways
-  (section 5 does not require left-aligned indels). **A suspect is not a verdict**: confirming one
-  needs the reference, so the count is a prompt to look, never a claim of identity.
+  (section 5 does not require left-aligned indels). Confirming one needs the reference, so the count
+  is a prompt to check rather than a claim that two records describe one event.
 
 ### Object (kind 11, `.qbo`)
 
@@ -1147,7 +1147,7 @@ Header: chromosome `all`, count = catalogs (k, 1..64), page size = union sites p
 
 **Union order** is section 5's canonical order — chromosomes by `seq_digest` in ASCII order, then
 `pos`, then `ref`, then `alt`, byte-wise — the same order `catalog_identity` digests. It is
-deliberately not any catalog's vidx order, and a reader must not assume the two agree.
+not any catalog's vidx order, and a reader must not assume the two agree.
 
 **Directory** (`overlap.encode_directory`), all u32 unless stated:
 

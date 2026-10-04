@@ -8,7 +8,7 @@
  *   by chr:pos: variants page (1, 2 on a cis miss) -> hits frame (1)
  *
  * The hits file is paged by vidx (SPEC section 8): its header and frame table are read once per
- * chromosome, then the one frame holding the variant (no request when that frame is empty). Each lead row also reads its phenotype's block, for the slope and SE
+ * chromosome, then the one frame holding the variant (no request when that frame is empty). Each lead row also reads its phenotype's block, for the beta and SE
  * the lead list prints. The cis scan is cis-scan.ts, behind its button.
  */
 import type { Row } from './db'
@@ -215,12 +215,12 @@ export function csValues(h: Hits, r: number) {
  *  cheaper than another request). */
 const MERGE_GAP = 64 * 1024
 
-/** The variant's nominal slope and SE in each phenotype's block, by ord: the blocks of one results
+/** The variant's nominal beta and SE in each phenotype's block, by ord: the blocks of one results
  *  file are read in runs, a run joining blocks less than MERGE_GAP apart, one request per run. Null
- *  for a phenotype the variant is not a row of; the slope is null when the results set has no dof. */
-export async function nominalsAt(ps: HitPhenotype[], vidx: number): Promise<Map<number, { slope: number | null; se: number | null } | null>> {
+ *  for a phenotype the variant is not a row of; the beta is null when the results set has no dof. */
+export async function nominalsAt(ps: HitPhenotype[], vidx: number): Promise<Map<number, { beta: number | null; se: number | null } | null>> {
   const s = await getStore()
-  const out = new Map<number, { slope: number | null; se: number | null } | null>()
+  const out = new Map<number, { beta: number | null; se: number | null } | null>()
   const byFile = new Map<string, { f: ReturnType<typeof resultsFile>; ps: HitPhenotype[] }>()
   for (const p of ps) {
     if (p.var_start == null || p.n_var == null || vidx < p.var_start || vidx >= p.var_start + p.n_var) { out.set(p.ord, null); continue }
@@ -242,7 +242,7 @@ export async function nominalsAt(ps: HitPhenotype[], vidx: number): Promise<Map<
       await fetchDecoded('store:lead-block', { ords: run.map(p => p.ord) }, f.name, off, len, (b, what) => {
         for (const p of run) {
           const r = scanBlockRow(b.subarray(p.blk_off - off, p.blk_off - off + p.blk_len), vidx - p.var_start!, f.dof, `${what} ord ${p.ord}`)
-          out.set(p.ord, { slope: nan(r.slope), se: nan(r.se) })
+          out.set(p.ord, { beta: nan(r.slope), se: nan(r.se) })
         }
       })
     })

@@ -142,9 +142,15 @@ export interface LocusColoc {
   /** how many variants the shared-variant posterior needs to reach 0.95 — 1 means the variant is
    *  identified, 35 means PP.H4 is a statement about the region and not about any variant */
   credible95: number
-  /** the largest `snpPP4` and where it sits; read it against `credible95`. `rsNumber` is 0 where
-   *  the catalog has no dbSNP record, and the caller falls back to the position. */
+  /** the largest `snpPP4` and where it sits. `rsNumber` is 0 where the catalog has no dbSNP record,
+   *  and the caller falls back to the position. */
   top: { position: number; ref: string; alt: string; rsNumber: number; snpPP4: number }
+  /** `snpPP4` per QTL block row, NaN where the GWAS has no row for that site. NaN is not zero: the
+   *  variant was never in the comparison, so a plot must keep it visually out of play rather than
+   *  draw it as a rejected candidate. */
+  perRow: Float64Array
+  /** block row index of the top shared variant */
+  topRow: number
   priors: AbfPriors
 }
 
@@ -192,15 +198,18 @@ export function colocLocus(
     else if (!Number.isFinite(block.nlp[i]!)) nUnderflow++
     else nNoStats++
   }
-  const { z1, se1, z2, se2, sites } = alignTraits(q, gwasRows(gwas))
+  const { z1, se1, z2, se2, sites, aIndex } = alignTraits(q, gwasRows(gwas))
   if (!sites.length) return null
   const r = colocAbf(z1, se1, z2, se2, priors)
   const order = Array.from(r.snpPP4.keys()).sort((a, b) => r.snpPP4[b]! - r.snpPP4[a]!)
   let cum = 0, credible95 = 0
   for (const i of order) { cum += r.snpPP4[i]!; credible95++; if (cum >= 0.95) break }
+  const perRow = new Float64Array(block.nRows).fill(NaN)
+  for (let i = 0; i < aIndex.length; i++) perRow[aIndex[i]!] = r.snpPP4[i]!
   const t = sites[r.best]!
   return { pp: r.pp, nShared: sites.length, nQtlRows: block.nRows, nNotTested, nUnderflow, nNoStats, credible95,
-    top: { position: t.position, ref: t.ref, alt: t.alt, rsNumber: t.rsNumber ?? 0, snpPP4: r.snpPP4[r.best]! }, priors }
+    top: { position: t.position, ref: t.ref, alt: t.alt, rsNumber: t.rsNumber ?? 0, snpPP4: r.snpPP4[r.best]! },
+    perRow, topRow: aIndex[r.best]!, priors }
 }
 
 /**
@@ -219,13 +228,17 @@ export function colocLocus(
  */
 export function alignTraits(a: TraitRow[], b: TraitRow[]): {
   z1: Float64Array; se1: Float64Array; z2: Float64Array; se2: Float64Array; sites: TraitRow[]
+  /** index into `a` of each kept site, so a caller can put results back on its own rows */
+  aIndex: Int32Array
 } {
   const key = (r: TraitRow) => `${r.position}:${r.ref}:${r.alt}`
   const seen = new Map<string, TraitRow>()
   for (const r of b) if (!seen.has(key(r))) seen.set(key(r), r)
   const z1: number[] = [], se1: number[] = [], z2: number[] = [], se2: number[] = [], sites: TraitRow[] = []
+  const idx: number[] = []
   const used = new Set<string>()
-  for (const r of a) {
+  for (let i = 0; i < a.length; i++) {
+    const r = a[i]!
     const k = key(r)
     if (used.has(k)) continue
     const m = seen.get(k)
@@ -233,7 +246,8 @@ export function alignTraits(a: TraitRow[], b: TraitRow[]): {
     if (!Number.isFinite(r.z) || !Number.isFinite(r.se) || !Number.isFinite(m.z) || !Number.isFinite(m.se)) continue
     if (r.se <= 0 || m.se <= 0) continue
     used.add(k)
-    z1.push(r.z); se1.push(r.se); z2.push(m.z); se2.push(m.se); sites.push(r)
+    z1.push(r.z); se1.push(r.se); z2.push(m.z); se2.push(m.se); sites.push(r); idx.push(i)
   }
-  return { z1: new Float64Array(z1), se1: new Float64Array(se1), z2: new Float64Array(z2), se2: new Float64Array(se2), sites }
+  return { z1: new Float64Array(z1), se1: new Float64Array(se1), z2: new Float64Array(z2),
+    se2: new Float64Array(se2), sites, aIndex: Int32Array.from(idx) }
 }

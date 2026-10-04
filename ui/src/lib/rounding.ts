@@ -59,15 +59,16 @@ export function roundingFacts(m: StoreInfo | null | undefined): RoundingFacts | 
 
 export const useRoundingFacts = () => roundingFacts(useStoreInfo())
 
-/** The note's own sentence without the link, for a `title` attribute. */
+/** The note's own sentence, for a `title` attribute. */
 export const roundingText = (f: RoundingFacts) =>
-  `p-values, slopes, standard errors, and allele frequencies are rounded (p within ${f.pPct}%). Exact values: Zenodo.`
+  `p-values, betas, standard errors, and allele frequencies are rounded (p within ${f.pPct}%). Exact values: Zenodo.`
 
 /** What the cis note's tooltip spells out. The phrase around it carries the Zenodo link, so this
  *  says only how far each value can be off. */
 export const roundingDetail = (f: RoundingFacts) =>
   `p-values are within ${f.pPct}% of the source, standard errors within ${f.sePct}%` +
-  `${f.slopeSe ? `, slopes within ${f.slopeSe} standard errors` : ''}, and allele frequencies within ${f.af}.`
+  `${f.slopeSe ? `, betas within ${f.slopeSe} standard errors` : ''}, and allele frequencies within ${f.af}. ` +
+  `Exact values are on Zenodo.`
 
 /** The same for a trans table, whose values are quantized on their own scales (SPEC section 9): the
  *  effect size has its own code rather than being rebuilt from a standard error, and the standard
@@ -85,5 +86,5 @@ export function transRoundingFacts(m: StoreInfo | null | undefined): TransRoundi
 export const useTransRoundingFacts = () => transRoundingFacts(useStoreInfo())
 
 export const transRoundingDetail = (f: TransRoundingFacts) =>
-  `p-values are within ${f.pPct}% of the source, effect sizes within ${f.beta}, and allele frequencies ` +
-  `within ${f.af}. Standard errors and r² are derived from the stored p-value and effect size.`
+  `p-values are within ${f.pPct}% of the source, betas within ${f.beta}, and allele frequencies within ` +
+  `${f.af}. Standard errors and r² are derived from the stored p-value and beta. Exact values are on Zenodo.`

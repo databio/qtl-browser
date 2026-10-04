@@ -24,8 +24,8 @@ export interface Gene extends Row {
   start: number; end: number; strand: string; tss: number; biotype: string; tested: boolean
   num_var: number | null; lead_position: number | null; lead_A1: string | null; lead_A2: string | null
   lead_rsid: string | null; lead_af: number | null; lead_tss_distance: number | null
-  slope: number | null; slope_se: number | null; pval_nominal: number | null; pval_perm: number | null
-  pval_beta: number | null; qval: number | null; is_egene: boolean | null
+  beta: number | null; beta_se: number | null; pval_nominal: number | null; pval_perm: number | null
+  pval_beta: number | null; is_egene: boolean | null
   n_credible_sets: number; n_trans_pairs: number
 }
 
@@ -36,18 +36,18 @@ export interface CredibleSetRow extends Row {
 
 export interface CisRow extends Row {
   position: number; A1: string; A2: string; rs_number: number | null; tss_distance: number
-  af: number; ma_samples: number; ma_count: number; pval_nominal: number; slope: number
-  slope_se: number; pip: number | null; cs_id: number | null; phenotype_id?: string
+  af: number; ma_samples: number; ma_count: number; pval_nominal: number; beta: number
+  beta_se: number; pip: number | null; cs_id: number | null; phenotype_id?: string
 }
 
 export interface SplicePhenotype extends Row {
   phenotype_id: string; gene_id: string; symbol: string | null; chr: string
   intron_start: number; intron_end: number; cluster_id: string; strand: string; tss: number
   num_var: number; lead_position: number | null; lead_A1: string | null; lead_A2: string | null; lead_rsid: string | null
-  lead_af: number | null; lead_tss_distance: number | null; slope: number | null; slope_se: number | null
+  lead_af: number | null; lead_tss_distance: number | null; beta: number | null; beta_se: number | null
   pval_nominal: number | null; pval_perm: number | null; pval_beta: number | null
   /** not stored in v1 (null) */
-  qval: number | null; is_sqtl: boolean
+  is_sqtl: boolean
   n_credible_sets: number
   /** the intron's block in the sQTL results file */
   blk_off: number; blk_len: number
@@ -107,8 +107,8 @@ function cisWhere(q: CisQuery): string {
   return `FROM ${q.table} WHERE ${parts.join(' AND ')}`
 }
 
-const CIS_COLS = 'position, A1, A2, rs_number, tss_distance, af, ma_samples, ma_count, pval_nominal, slope, slope_se, pip, cs_id'
-const CIS_SORTABLE = new Set(['position', 'pval_nominal', 'slope', 'af', 'pip', 'tss_distance', 'ma_count'])
+const CIS_COLS = 'position, A1, A2, rs_number, tss_distance, af, ma_samples, ma_count, pval_nominal, beta, beta_se, pip, cs_id'
+const CIS_SORTABLE = new Set(['position', 'pval_nominal', 'beta', 'af', 'pip', 'tss_distance', 'ma_count'])
 
 export const cisRows = (q: CisQuery) => {
   const col = q.orderBy && CIS_SORTABLE.has(q.orderBy) ? q.orderBy : 'pval_nominal'

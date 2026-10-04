@@ -16,10 +16,10 @@ export function fmtInt(x: unknown): string {
   return Number(x).toLocaleString('en-US')
 }
 
-/** Empty when there is no slope (a results set without dof stores none: SPEC section 8). */
-export function fmtSlopeSE(slope: unknown, se: unknown): string {
-  if (slope == null || Number.isNaN(slope)) return ''
-  return `${fmtNum(slope)} ± ${fmtNum(se)}`
+/** Empty when there is no beta (a results set without dof stores none: SPEC section 8). */
+export function fmtBetaSE(beta: unknown, se: unknown): string {
+  if (beta == null || Number.isNaN(beta)) return ''
+  return `${fmtNum(beta)} ± ${fmtNum(se)}`
 }
 
 export function rsFromNumber(n: unknown): string {
