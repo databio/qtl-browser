@@ -92,10 +92,45 @@ export function useVariantClick(link: Selection | null, href: (position: number)
 
 /** -log10 p against position for one cis window. Dots colored by credible-set membership,
  *  PIP as opacity, a TSS rule, and Observable Plot's nearest-point tip. */
+/**
+ * The dot mark's encodings. Colour and shape are the SuSiE credible set and opacity rises with PIP,
+ * both unchanged; `r` carries the coloc shared-variant posterior, so one plot shows both inferences
+ * and a point can be read against itself -- in a credible set but small (expression only), or large
+ * and uncoloured (shared with the GWAS but not fine-mapped to a set).
+ *
+ * `hasColoc` is false without a GWAS or without variants shared with it, and then `r` is the old
+ * fixed radius: a channel of all-NULL would shrink every point in the window.
+ */
+export function dotOptions(hasColoc: boolean) {
+  return {
+    fill: 'cs', symbol: 'cs',
+    // absent from the GWAS means never compared, so it draws at the minimum; the legend says so,
+    // since no channel is left to tell it apart from a shared variant the posterior rejected
+    r: hasColoc ? vg.sql`coalesce(coloc_pp, 0)` : 3.5,
+    fillOpacity: vg.sql`CASE WHEN cs = 'none' THEN 0.35 ELSE 0.45 + 0.4 * pip END`,
+  }
+}
+
+/**
+ * The scales that go with `dotOptions`. Both `r` and `fillOpacity` are channels, and Plot scales a
+ * channel to the data maximum unless the domain is fixed -- so a diffuse locus whose best posterior
+ * is 0.08 would draw points the size of a locus that pins one variant at 1.0, and the comparison
+ * would be destroyed. Same reason `opacityDomain` is pinned.
+ */
+export function dotScales(hasColoc: boolean, dark: boolean) {
+  const colors = dark ? CS_COLORS.dark : CS_COLORS.light
+  return [
+    vg.colorDomain([...CS_DOMAIN]), vg.colorRange(colors),
+    vg.symbolDomain([...CS_DOMAIN]), vg.symbolRange(CS_SYMBOLS),
+    vg.opacityDomain([0, 1]),
+    ...(hasColoc ? [vg.rDomain([0, 1]), vg.rRange([2.2, 9])] : []),
+  ]
+}
+
 export default function LocusPlot({ spec, onCount, onLegend, onActions, onCredibleSets, onTable }: {
   spec: LocusSpec
   onCount?: (n: number) => void
-  onLegend?: (sets: string[] | null) => void
+  onLegend?: (legend: { sets: string[]; coloc: boolean } | null) => void
   /** Receives the header controls (export menu, gene-track toggle) so the parent can place them. */
   onActions?: (actions: ReactNode | null) => void
   /** credible-set members of this locus, read from the materialized window (no extra fetch) */
@@ -124,6 +159,9 @@ export default function LocusPlot({ spec, onCount, onLegend, onActions, onCredib
   // the scatter's screen rect at pointer-down: the popup is positioned from it
   const anchor = useRef<DOMRect | null>(null)
   const [yMax, setYMax] = useState(1)
+  // variants of this window the GWAS also has: 0 without a GWAS or without any overlap, and then
+  // the size channel is switched off rather than shrinking every point
+  const [nColoc, setNColoc] = useState(0)
   const [dark, setDark] = useState(isDark)
   // the window by position: what the hover overlay draws and what a click on a hovered dot
   // needs to resolve its page synchronously (a query at click time would fall outside the
@@ -185,11 +223,12 @@ export default function LocusPlot({ spec, onCount, onLegend, onActions, onCredib
         if (!alive) { dropTable(table); return }
         onTable?.(table)
         const { con } = await getDB()
-        const agg = (await con.query(`SELECT count(*) AS n, max(nlp) AS ymax FROM ${table}`)).toArray()[0]
+        const agg = (await con.query(`SELECT count(*) AS n, max(nlp) AS ymax, count(coloc_pp) AS ncoloc FROM ${table}`)).toArray()[0]
         const sets = (await con.query(`SELECT DISTINCT cs FROM ${table} WHERE cs <> 'none' ORDER BY cs`)).toArray().map(r => String(r.cs))
         if (!alive) return
         onCount?.(Number(agg.n))
-        onLegend?.(sets)
+        setNColoc(Number(agg.ncoloc))
+        onLegend?.({ sets, coloc: Number(agg.ncoloc) > 0 })
         hoverIndex.current = new Map((await con.query(`SELECT position, rs_number, nlp, gwas_nlp, label FROM ${table}`)).toArray()
           .map(r => [Number(r.position), {
             rs_number: r.rs_number == null ? null : Number(r.rs_number),
@@ -253,15 +292,13 @@ export default function LocusPlot({ spec, onCount, onLegend, onActions, onCredib
   useEffect(() => {
     const el = host.current
     if (!el || !tableName || !link || !brushSel || width === 0) return
-    const colors = dark ? CS_COLORS.dark : CS_COLORS.light
     const ink = dark ? INK.dark : INK.light
     try {
       const plot = vg.plot(
         // drawn first so it sits under the dots and the hover label
         vg.ruleX([spec.tss], { stroke: ink, strokeOpacity: 0.6, strokeDasharray: '2,3' }),
         vg.dot(vg.from(tableName), {
-          x: 'position', y: 'nlp', fill: 'cs', symbol: 'cs', r: 3.5,
-          fillOpacity: vg.sql`CASE WHEN cs = 'none' THEN 0.35 ELSE 0.45 + 0.4 * pip END`,
+          x: 'position', y: 'nlp', ...dotOptions(nColoc > 0),
           channels: { position: 'position' },
         }),
         // interactors bind to the mark added just before them: both the brush and the nearest
@@ -270,11 +307,7 @@ export default function LocusPlot({ spec, onCount, onLegend, onActions, onCredib
         hoverInteractor(link),
         vg.xDomain([spec.tss - 1_000_000, spec.tss + 1_000_000]), vg.yLabel('QTL −log₁₀ p'),
         vg.xLabel(`${spec.hit.chr} position (Mb)`), vg.xTickFormat((d: number) => (d / 1e6).toFixed(2)),
-        vg.colorDomain([...CS_DOMAIN]), vg.colorRange(colors),
-        vg.symbolDomain([...CS_DOMAIN]), vg.symbolRange(CS_SYMBOLS),
-        // fillOpacity is a channel, so Plot scales it; without a fixed domain it stretches to
-        // the data maximum and a gene with no credible sets draws every point fully opaque
-        vg.opacityDomain([0, 1]),
+        ...dotScales(nColoc > 0, dark),
         vg.xInset(8), vg.yDomain([0, yMax]), vg.yGrid(true),
         vg.width(width), vg.height(SCATTER_H), vg.marginLeft(MARGIN_LEFT), vg.marginRight(20), vg.marginTop(PLOT_MARGIN_TOP), vg.marginBottom(PLOT_MARGIN_BOTTOM),
         vg.style({ fontFamily: 'inherit', fontSize: '11px', color: ink, background: 'transparent' }),
@@ -291,7 +324,7 @@ export default function LocusPlot({ spec, onCount, onLegend, onActions, onCredib
       setState('error')
     }
     return () => { el.replaceChildren(); brushInteractor.current = null }
-  }, [tableName, link, brushSel, width, dark, yMax, spec.tss, spec.hit.chr])
+  }, [tableName, link, brushSel, width, dark, yMax, nColoc, spec.tss, spec.hit.chr])
 
   const compareCol = useRef<HTMLDivElement>(null)
   // no GWAS object in this data release (SPEC section 10): the QTL-versus-GWAS panel says so
@@ -336,7 +369,7 @@ export default function LocusPlot({ spec, onCount, onLegend, onActions, onCredib
           onPointerDown={e => { anchor.current = host.current?.getBoundingClientRect() ?? null; click.onPointerDown(e) }} />
         {BRUSH_MAGNIFIER && brushed && brushSel && tableName && state === 'ready' && readyFor === key && popupStyle && createPortal(
           <div className="pointer-events-none fixed z-50 rounded-lg border border-base-300 bg-base-100 p-1 shadow-lg" style={popupStyle}>
-            <LocusDetail table={tableName} brush={brushSel} dark={dark} width={popupStyle.width - 8} yMax={yMax} tss={spec.tss} chr={spec.hit.chr} />
+            <LocusDetail table={tableName} brush={brushSel} dark={dark} width={popupStyle.width - 8} yMax={yMax} tss={spec.tss} chr={spec.hit.chr} hasColoc={nColoc > 0} />
           </div>,
           document.body,
         )}
@@ -352,7 +385,7 @@ export default function LocusPlot({ spec, onCount, onLegend, onActions, onCredib
           ? <div className="flex h-full items-center rounded-lg border border-base-300 p-4 text-center text-sm text-base-content/60" style={{ height: SCATTER_H }}>
               QTL versus DCM GWAS: not available in this data release yet.</div>
           : state === 'ready' && tableName && link && brushSel
-          ? <LocusCompare table={tableName} dark={dark} size={Math.min(SCATTER_H, Math.max(width, 200))} yDomain={[0, yMax]} link={link} brush={brushSel} click={click} lookup={lookup} />
+          ? <LocusCompare table={tableName} dark={dark} size={Math.min(SCATTER_H, Math.max(width, 200))} yDomain={[0, yMax]} link={link} brush={brushSel} click={click} lookup={lookup} hasColoc={nColoc > 0} />
           : <CompareSkeleton />}
       </div>
     </div>
@@ -364,27 +397,25 @@ const DETAIL_H = 200
 /** The brushed slice of the locus: the same encoding as the overview, reading the same table
  *  filtered by the brush Selection, with its x domain bound to that Selection so Mosaic
  *  re-queries and re-scales it as the brush moves. No hover: it exists only during the drag. */
-function LocusDetail({ table, brush, dark, width, yMax, tss, chr }: {
+function LocusDetail({ table, brush, dark, width, yMax, tss, chr, hasColoc }: {
   table: string; brush: Selection; dark: boolean; width: number; yMax: number; tss: number; chr: string
+  hasColoc: boolean
 }) {
   const host = useRef<HTMLDivElement>(null)
   useEffect(() => {
     const el = host.current
     if (!el || width === 0) return
-    const colors = dark ? CS_COLORS.dark : CS_COLORS.light
     const ink = dark ? '#c3c2b7' : '#52514e'
     try {
       const plot = vg.plot(
         vg.ruleX([tss], { stroke: ink, strokeOpacity: 0.6, strokeDasharray: '2,3' }),
         vg.dot(vg.from(table, { filterBy: brush }), {
-          x: 'position', y: 'nlp', fill: 'cs', symbol: 'cs', r: 3.5,
-          fillOpacity: vg.sql`CASE WHEN cs = 'none' THEN 0.35 ELSE 0.45 + 0.4 * pip END`,
+          x: 'position', y: 'nlp', ...dotOptions(hasColoc),
           channels: { position: 'position' },
         }),
         vg.xDomain(brush), vg.yLabel('QTL −log₁₀ p'),
         vg.xLabel(`${chr} position (Mb), brushed region`), vg.xTickFormat((d: number) => (d / 1e6).toFixed(3)),
-        vg.colorDomain([...CS_DOMAIN]), vg.colorRange(colors),
-        vg.symbolDomain([...CS_DOMAIN]), vg.symbolRange(CS_SYMBOLS),
+        ...dotScales(hasColoc, dark),
         vg.opacityDomain([0, 1]),
         vg.xInset(8), vg.yDomain([0, yMax]), vg.yGrid(true),
         vg.width(width), vg.height(DETAIL_H), vg.marginLeft(MARGIN_LEFT), vg.marginRight(20), vg.marginTop(PLOT_MARGIN_TOP), vg.marginBottom(PLOT_MARGIN_BOTTOM),
@@ -395,12 +426,12 @@ function LocusDetail({ table, brush, dark, width, yMax, tss, chr }: {
       console.error(e)
     }
     return () => { el.replaceChildren() }
-  }, [table, brush, dark, width, yMax, tss, chr])
+  }, [table, brush, dark, width, yMax, tss, chr, hasColoc])
   return <div ref={host} />
 }
 
 /** Legend for the credible-set encoding; rendered by the parent so it can sit in the section header. */
-export function LocusLegend({ sets }: { sets: string[] }) {
+export function LocusLegend({ sets, coloc = false }: { sets: string[]; coloc?: boolean }) {
   const [dark, setDark] = useState(isDark)
   useEffect(() => {
     const obs = new MutationObserver(() => setDark(isDark()))
@@ -422,6 +453,14 @@ export function LocusLegend({ sets }: { sets: string[] }) {
           </span>
         )
       })}
+      {coloc && <span className="inline-flex items-center gap-1.5">
+        {/* two circles at the channel's ends: the radii match rRange in dotScales */}
+        <span className="inline-flex items-end gap-0.5">
+          <span className="inline-block size-1 rounded-full bg-base-content/45" />
+          <span className="inline-block size-2.5 rounded-full bg-base-content/45" />
+        </span>
+        size: coloc posterior
+      </span>}
       <span className="inline-flex items-center gap-1.5"><span className="inline-block h-3 border-l border-dashed border-base-content/60" /> TSS</span>
     </div>
   )

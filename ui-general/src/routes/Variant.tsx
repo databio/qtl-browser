@@ -10,7 +10,7 @@ import { DetailSkeleton, Empty, TableSkeleton, Unavailable } from '@/components/
 import TransTable from '@/components/TransTable'
 import { CopyButton } from '@/components/copy-button'
 import { dbsnp, ucsc } from '@/lib/links'
-import { fmtBp, fmtBytes, fmtInt, fmtNum, fmtP, fmtPhenotype, fmtSlopeSE } from '@/lib/format'
+import { fmtBp, fmtBytes, fmtInt, fmtNum, fmtP, fmtPhenotype, fmtBetaSE } from '@/lib/format'
 import { planScan, runScan, type CisHit, type ScanPlan } from '@/lib/cis-scan'
 import type { VariantRecord } from '@/lib/store-decode'
 import { csValues, hitPhenotypes, leadValues, loadHits, lookupRsid, nominalsAt, variantAt, variantAtPosition,
@@ -80,8 +80,8 @@ export default function Variant() {
 interface GeneRow { gene_id: string; symbol: string | null }
 
 interface CsRow { row: number; gene: GeneRow; qtlType: 'e' | 's'; phenotypeId: string | null }
-/** A lead row also carries the variant's nominal slope and SE in that phenotype's block. */
-interface LeadRow extends CsRow { slope: number | null; slopeSe: number | null }
+/** A lead row also carries the variant's nominal beta and SE in that phenotype's block. */
+interface LeadRow extends CsRow { beta: number | null; betaSe: number | null }
 
 /** The two list sections, built from the hits records, the phenotypes they name (their
  *  chromosome's search index part and genes), and the lead rows' blocks for their slopes, nearby
@@ -100,7 +100,7 @@ async function buildLists(v: VariantRecord, hits: Hits): Promise<{ leads: LeadRo
   const nominal = await nominalsAt(leadRows.map(x => x.p), v.vidx)
   const leads = leadRows.map(x => {
     const n = nominal.get(x.p.ord)
-    return { ...x, slope: n?.slope ?? null, slopeSe: n?.se ?? null }
+    return { ...x, beta: n?.beta ?? null, betaSe: n?.se ?? null }
   })
   return { leads, cs: hits.cs.map(of) }
 }
@@ -179,7 +179,7 @@ function VariantBody({ v, hits }: { v: VariantRecord; hits: Hits }) {
           lists.leads.length === 0 ? <Empty label="Not the lead variant for any gene or splice phenotype." /> : (
             <div className="overflow-x-auto rounded-lg border border-base-300">
               <table className="table table-sm">
-                <thead><tr><th>Type</th><th>Gene</th><th>Phenotype</th><th className="text-right">Slope ± SE</th><th className="text-right">Perm p</th><th className="text-right">Status</th></tr></thead>
+                <thead><tr><th>Type</th><th>Gene</th><th>Phenotype</th><th className="text-right">beta ± SE</th><th className="text-right">Perm p</th><th className="text-right">Status</th></tr></thead>
                 <tbody>
                   {lists.leads.map(l => {
                     const val = leadValues(hits, l.row)
@@ -188,7 +188,7 @@ function VariantBody({ v, hits }: { v: VariantRecord; hits: Hits }) {
                         <td><span className={`badge badge-xs ${l.qtlType === 'e' ? 'badge-primary' : 'badge-secondary'}`}>{l.qtlType === 'e' ? 'eQTL' : 'sQTL'}</span></td>
                         <td className="font-medium"><span className={ROW_LINK_TEXT}>{l.gene.symbol ?? l.gene.gene_id}</span></td>
                         <td className="tabular-nums text-base-content/60">{l.phenotypeId ? fmtPhenotype(l.phenotypeId) : l.gene.gene_id}</td>
-                        <td className="text-right tabular-nums">{fmtSlopeSE(l.slope, l.slopeSe)}</td>
+                        <td className="text-right tabular-nums">{fmtBetaSE(l.beta, l.betaSe)}</td>
                         <td className="text-right tabular-nums">{fmtP(val.pvalPerm)}</td>
                         <td className="text-right">{val.significant ? <span className={`badge badge-xs ${l.qtlType === 'e' ? 'badge-primary' : 'badge-secondary'}`}>{l.qtlType === 'e' ? 'eGene' : 'sQTL'}</span> : ''}</td>
                       </tr>
@@ -262,7 +262,7 @@ function HitTable({ title, hits, qtlType, toggle }: {
       {hits.length === 0 ? <Empty label="No windows cover this variant." /> : (
         <div className="overflow-x-auto rounded-lg border border-base-300">
           <table className="table table-sm">
-            <thead><tr><th>Gene</th>{qtlType === 's' && <th>Phenotype</th>}<th className="text-right">TSS dist</th><th className="text-right">AF</th><th className="text-right">p</th><th className="text-right">Slope ± SE</th><th className="text-right">PIP</th></tr></thead>
+            <thead><tr><th>Gene</th>{qtlType === 's' && <th>Phenotype</th>}<th className="text-right">TSS dist</th><th className="text-right">AF</th><th className="text-right">p</th><th className="text-right">beta ± SE</th><th className="text-right">PIP</th></tr></thead>
             <tbody>
               {hits.map((h, i) => (
                 <tr key={i} className={`${ROW_LINK} hover:bg-base-200 ${h.pip != null ? 'bg-base-200/70' : ''}`} {...rowLink(`/gene/${h.gene_id}${qtlType === 's' ? '?tab=sqtl' : ''}`)}>
@@ -271,7 +271,7 @@ function HitTable({ title, hits, qtlType, toggle }: {
                   <td className="text-right tabular-nums text-base-content/60">{fmtBp(h.tss_distance)}</td>
                   <td className="text-right tabular-nums text-base-content/60">{fmtNum(h.af)}</td>
                   <td className="text-right tabular-nums">{fmtP(h.pval_nominal)}</td>
-                  <td className="text-right tabular-nums">{fmtSlopeSE(h.slope, h.slope_se)}</td>
+                  <td className="text-right tabular-nums">{fmtBetaSE(h.beta, h.beta_se)}</td>
                   <td className="text-right tabular-nums">{h.pip != null ? `${fmtNum(h.pip)} (set ${h.cs_id})` : ''}</td>
                 </tr>
               ))}

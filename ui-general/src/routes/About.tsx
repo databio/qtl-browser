@@ -38,15 +38,15 @@ export default function About() {
             </p>
             <h2>Definitions</h2>
             <ul>
-              <li><strong>eGene, sQTL intron</strong>: permutation p-value below 0.05. An sGene has at least one significant intron. A Benjamini-Hochberg q-value on the beta-approximated permutation p is listed alongside.</li>
+              <li><strong>eGene, sQTL intron</strong>: permutation p-value below 0.05, the preprint's rule. An sGene has at least one significant intron. The beta-approximated permutation p is listed alongside.</li>
               <li><strong>Lead variant</strong>: the variant with the smallest nominal p-value in the cis window, ±1 Mb of the transcription start site.</li>
               <li><strong>Credible sets and PIP</strong>: SuSiE 95% credible sets; PIP is the posterior inclusion probability. A variant in two sets of one phenotype is listed under both in the credible-set table; the locus plot and cis table show its higher-PIP membership.</li>
               <li><strong>A1 and A2</strong>: variants are stored against the GRCh38 reference, so A2 is the reference
-                allele and A1 the alternate. Allele frequencies and slopes are A1's; slopes are in standard-deviation
+                allele and A1 the alternate. Allele frequencies and betas are A1's; betas are in standard-deviation
                 units of the phenotype per A1 allele.</li>
-              {rounding && <li><strong>Rounded values</strong>: per-variant p-values, slopes, standard errors, and allele
+              {rounding && <li><strong>Rounded values</strong>: per-variant p-values, betas, standard errors, and allele
                 frequencies are stored in compressed form, so a p-value shown here can differ from the source by up to{' '}
-                {rounding.pPct}%{rounding.slopeSe && <> and a slope by up to {rounding.slopeSe} standard errors</>}. Gene-level
+                {rounding.pPct}%{rounding.slopeSe && <> and a beta by up to {rounding.slopeSe} standard errors</>}. Gene-level
                 results and the DCM GWAS values are exact, and <ExternalLink href={ZENODO}>exact per-variant values are on
                 Zenodo</ExternalLink>.</li>}
               <li><strong>Splice phenotypes</strong>: leafcutter intron excision ratios, shown as intron coordinates and strand. Introns sharing a splice site share a cluster. Every tested intron has its permutation result and its per-variant nominal statistics.</li>

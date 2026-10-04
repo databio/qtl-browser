@@ -11,15 +11,14 @@ import { Segmented } from '@/components/segmented'
 import { DetailSkeleton, Empty, TableSkeleton, TabSkeleton, Unavailable } from '@/components/states'
 import CredibleSetTable from '@/components/CredibleSetTable'
 import CisTable from '@/components/CisTable'
-import { colocLocus, type LocusColoc } from '@/lib/coloc-abf'
-import { sliceRun } from '@/lib/store-decode'
+import { type LocusColoc } from '@/lib/coloc-abf'
 import TransTable from '@/components/TransTable'
 import LocusPlot, { LocusLegend } from '@/components/LocusPlot'
 import { COLOC_EQTL_GENES, COLOC_SQTL_GENES } from '@/lib/coloc'
 import { ensemblGene, geneCards, gtexGene, openTargetsGene, ucsc } from '@/lib/links'
 import { useStoreInfo } from '@/contexts/store-context'
 import { CopyButton } from '@/components/copy-button'
-import { fmtBp, fmtInt, fmtNum, fmtP, fmtPhenotype, fmtSlopeSE } from '@/lib/format'
+import { fmtBp, fmtInt, fmtNum, fmtP, fmtPhenotype, fmtBetaSE } from '@/lib/format'
 import { resolveGene, type GeneDetail, type SplicePhenotype,
   type CredibleSetRow, type Gene as GeneRow, type SearchHit } from '@/lib/queries'
 import { loadGene, type GenePack } from '@/lib/gene'
@@ -159,9 +158,11 @@ function GeneTable({ g }: { g: GeneRow }) {
  *
  * The preprint used coloc.abf, so these are comparable to its table; at coloc's default priors
  * they reproduce its gene list exactly (every listed gene above 0.8, every other below 0.65).
- * `credible95` is shown beside PP.H4 on purpose: where the shared-variant posterior is spread over
- * tens of variants, PP.H4 is a claim about the region and is also the regime where the p12 prior
- * does much of the work, so the two numbers have to be read together.
+ *
+ * How far the shared-variant posterior is spread is the locus plot's business, not this table's:
+ * the dots are sized by it. That matters for reading PP.H4, because a posterior smeared over tens
+ * of variants is the regime where the p12 prior does much of the work -- FLNC falls from 0.94 to
+ * 0.60 at p12 1e-6 while SKI holds at 0.999.
  */
 function ColocSection({ sym, qtlType, gp, phenotypeId }: {
   sym: string; qtlType: 'e' | 's'; gp: GenePack; phenotypeId?: string
@@ -172,11 +173,8 @@ function ColocSection({ sym, qtlType, gp, phenotypeId }: {
   useEffect(() => {
     let alive = true
     setRes('running')
-    Promise.all([qtlType === 's' && phenotypeId ? gp.intron(phenotypeId) : gp.block, gp.variants, gp.gwasCols])
-      .then(([block, range, gwas]) => {
-        const run = block && range && block.varStart != null ? sliceRun(range, block.varStart, block.nRows, block) : null
-        if (alive) setRes(colocLocus(block, run, gwas))
-      })
+    gp.coloc(qtlType, phenotypeId)
+      .then(r => { if (alive) setRes(r) })
       .catch((e: Error) => { console.error(e); if (alive) setRes(null) })
     return () => { alive = false }
   }, [gp, qtlType, phenotypeId])
@@ -196,22 +194,17 @@ function ColocSection({ sym, qtlType, gp, phenotypeId }: {
               { label: 'H0 · no causal variant', value: fmtNum(res.pp[0], 3) },
               { label: 'H1 · QTL only', value: fmtNum(res.pp[1], 3) },
               { label: 'H2 · GWAS only', value: fmtNum(res.pp[2], 3) },
-              { label: 'H3 · distinct variants', value: fmtNum(res.pp[3], 3) },
-              { label: 'H4 · shared variant',
+              { label: 'H3 · distinct causal variants', value: fmtNum(res.pp[3], 3) },
+              { label: 'H4 · shared causal variant',
                 value: <span className="font-medium text-base-content">{fmtNum(res.pp[4], 3)}</span> },
             ]} />
             <KvTable align="right" labelWidth="w-52" rows={[
-              // "coloc" rather than plain "credible set": the SuSiE section above is single-trait
-              // fine-mapping of the QTL, with LD and several possible signals, while this is the
-              // shared-variant posterior under H4, with no LD and one causal variant. The two
-              // coincide only where the locus is sharp, and the names must not suggest otherwise.
-              { label: 'coloc 95% credible set', value: `${fmtInt(res.credible95)} variant${res.credible95 === 1 ? '' : 's'}` },
               { label: 'Top shared variant', value: (() => {
                 const id = res.top.rsNumber ? `rs${res.top.rsNumber}` : `${gp.hit.chr}:${res.top.position}`
                 return <Link className="link-quiet tabular-nums" to={`/variant/${id}`}>{id}</Link>
               })() },
               { label: 'Top variant posterior', value: fmtNum(res.top.snpPP4, 3) },
-              { label: 'Shared with the GWAS', value: `${fmtInt(res.nShared)} of ${fmtInt(res.nQtlRows)}` },
+              { label: 'Variants shared with GWAS', value: `${fmtInt(res.nShared)} of ${fmtInt(res.nQtlRows)}` },
               ...(res.nNotTested ? [{ label: 'Not tested here', value: fmtInt(res.nNotTested) }] : []),
               ...(res.nUnderflow ? [{ label: 'p underflowed', value: <span className="text-warning">{fmtInt(res.nUnderflow)}</span> }] : []),
               ...(res.nNoStats ? [{ label: 'No standard error', value: fmtInt(res.nNoStats) }] : []),
@@ -231,7 +224,7 @@ function EqtlTab({ hit, gp, d, transTable }: { hit: SearchHit; gp: GenePack; d: 
   const g = d.gene
   const [cs, setCs] = useState<CredibleSetRow[] | null>(null)
   const [nVar, setNVar] = useState<number | null>(null)
-  const [legend, setLegend] = useState<string[] | null>(null)
+  const [legend, setLegend] = useState<{ sets: string[]; coloc: boolean } | null>(null)
   const [actions, setActions] = useState<ReactNode>(null)
   const [locus, setLocus] = useState<LocusTable>(NO_TABLE)
   const annotation = useStoreInfo()?.annotationVersion ?? undefined
@@ -244,24 +237,23 @@ function EqtlTab({ hit, gp, d, transTable }: { hit: SearchHit; gp: GenePack; d: 
         <KvTable rows={[
           ...geneRows(g, annotation),
           { label: 'Lead variant', value: <Link className="link-quiet" to={`/variant/${g.lead_rsid ?? `${g.chr}:${g.lead_position}`}`}>{g.lead_rsid ?? `${g.chr}:${fmtInt(g.lead_position)}`}</Link> },
-          { label: 'Lead position', value: <span className="tabular-nums">{g.chr}:{fmtInt(g.lead_position)}</span> },
           { label: 'A1 / A2', value: `${g.lead_A1} / ${g.lead_A2}` },
           { label: 'A1 frequency', value: fmtNum(g.lead_af) },
         ]} />
         <KvTable align="right" rows={[
+          { label: 'Lead position', value: <span className="tabular-nums">{g.chr}:{fmtInt(g.lead_position)}</span> },
           { label: 'Lead distance to TSS', value: fmtBp(g.lead_tss_distance) },
           { label: 'Variants tested', value: fmtInt(g.num_var) },
-          { label: 'Slope ± SE', value: fmtSlopeSE(g.slope, g.slope_se) },
+          { label: 'beta ± SE', value: fmtBetaSE(g.beta, g.beta_se) },
           { label: 'Nominal p', value: fmtP(g.pval_nominal) },
           { label: 'Permutation p', value: fmtP(g.pval_perm) },
           { label: 'Beta-approximated p', value: fmtP(g.pval_beta) },
-          { label: 'q-value', value: fmtP(g.qval) },
           { label: 'Credible sets', value: String(g.n_credible_sets) },
         ]} />
       </div>
       <SectionPanel title="Locus"
         description={<span className="inline-flex items-center gap-3 tabular-nums"><span>{g.chr}:{fmtInt(g.tss - 1_000_000)}–{fmtInt(g.tss + 1_000_000)}{nVar != null && ` · ${fmtInt(nVar)} variants`}</span>{actions}</span>}
-        action={legend && <LocusLegend sets={legend} />}>
+        action={legend && <LocusLegend {...legend} />}>
         <LocusPlot spec={{ hit, pack: gp, qtlType: 'e', tss: g.tss, exons: d.exons }} onCount={setNVar} onLegend={setLegend} onActions={setActions} onCredibleSets={setCs}
           onTable={(name, failed) => setLocus({ name, failed: !!failed })} />
       </SectionPanel>
@@ -269,7 +261,7 @@ function EqtlTab({ hit, gp, d, transTable }: { hit: SearchHit; gp: GenePack; d: 
         {cs === null ? <TableSkeleton columns={[{ w: 'w-4' }, { w: 'w-12' }, { w: 'w-8', align: 'right' }, { w: 'w-24' }, { w: 'w-10', align: 'right' }, { w: 'w-10', align: 'right' }, { w: 'w-16', align: 'right' }]} rows={2} /> : <CredibleSetTable rows={cs} />}
       </SectionPanel>
       <ColocSection sym={sym} qtlType="e" gp={gp} />
-      <SectionPanel title="cis associations" description={<>Every variant within ±1 Mb of the TSS; rows tinted when the variant is in a credible set. <RoundingNote /> Click a row to open the variant.</>}>
+      <SectionPanel title="cis associations" description={<>Every variant within ±1 Mb of the TSS; rows tinted when the variant is in a credible set. Click a row to open the variant. <RoundingNote /></>}>
         <CisTable table={locus.name} failed={locus.failed} chr={hit.chr} qtlType="e" fileStem={`${sym}_cis_eqtl`} />
       </SectionPanel>
       <TransSection table={transTable} qtlType="e" fileStem={`${sym}_trans_eqtl`} />
@@ -297,7 +289,7 @@ function SqtlIntrons({ hit, gp, d, transTable, phens }: { hit: SearchHit; gp: Ge
   // unless there are none
   const [showAll, setShowAll] = useState(() => !phens.some(p => p.is_sqtl))
   const [nVar, setNVar] = useState<number | null>(null)
-  const [legend, setLegend] = useState<string[] | null>(null)
+  const [legend, setLegend] = useState<{ sets: string[]; coloc: boolean } | null>(null)
   const [actions, setActions] = useState<ReactNode>(null)
   const [locus, setLocus] = useState<LocusTable>(NO_TABLE)
   useEffect(() => {
@@ -321,7 +313,7 @@ function SqtlIntrons({ hit, gp, d, transTable, phens }: { hit: SearchHit; gp: Ge
         {listed.length === 0 ? <Empty label={`None of the ${fmtInt(phens.length)} tested introns has a significant sQTL.`} /> : (
           <div className="overflow-x-auto rounded-lg border border-base-300">
             <table className="table table-sm">
-              <thead><tr><th>Cluster</th><th>Intron</th><th>Lead variant</th><th className="text-right">Slope ± SE</th><th className="text-right">Perm p</th><th className="text-right">Sets</th></tr></thead>
+              <thead><tr><th>Cluster</th><th>Intron</th><th>Lead variant</th><th className="text-right">beta ± SE</th><th className="text-right">Perm p</th><th className="text-right">Sets</th></tr></thead>
               <tbody>
                 {listed.map(p => (
                   <tr key={p.phenotype_id} onClick={() => setSelected(p.phenotype_id)}
@@ -329,7 +321,7 @@ function SqtlIntrons({ hit, gp, d, transTable, phens }: { hit: SearchHit; gp: Ge
                     <td className="font-mono text-xs text-base-content/60">{p.cluster_id}</td>
                     <td className="tabular-nums">{fmtInt(p.intron_start)}–{fmtInt(p.intron_end)} <span className="text-base-content/50">({fmtBp(p.intron_end - p.intron_start)})</span></td>
                     <td><Link className="link-quiet" to={`/variant/${p.lead_rsid ?? `${p.chr}:${p.lead_position}`}`}>{p.lead_rsid ?? `${p.chr}:${fmtInt(p.lead_position)}`}</Link></td>
-                    <td className="text-right tabular-nums">{fmtSlopeSE(p.slope, p.slope_se)}</td>
+                    <td className="text-right tabular-nums">{fmtBetaSE(p.beta, p.beta_se)}</td>
                     <td className="text-right tabular-nums">{fmtP(p.pval_perm)}</td>
                     <td className="text-right tabular-nums">{p.n_credible_sets}</td>
                   </tr>
@@ -343,7 +335,7 @@ function SqtlIntrons({ hit, gp, d, transTable, phens }: { hit: SearchHit; gp: Ge
         <>
           <SectionPanel title="Locus"
             description={<span className="inline-flex items-center gap-3 tabular-nums"><span>intron {fmtPhenotype(sel.phenotype_id)}{nVar != null && ` · ${fmtInt(nVar)} variants`}</span>{actions}</span>}
-            action={legend && <LocusLegend sets={legend} />}>
+            action={legend && <LocusLegend {...legend} />}>
             <LocusPlot spec={{ hit, pack: gp, qtlType: 's', phenotypeId: sel.phenotype_id, tss: sel.tss, exons: d.exons, intron: { start: sel.intron_start, end: sel.intron_end } }} onCount={setNVar} onLegend={setLegend} onActions={setActions} onCredibleSets={setCs}
               onTable={(name, failed) => setLocus({ name, failed: !!failed })} />
           </SectionPanel>
@@ -351,7 +343,7 @@ function SqtlIntrons({ hit, gp, d, transTable, phens }: { hit: SearchHit; gp: Ge
             {cs === null ? <TableSkeleton columns={[{ w: 'w-4' }, { w: 'w-12' }, { w: 'w-8', align: 'right' }, { w: 'w-24' }, { w: 'w-10', align: 'right' }, { w: 'w-10', align: 'right' }, { w: 'w-16', align: 'right' }]} rows={2} /> : <CredibleSetTable rows={cs} />}
           </SectionPanel>
           <ColocSection sym={sym} qtlType="s" gp={gp} phenotypeId={sel.phenotype_id} />
-          <SectionPanel title="cis associations" description={<>Every variant within ±1 Mb of the TSS for <b className="font-medium text-base-content/80">this intron</b>; rows tinted when the variant is in a credible set. <RoundingNote /> Click a row to open the variant.</>}>
+          <SectionPanel title="cis associations" description={<>Every variant within ±1 Mb of the TSS for <b className="font-medium text-base-content/80">this intron</b>; rows tinted when the variant is in a credible set. Click a row to open the variant. <RoundingNote /></>}>
             <CisTable table={locus.name} failed={locus.failed} chr={hit.chr} qtlType="s" phenotypeId={sel.phenotype_id} fileStem={`${sym}_${sel.cluster_id}_${sel.intron_start}_${sel.intron_end}_cis_sqtl`} />
           </SectionPanel>
         </>
@@ -369,7 +361,7 @@ function TransSection({ table, qtlType, fileStem }: { table: string | null; qtlT
   const hasTrans = useStoreInfo()?.hasTrans ?? false
   return (
     <SectionPanel title="trans associations"
-      description={<>Every variant outside the cis window associated with this gene's {what}{qtlType === 's' && <> <b className="font-medium text-base-content/80">(any intron)</b></>}. <RoundingNote kind="trans" /> Click a row to open the variant.</>}>
+      description={<>Every variant outside the cis window associated with this gene's {what}{qtlType === 's' && <> <b className="font-medium text-base-content/80">(any intron)</b></>}. Click a row to open the variant. <RoundingNote kind="trans" /></>}>
       {hasTrans ? <TransTable table={table} qtlType={qtlType} fileStem={fileStem} /> : <Unavailable what={`trans ${qtlType === 'e' ? 'eQTL' : 'sQTL'} results`} />}
     </SectionPanel>
   )

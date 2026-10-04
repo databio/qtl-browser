@@ -16,7 +16,7 @@ import { blockHeader, PackError, scanBlockRow, type VariantRecord } from './stor
 /** One nominal result at the variant. `phenotype_id` and `is_sqtl` are set on splicing rows only. */
 export interface CisHit {
   gene_id: string; symbol: string | null; phenotype_id?: string; is_sqtl?: boolean
-  tss_distance: number; pval_nominal: number; slope: number; slope_se: number; af: number
+  tss_distance: number; pval_nominal: number; beta: number; beta_se: number; af: number
   pip: number | null; cs_id: number | null
 }
 
@@ -94,7 +94,7 @@ async function scanType(plan: ScanPlan, span: Span | null, phenotypeType: string
     f.name, span.off, span.len, b => b, splicing ? 'store:scan-sqtl-decode' : 'store:scan-eqtl-decode')
   return walkSpan(bytes, span, plan.vidx, f.dof, (ref, r) => {
     const base = { gene_id: ref.gene_id, symbol: ref.symbol, tss_distance: ref.tss == null ? NaN : v.position - ref.tss,
-      pval_nominal: r.pval, slope: r.slope, slope_se: r.se, af: v.af, pip: r.pip, cs_id: r.csId }
+      pval_nominal: r.pval, beta: r.slope, beta_se: r.se, af: v.af, pip: r.pip, cs_id: r.csId }
     return splicing ? { ...base, phenotype_id: ref.phenotype_id, is_sqtl: ref.significant } : base
   })
 }

@@ -20,6 +20,7 @@ export const CS_COLORS = {
 }
 // the neutral background keeps the plain circle; every credible set gets its own shape
 export const CS_SYMBOLS = ['circle', 'diamond2', 'square', 'triangle', 'star', 'hexagon']   // diamond2 = rotated square
+
 /** CSS clip-paths that echo the plot symbols in the legend swatches. */
 export const CS_SWATCH_CLIP: Record<string, string | undefined> = {
   circle: undefined,
