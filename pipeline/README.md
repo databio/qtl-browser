@@ -87,28 +87,39 @@ uv run python -m pipeline.qtlstore gc --store <store> [--dry-run]               
 uv run python -m pipeline.qtlstore validate --store <store>
 ```
 
-The **catalog overlap index** (`overlap.py`, SPEC.md section 19) records, for every site any of the
-store's variant catalogs holds, which of them hold it: membership in one read, a catalog's vidx for a
-shared site, and exact pairwise overlap counts written into the pointer, so the statistics need no
-object read. It is derived -- rebuild it any time, and a store without one is complete -- and it is
-rebuilt before `validate`, which fails on an index whose catalogs no longer carry the identity it was
-built against. Its pointer also counts positions two catalogs hold with no shared allele pair, and
-indels that may be one event written two ways; the latter are suspects to look at, never a verdict.
-
 `remove-experiment` deletes only `experiments/<id>.json` and rewrites `store.json`; the experiment's
 variant catalog and annotation pointers stay (another experiment may use them; delete those pointer
 files by hand first if they should go too), and its objects stay until `gc`. `gc` deletes every
 `immutable/` object that no pointer file on disk names, plus leftover `*.tmp` files.
 `test_results.py::test_remove_experiment_and_gc` covers the cycle.
 
-Checked on chr21/22 scratch stores on 2026-09-24 (`store-c2122-mod`, Slurm job 20443347): build
-TOPCHeF alone (18 objects), add GTEx (31), remove GTEx (`validate` PASS), `gc` (7 GTEx experiment
-objects deleted, 28.8 MB; the GTEx variant catalog and annotation pointers stay and keep theirs),
-`validate` PASS again, and every TOPCHeF object (its experiment, variant catalog and annotation) has
-the same SHA-256 after each step. A second `gc` deletes nothing.
+Checked end to end on a chr21/22 store: build TOPCHeF alone (18 objects), add GTEx (31), remove
+GTEx, `gc` (7 objects, 28.8 MB; GTEx's variant catalog and annotation pointers stay and keep
+theirs), with `validate` passing at each step and every TOPCHeF object keeping the same SHA-256
+throughout. A second `gc` deletes nothing.
+
+### Catalog overlap index
+
+`overlap.py` (SPEC.md section 19) records, for every site any of the store's variant catalogs holds,
+which of them hold it: membership in one read, a catalog's vidx for a shared site, and exact
+pairwise overlap counts written into the pointer, so the statistics need no object read at all. It is
+derived: rebuild it any time, and a store without one is still complete. `store.sbatch` rebuilds it
+before `validate`, which fails on an index whose catalogs no longer carry the identity it was
+built against.
+
+The pointer also counts positions two catalogs hold with no shared allele pair, and indels that may
+be one event written two ways. The second kind are candidates to check rather than
+conclusions: confirming one needs the reference sequence, and `CONTRACT.md` does not require
+left-aligned indels.
+
+### Configuration
 
 Paths, the significance rule, worker counts, the eQTL Catalogue experiments and the gate's sample
 genes live in `config.yaml`. Nothing is hard-coded in the steps.
+
+Subset runs: `QTLB_CHROMS=chr21,chr22` narrows the chromosome list and `QTLB_DERIVED` moves the
+whole output tree, step markers included. Always set both, and never point either at the frozen v0
+tree.
 
 The `reference:` block in `config.yaml` names the reference FASTA, the local refgetstore, and
 `reference.collection`, the seqcol digest that pins the assembly the positions sit on.
@@ -151,14 +162,14 @@ What reads it here:
 - `test_packfmt.py`, `test_packtool.py`: round-trip tests on synthetic data; `test_packfmt` without
   `--synthetic` also runs a real-data case that needs the v0 tables.
 
-Subset runs: `QTLB_CHROMS=chr21,chr22` narrows the chromosome list and `QTLB_DERIVED` moves the
-whole output tree, step markers included. Always set both for a subset run, and never point one at
-the frozen v0 tree.
+## Conventions in the input tables
 
-## Conventions
+These are the `_tables/` conventions, which follow the Zenodo release. The store itself is
+ref/alt with ALT-relative effects (`CONTRACT.md`, SPEC.md section 7), so an adapter converts.
 
 - `gene_id` is an unversioned ENSG; `symbol` is the GENCODE name; `chr` is `chr1`..`chrX`.
-- `A1` is the effect (minor) allele, `A2` the reference, as in the Zenodo release. Verified
-  against GRCh38: all 8,419,594 cis SNPs read A2 at their position, none read A1.
+- `A1` is the effect (minor) allele, `A2` the reference. Verified against GRCh38: all 8,419,594 cis
+  SNPs read A2 at their position, none read A1, so the TOPCHeF adapter maps A2 to `ref` and keeps
+  the sign.
 - sQTL `phenotype_id` is the leafcutter string `chr:start:end:clu_N_strand:ENSG.v`.
 - `pval_perm < 0.05` is the significance flag; a BH `qval` on `pval_beta` is stored alongside.

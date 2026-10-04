@@ -4,13 +4,13 @@ A web browser for heart QTL results: the TOPCHeF cis and trans eQTL and sQTL sum
 (Murray et al. 2026, medRxiv 10.64898/2026.01.12.26343934), the GTEx v8 heart left ventricle
 results from the eQTL Catalogue, and the Jurgens et al. 2024 DCM GWAS for colocalization views.
 
-There is no server. The data is a **qtlstore**: a folder of files, each named by the hash of its
-own bytes, with every position tied to a refget reference sequence, holding any number of studies
-over any number of variant catalogs. The site is a static React app
-that reads those files with plain HTTP range requests and decodes them in the browser. `SPEC.md`
-describes the store byte by byte.
-
 Live site: https://topchef.databio.org
+
+The site is a static React app with no backend. Its data is a **qtlstore**: a directory of files,
+each named by the hash of its own bytes, with every position tied to a refget reference sequence.
+One store can hold several studies over several variant catalogs. The app fetches the parts of those
+files it needs with HTTP range requests and decodes them in the browser. `SPEC.md` has the byte
+layout.
 
 ## Layout
 
@@ -29,15 +29,14 @@ Live site: https://topchef.databio.org
 
 The build runs on Rivanna, where the inputs live. It goes in four stages:
 
-1. **Adapters** turn each study into contract tables: `sbatch adapter.sbatch` (TOPCHeF, the eQTL
+1. **Adapters.** `sbatch adapter.sbatch` turns each study into contract tables (TOPCHeF, the eQTL
    Catalogue, the DCM GWAS).
-2. **Store**: `sbatch store.sbatch` builds the annotation, variant catalog and results for each
-   experiment into one store.
-3. **Checks**: `Store.validate` (run by `store.sbatch`), `verify_v0` (the TOPCHeF store against the
-   frozen v0 build), and the TOPCHeF acceptance gate plus the contract check (run by
-   `adapter.sbatch`).
-4. **Benchmark**: `sbatch bench_store.sbatch` compares v0 and v1 sizes and read speed; the smoke
-   suites in `ui/bench/` check the pages in a browser.
+2. **Store.** `sbatch store.sbatch` builds the annotation, variant catalog, results and overlap
+   index for every experiment into one store.
+3. **Checks.** `Store.validate` and `verify_v0` run inside `store.sbatch`; the TOPCHeF acceptance
+   gate and the contract check run inside `adapter.sbatch`.
+4. **Benchmark.** `sbatch bench_store.sbatch` for v0-versus-v1 size and read speed; `ui/bench/`
+   for the pages in a browser.
 
 `pipeline/README.md` has the exact commands and variables. The current whole-genome store is
 `/scratch/ns5bc/qtl-browser/store-genome-v1f` on Rivanna.
@@ -64,13 +63,13 @@ The data lives in the Backblaze B2 bucket `cloud-databio` under `qtl-browser/`, 
 `https://cloud2.databio.org/qtl-browser`. The site is a Cloudflare Workers static-assets project
 (`ui/wrangler.jsonc`) in the databio account, at https://topchef.databio.org.
 
-**Known issue (from Sam):** `cloud2.databio.org` sends no `ETag` or `Last-Modified`, and Chromium
+**Known issue:** `cloud2.databio.org` sends no `ETag` or `Last-Modified`, and Chromium
 stores a 206 (range) response only with a strong validator, so range reads are re-fetched on every
 visit instead of coming from the browser cache. Whole-file reads are cached normally.
 
-The full steps, with credentials and checks, are in the cloud-management repo:
-`~/workspaces/assistant/cloud-management/backblaze/qtl-browser.md`. In short: upload the store
-(`immutable/` files first, the pointer files and `store.json` last), then build and deploy the app:
+Credentials and the upload checks are in the cloud-management repo, at
+`backblaze/qtl-browser.md`. Upload the store with the `immutable/` files first and the pointer files
+and `store.json` last, then build and deploy the app:
 
 ```bash
 cd ui

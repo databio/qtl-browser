@@ -1,12 +1,14 @@
 # ui-general — the general multi-study browser
 
-Forked from `ui/` on 2026-09-25 (`plans/2026-09-25-ui-fork-topchef.md`). Same stack, same
-store, same decoders. What changes here is what the app assumes about *which* study it is showing.
+A fork of `ui/` (2026-09-25, `plans/2026-09-25-ui-fork-topchef.md`) with the same stack, store and
+decoders. The difference is what it assumes about which study it is showing.
 
-`ui/` is the deployed TOPCHeF site and stays working throughout. Both copies stay live —
-features may land in either — so a fix that belongs in both is a decision each time. This directory is not
-deployed and carries no `wrangler.jsonc`, so it cannot ship over that site by accident. It takes
-over the `ui/` name, and the deployment with it, once it has caught up.
+`ui/` remains the deployed TOPCHeF site. This directory is not deployed and has no
+`wrangler.jsonc`, so it cannot be shipped over that site by accident. It will take over the `ui/`
+name and the deployment once it has caught up.
+
+Features may land in either copy, so a change belonging in both has to be applied twice, and
+nothing checks that it was. `diff -rq src ../ui/src` shows what differs.
 
 ## Where it is going
 

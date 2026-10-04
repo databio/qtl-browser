@@ -1,32 +1,30 @@
-# React + TypeScript + Vite
+# ui — the TOPCHeF browser
 
-This template provides a minimal setup to get React working in Vite with HMR and some Oxlint rules.
+This is the app deployed at https://topchef.databio.org. Vite, React, TypeScript, Tailwind 4 and
+DaisyUI 5, with DuckDB-WASM and Mosaic for the plots.
 
-Currently, two official plugins are available:
+It reads a qtlstore over HTTP range requests and decodes it in the browser. `lib/store.ts` resolves
+the pointer documents and builds every data URL; `lib/store-decode.ts` decodes the binary objects;
+`../SPEC.md` is the byte layout they both implement. DuckDB holds only what a page materializes (a
+locus window, a GWAS window, trans rows), so the gene and variant pages start it and the other
+pages do not.
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
-
-## React Compiler
-
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
-
-## Expanding the Oxlint configuration
-
-If you are developing a production application, we recommend enabling type-aware lint rules by installing `oxlint-tsgolint` and editing `.oxlintrc.json`:
-
-```json
-{
-  "$schema": "./node_modules/oxlint/configuration_schema.json",
-  "plugins": ["react", "typescript", "oxc"],
-  "options": {
-    "typeAware": true
-  },
-  "rules": {
-    "react/rules-of-hooks": "error",
-    "react/only-export-components": ["warn", { "allowConstantExport": true }]
-  }
-}
+```bash
+npm install
+QTL_DATA_DIR=/path/to/store VITE_DATA_BASE= npm run dev   # a local store at /data, with Range support
+npm run dev                                               # the live store, from .env.production
 ```
 
-See the [Oxlint rules documentation](https://oxc.rs/docs/guide/usage/linter/rules) for the full list of rules and categories.
+| | |
+|---|---|
+| `npx tsc -b` | type-check. `tsc -p .` is a no-op here and always passes |
+| `npm run store-check` | validate a local store against the Python decoders |
+| `npm run build` | `tsc -b && vite build`; `.env.production` points at the B2 store |
+| `bench/` | browser smoke suites and a gene-page cost harness (`bench/README.md`) |
+
+`VITE_EXPERIMENT` selects the experiment, default `topchef`. Deploying is `npx wrangler deploy` with
+root directory `ui` (`wrangler.jsonc`); the repo README has the full steps.
+
+`../ui-general/` is the multi-study fork of this app, and will take over the `ui/` name and the
+deployment once it has caught up. Until then the two can drift apart without anything noticing;
+`diff -rq src ../ui-general/src` shows what has changed.
