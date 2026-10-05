@@ -1,11 +1,11 @@
 // Cloudflare Workers static-assets deploy for the general multi-study browser.
 // `.github/workflows/deploy-ui.yml` builds and deploys it on every push to main that touches `ui/`.
-// No custom domain yet, so it is served at qtl-browser-general.<account>.workers.dev. The name must
-// differ from `ui-topchef/wrangler.jsonc`, or a deploy here would replace topchef.databio.org.
+// No custom domain yet, so it is served at qtl-browser.<account>.workers.dev. topchef.databio.org
+// belongs to `qtl-browser-topchef` (`ui-topchef/wrangler.jsonc`); do not declare it here.
 // The SPA fallback for client-side routes is `not_found_handling`; a `public/_redirects`
 // with `/* /index.html 200` is rejected by Workers as a redirect loop, so there is none.
 {
-  "name": "qtl-browser-general",
+  "name": "qtl-browser",
   "compatibility_date": "2026-09-01",
   "assets": {
     "directory": "./dist",

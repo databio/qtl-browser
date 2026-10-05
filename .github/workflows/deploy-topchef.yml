@@ -1,8 +1,9 @@
 name: Deploy TOPCHeF UI
 
-# Builds ui-topchef/ and deploys it to the Worker `qtl-browser`, which serves
-# https://topchef.databio.org. Replaces the Workers Builds git connection, which
-# stopped receiving pushes when the repo moved to databio.
+# Builds ui-topchef/ and deploys it to the Worker `qtl-browser-topchef`, which
+# serves https://topchef.databio.org (custom domain declared in wrangler.jsonc).
+# Replaces the Workers Builds git connection, which stopped receiving pushes when
+# the repo moved to databio.
 
 on:
   push:

@@ -1,6 +1,6 @@
 name: Deploy general UI
 
-# Builds ui/ and deploys it to the Worker `qtl-browser-general` (workers.dev only,
+# Builds ui/ and deploys it to the Worker `qtl-browser` (workers.dev only,
 # no custom domain yet). Separate from deploy-topchef.yml so a change to one app
 # never redeploys the other.
 

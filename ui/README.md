@@ -5,7 +5,7 @@ with the same stack, store and decoders. The difference is what it assumes about
 showing.
 
 `../ui-topchef/` is the site at https://topchef.databio.org. This one deploys to its own Worker,
-`qtl-browser-general` (`wrangler.jsonc`), on every push to main that touches `ui/`
+`qtl-browser` (`wrangler.jsonc`), on every push to main that touches `ui/`
 (`.github/workflows/deploy-ui.yml`). It has no custom domain yet.
 
 Features may land in either copy, so a change belonging in both has to be applied twice, and

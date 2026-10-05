@@ -23,7 +23,7 @@ npm run dev                                               # the live store, from
 | `bench/` | browser smoke suites and a gene-page cost harness (`bench/README.md`) |
 
 `VITE_EXPERIMENT` selects the experiment, default `topchef`. Every push to main that touches
-`ui-topchef/` builds and deploys it to the Worker `qtl-browser` (`wrangler.jsonc`,
+`ui-topchef/` builds and deploys it to the Worker `qtl-browser-topchef` (`wrangler.jsonc`,
 `.github/workflows/deploy-topchef.yml`); the repo README has the details.
 
 `../ui/` is the general multi-study fork of this app. The two can drift apart without anything

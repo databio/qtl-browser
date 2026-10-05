@@ -66,13 +66,15 @@ the databio account:
 
 | App | Worker | URL | Workflow |
 |---|---|---|---|
-| `ui-topchef/` | `qtl-browser` | https://topchef.databio.org | `.github/workflows/deploy-topchef.yml` |
-| `ui/` | `qtl-browser-general` | workers.dev only | `.github/workflows/deploy-ui.yml` |
+| `ui-topchef/` | `qtl-browser-topchef` | https://topchef.databio.org | `.github/workflows/deploy-topchef.yml` |
+| `ui/` | `qtl-browser` | workers.dev only | `.github/workflows/deploy-ui.yml` |
 
 A push to main that touches an app's directory builds it (`npm ci && npm run build`) and runs
 `wrangler deploy` there; `workflow_dispatch` reruns either by hand. Both workflows read the repo
-secrets `CLOUDFLARE_API_TOKEN` (Workers edit permission) and `CLOUDFLARE_ACCOUNT_ID`. The custom
-domain is bound to the Worker name, so `ui-topchef/wrangler.jsonc` must keep `"name": "qtl-browser"`.
+secrets `CLOUDFLARE_API_TOKEN` (Workers edit permission, plus Workers Routes and DNS edit on the
+databio.org zone for the custom domain) and `CLOUDFLARE_ACCOUNT_ID`. `topchef.databio.org` is
+declared in `ui-topchef/wrangler.jsonc`, so a deploy of that app attaches it to
+`qtl-browser-topchef`.
 
 **Known issue:** `cloud2.databio.org` sends no `ETag` or `Last-Modified`, and Chromium
 stores a 206 (range) response only with a strong validator, so range reads are re-fetched on every
