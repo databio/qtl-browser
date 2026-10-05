@@ -78,7 +78,7 @@ const log = msg => console.log(`[${new Date().toISOString().slice(11, 19)}] ${ms
 const sleep = ms => new Promise(r => setTimeout(r, ms))
 const withTimeout = (p, ms) => Promise.race([p, sleep(ms).then(() => undefined)])
 
-/** The data host production bundles read, from ui/.env.production. */
+/** The data host production bundles read, from ui-topchef/.env.production. */
 function productionDataBase() {
   const m = /^VITE_DATA_BASE=(.*)$/m.exec(readFileSync(join(UI, '.env.production'), 'utf8'))
   return m ? m[1].trim().replace(/\/$/, '') : null
@@ -627,7 +627,7 @@ function cell(agg, path, fmt) {
 function markdown(meta, results, pagesByScenario, scenarios) {
   const L = []
   L.push(`# Gene page cost: ${meta.label} on ${meta.target}`, '')
-  L.push(`- Recorded ${meta.time} by \`ui/bench/locus-bench.mjs\`, ${meta.runs} run(s) per page and scenario; cells are median (min–max) when runs differ.`)
+  L.push(`- Recorded ${meta.time} by \`ui-topchef/bench/locus-bench.mjs\`, ${meta.runs} run(s) per page and scenario; cells are median (min–max) when runs differ.`)
   L.push(`- Target ${meta.target_origin}, data from ${meta.data_base}.`)
   L.push(`- App bundle \`${meta.app_bundle}\`; data manifest built ${meta.data_manifest.built}, pipeline commit \`${meta.data_manifest.pipeline_commit}\`; repo HEAD \`${meta.repo_head}\`${meta.repo_dirty ? ' (working tree has uncommitted changes)' : ''}.`)
   L.push(`- Playwright ${meta.playwright}, ${meta.browser}; headless, ${VIEWPORT.width}x${VIEWPORT.height}, no throttling.`)

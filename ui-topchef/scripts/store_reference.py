@@ -1,7 +1,7 @@
 """Reference values for `npm run store-check`: the Python decoders' output for one experiment of a
 local qtlstore, written as JSON for the TS decoder (src/lib/store-decode.ts) to match.
 
-    uv run python ui/scripts/store_reference.py <store dir> <out.json> [--experiment topchef] [--sample 60]
+    uv run python ui-topchef/scripts/store_reference.py <store dir> <out.json> [--experiment topchef] [--sample 60]
 
 Run from the repo root (it imports `pipeline`; the codec is `pipeline/packfmt_v1.py`). Per chromosome:
 every site of the variants file (`catalog.decode_file`), the variant index (`decode_vidx`), every rsID

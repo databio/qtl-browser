@@ -1,7 +1,7 @@
 // Smoke check of the trans tables on the qtlb v1 store (SPEC.md sections 8 and 9), against the local
 // preview serving the chr21/chr22 smoke store. Gene page: both tabs page off the frames of the gene's
 // phenotypes in the trans objects, one range request per object (a gene's frames are contiguous); the rows exported as CSV must equal `results.read_trans` for the
-// same phenotypes (written by `ui/scripts/store_reference.py`, path in SMOKE_REF). Variant page: the
+// same phenotypes (written by `ui-topchef/scripts/store_reference.py`, path in SMOKE_REF). Variant page: the
 // hits frame's kind 2 records.
 //   SMOKE_REF=/tmp/ref.json node bench/smoke_trans_tab.mjs
 import { chromium } from '../node_modules/playwright/index.mjs'

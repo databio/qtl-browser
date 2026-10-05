@@ -23,7 +23,7 @@ npm run bench -- --target preview --label pair --scenario pair --pages MYOZ1-eqt
   dominates against the bucket. With latency on, the self-check also reports how many DuckDB worker XHRs
   waited at least 90% of it for headers, and stops if any did not.
 
-Playwright is pinned in `ui/package.json`, which pins the Chromium build. After `npm install`, run
+Playwright is pinned in `ui-topchef/package.json`, which pins the Chromium build. After `npm install`, run
 `npx playwright install chromium` once (the browser goes to `~/.cache/ms-playwright`).
 
 ## Local v1 store
@@ -53,7 +53,7 @@ with `results.read_trans` when `SMOKE_REF` names the reference JSON below.
 The decoder round trip against the Python reference decoders:
 
 ```bash
-uv run python ui/scripts/store_reference.py /tmp/qtlstore-c2122-v1f /tmp/ref.json   # from the repo root
+uv run python ui-topchef/scripts/store_reference.py /tmp/qtlstore-c2122-v1f /tmp/ref.json   # from the repo root
 cd ui && npm run store-check -- /tmp/qtlstore-c2122-v1f /tmp/ref.json
 ```
 
@@ -93,7 +93,7 @@ any more, so it is a tripwire: any value above zero means a page found one.
 ## Targets
 
 - `live`: `https://topchef.databio.org`, which reads the qtlstore on Backblaze B2 named in
-  `ui/.env.production` (`https://cloud2.databio.org/qtl-browser`). Results recorded before
+  `ui-topchef/.env.production` (`https://cloud2.databio.org/qtl-browser`). Results recorded before
   2026-09-24 were taken against the older v0 site, `https://qtl-browser.topchef.workers.dev`, which
   read a Cloudflare R2 bucket.
 - `preview`: `http://localhost:4173`, serving `QTL_DATA_DIR` (default `../data/store`) at `/data`

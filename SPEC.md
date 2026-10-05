@@ -33,7 +33,7 @@ the experiments comes from; this document spells that one out in full every time
 **Status.** Builders and `Store.validate` exist and pass on a genome-wide two-experiment store
 (`/scratch/ns5bc/qtl-browser/store-genome-v1f` on Rivanna: TOPCHeF, with its trans results and the DCM
 GWAS, and GTEx v8 heart LV). Marked **(future)** below: the VRS-id index and `store.json` refget URLs.
-The browser reader for v1 is `ui/` (deployed) and `ui-general/` (the general multi-study fork);
+The browser reader for v1 is `ui-topchef/` (topchef.databio.org) and `ui/` (the general multi-study fork);
 this document is their reference.
 
 ## 1. Conventions

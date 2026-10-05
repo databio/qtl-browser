@@ -2,7 +2,7 @@
  * Round trip of the browser decoder (src/lib/store-decode.ts) against the Python decoders
  * (pipeline/catalog.py, pipeline/results.py, pipeline/packfmt.py) on one experiment of a local store.
  *
- *   uv run python ui/scripts/store_reference.py <store> <ref.json> [--experiment topchef]
+ *   uv run python ui-topchef/scripts/store_reference.py <store> <ref.json> [--experiment topchef]
  *   npm run store-check -- <store> <ref.json>
  *
  * - variants files: every site of every chromosome (both sections, walked with the TS variant
