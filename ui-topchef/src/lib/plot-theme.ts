@@ -21,6 +21,10 @@ export const CS_COLORS = {
 // the neutral background keeps the plain circle; every credible set gets its own shape
 export const CS_SYMBOLS = ['circle', 'diamond2', 'square', 'triangle', 'star', 'hexagon']   // diamond2 = rotated square
 
+/** The dot radius when nothing is size-encoded, so `dotOptions` and the hover outline (which has
+ *  no `r` scale to read in that case) cannot drift apart. */
+export const DOT_R = 3.5
+
 /** CSS clip-paths that echo the plot symbols in the legend swatches. */
 export const CS_SWATCH_CLIP: Record<string, string | undefined> = {
   circle: undefined,

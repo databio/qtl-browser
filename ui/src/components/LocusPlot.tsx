@@ -3,7 +3,7 @@ import { createPortal } from 'react-dom'
 import * as vg from '@uwdata/vgplot'
 import { Selection } from '@uwdata/mosaic-core'
 import { dropTable, getCoordinator, getDB } from '@/lib/db'
-import { CS_COLORS, CS_DOMAIN, CS_SWATCH_CLIP, CS_SYMBOLS, isDark } from '@/lib/plot-theme'
+import { CS_COLORS, CS_DOMAIN, CS_SWATCH_CLIP, CS_SYMBOLS, DOT_R, isDark } from '@/lib/plot-theme'
 import type { CredibleSetRow, Exon, SearchHit } from '@/lib/queries'
 import { CompareSkeleton, LocusSkeleton } from '@/components/plot-skeleton'
 import { credibleSets, locusTable, type GenePack } from '@/lib/gene'
@@ -106,7 +106,7 @@ export function dotOptions(hasColoc: boolean) {
     fill: 'cs', symbol: 'cs',
     // absent from the GWAS means never compared, so it draws at the minimum; the legend says so,
     // since no channel is left to tell it apart from a shared variant the posterior rejected
-    r: hasColoc ? vg.sql`coalesce(coloc_pp, 0)` : 3.5,
+    r: hasColoc ? vg.sql`coalesce(coloc_pp, 0)` : DOT_R,
     fillOpacity: vg.sql`CASE WHEN cs = 'none' THEN 0.35 ELSE 0.45 + 0.4 * pip END`,
   }
 }
@@ -229,10 +229,12 @@ export default function LocusPlot({ spec, onCount, onLegend, onActions, onCredib
         onCount?.(Number(agg.n))
         setNColoc(Number(agg.ncoloc))
         onLegend?.({ sets, coloc: Number(agg.ncoloc) > 0 })
-        hoverIndex.current = new Map((await con.query(`SELECT position, rs_number, nlp, gwas_nlp, label FROM ${table}`)).toArray()
+        // cs and coloc_pp ride along so the hover outline can match the dot's shape and size
+        hoverIndex.current = new Map((await con.query(`SELECT position, rs_number, nlp, gwas_nlp, label, cs, coloc_pp FROM ${table}`)).toArray()
           .map(r => [Number(r.position), {
             rs_number: r.rs_number == null ? null : Number(r.rs_number),
             nlp: Number(r.nlp), gwas_nlp: r.gwas_nlp == null ? null : Number(r.gwas_nlp), label: r.label == null ? '' : String(r.label),
+            cs: r.cs == null ? 'none' : String(r.cs), colocPp: r.coloc_pp == null ? null : Number(r.coloc_pp),
           }]))
         if (!alive) return
         if (onCredibleSets) {

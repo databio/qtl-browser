@@ -2,7 +2,7 @@
 date: 2026-09-25
 status: complete
 model: Claude Opus 5 (1M context)
-description: Fork the browser into ui (the deployed TOPCHeF app, unmoved) and ui-general (multi-study), on the refget branch and PR #2
+description: Fork the browser in two: ui-topchef keeps shipping TOPCHeF, ui becomes the multi-study browser
 ---
 
 # Fork the UI: `ui-topchef` keeps shipping, `ui` goes multi-study
@@ -179,3 +179,33 @@ empty afterwards. From here the two diverge again with every change to either, a
 References updated back: `README.md`, `pipeline/README.md`, `SPEC.md` §Status, `yoke.toml`,
 `.gitignore`, `ui/wrangler.jsonc` (its comment now records that the dashboard setting moves only at
 the flip), and `ui-general/README.md`.
+
+## Flipped, 2026-10-05 (PR #4, merged `a3b7bea`)
+
+The layout the 2026-09-25 plan aimed at, reached three days after the inversion rather than the
+week estimated: **`ui/` is the general browser, `ui-topchef/` is the deployed TOPCHeF app.** Git
+recorded it as a single rename of `ui-general/` to `ui-topchef/` with `ui/` left untouched, because
+the two trees were byte-identical, so a swap and a one-way rename produce the same end state. The
+cost this section predicted -- the general app having to carry everything the deployed one did by
+the flip -- came to nothing, for the same reason.
+
+**Deployment left Workers Builds for GitHub Actions**, which is what actually unblocked the flip.
+Rather than reconnecting the Cloudflare GitHub App installation that the `sanghoonio` ->
+`databio` repo transfer orphaned, `.github/workflows/deploy-ui.yml` and `deploy-topchef.yml` build
+and deploy each app with `cloudflare/wrangler-action`. Each is filtered to its own directory and its
+own workflow file and sits in its own concurrency group, so a change to one app never redeploys the
+other. Needs `CLOUDFLARE_API_TOKEN` (Workers Scripts edit, plus Workers Routes and DNS edit on the
+`databio.org` zone for the custom domain) and `CLOUDFLARE_ACCOUNT_ID`.
+
+Worker names no longer follow the directory that holds them: `ui/` deploys to `qtl-browser`
+(workers.dev only) and `ui-topchef/` to `qtl-browser-topchef`, which declares
+`topchef.databio.org` as a custom domain so its first deploy moves the domain off `qtl-browser` --
+the Worker that served TOPCHeF before the rename and now holds the general app. Both workflows ran
+green on the merge and the site answers 200.
+
+**The one thing not verified** is that the domain actually moved. `diff -rq ui/src ui-topchef/src`
+is still empty, so both Workers serve the same bundle and no external request distinguishes them; a
+green `wrangler deploy` only means the command exited 0. If the domain did not move, every push
+touching `ui/` deploys the general app to the Worker holding `topchef.databio.org`, and that stays
+invisible until the two apps diverge. `wrangler deployments list --name qtl-browser-topchef`, or the
+Worker's Domains & Routes panel, settles it.
