@@ -275,7 +275,7 @@ await browser.close()
 
 check(badPaths.length === 0, `every /data/ request is a pointer or an immutable object (${dataTotal} seen)${badPaths.length ? `: ${badPaths.slice(0, 3).join(', ')}` : ''}`)
 const g = spawnSync('grep', ['-rn', 'manifest\\|pack-decode\\|trans-pack\\|variant-pack\\|lib/pack\'', 'src'], { cwd: UI, encoding: 'utf8' })
-check(g.status === 1 && !g.stdout.trim(), `dead v0 code grep finds nothing in ui/src${g.stdout.trim() ? `: ${g.stdout.trim().split('\n').slice(0, 3).join(' | ')}` : ''}`)
+check(g.status === 1 && !g.stdout.trim(), `dead v0 code grep finds nothing in ui-topchef/src${g.stdout.trim() ? `: ${g.stdout.trim().split('\n').slice(0, 3).join(' | ')}` : ''}`)
 
 const failed = results.filter(r => !r[0])
 console.log(failed.length ? `smoke: ${failed.length} of ${results.length} failed` : `smoke: all ${results.length} checks passed`)

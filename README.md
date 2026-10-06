@@ -19,9 +19,10 @@ layout.
 | `SPEC.md` | The qtlstore format (v1): store layout and object names, the file header, variant catalogs, annotations, allele orientation, results, search index, hits, trans, GWAS, and what `Store.validate` checks. |
 | `pipeline/` | Python code that builds the store. Adapters turn each study into standard input tables (`pipeline/CONTRACT.md`); `qtlstore.py`, `catalog.py`, `annotation.py`, `results.py` and `gwas.py` write the store. `pipeline/README.md` explains every step. |
 | `*.sbatch` | Slurm jobs for Rivanna: `adapter.sbatch` (adapter, TOPCHeF gate, contract check), `store.sbatch` (store build, validate, v0 comparison), `bench_store.sbatch` (format benchmark), `build.sbatch` (shared input tables). |
-| `ui/` | The TOPCHeF browser app, the one that is deployed: Vite, React, TypeScript, Tailwind 4 and DaisyUI 5, DuckDB-WASM, Mosaic plots. |
-| `ui/bench/` | Browser smoke suites for the gene, variant and trans pages, and a Playwright harness that measures what a gene page costs. |
-| `ui-general/` | The general multi-study browser, forked from `ui/` and being generalised: the experiment becomes part of the route rather than a build-time constant. Not deployed; carries no wrangler config. It takes over `ui/` once it has caught up. |
+| `ui-topchef/` | The TOPCHeF browser app at https://topchef.databio.org: Vite, React, TypeScript, Tailwind 4 and DaisyUI 5, DuckDB-WASM, Mosaic plots. |
+| `ui-topchef/bench/` | Browser smoke suites for the gene, variant and trans pages, and a Playwright harness that measures what a gene page costs. |
+| `ui/` | The general multi-study browser, forked from `ui-topchef/` and being generalised: the experiment becomes part of the route rather than a build-time constant. Deployed to its own Worker, with no custom domain yet. |
+| `.github/workflows/` | `deploy-topchef.yml` and `deploy-ui.yml`: build and deploy each app to Cloudflare Workers on push to main. |
 | `data/raw/` | `sources.yaml` lists every input with URLs, versions and checksums; `download.py` fetches them. The data itself is not in git. |
 | `plans/` | Dated plans from earlier work. |
 
@@ -35,7 +36,7 @@ The build runs on Rivanna, where the inputs live. It goes in four stages:
    index for every experiment into one store.
 3. **Checks.** `Store.validate` and `verify_v0` run inside `store.sbatch`; the TOPCHeF acceptance
    gate and the contract check run inside `adapter.sbatch`.
-4. **Benchmark.** `sbatch bench_store.sbatch` for v0-versus-v1 size and read speed; `ui/bench/`
+4. **Benchmark.** `sbatch bench_store.sbatch` for v0-versus-v1 size and read speed; `ui-topchef/bench/`
    for the pages in a browser.
 
 `pipeline/README.md` has the exact commands and variables. The current whole-genome store is
@@ -51,17 +52,29 @@ uv run python -m pipeline.test_qtlstore   # one of the test suites; pipeline/REA
 ## Run the site locally
 
 ```bash
-cd ui && npm install     # or `cd ui-general` for the general browser
+cd ui-topchef && npm install     # or `cd ui` for the general browser
 QTL_DATA_DIR=/path/to/store VITE_DATA_BASE= npm run dev     # serves the store at /data with Range support
 ```
 
-`ui/bench/README.md` shows how to copy a small store from Rivanna and run the smoke suites.
+`ui-topchef/bench/README.md` shows how to copy a small store from Rivanna and run the smoke suites.
 
 ## Deploy
 
 The data lives in the Backblaze B2 bucket `cloud-databio` under `qtl-browser/`, served at
-`https://cloud2.databio.org/qtl-browser`. The site is a Cloudflare Workers static-assets project
-(`ui/wrangler.jsonc`) in the databio account, at https://topchef.databio.org.
+`https://cloud2.databio.org/qtl-browser`. Each app is a Cloudflare Workers static-assets project in
+the databio account:
+
+| App | Worker | URL | Workflow |
+|---|---|---|---|
+| `ui-topchef/` | `qtl-browser-topchef` | https://topchef.databio.org | `.github/workflows/deploy-topchef.yml` |
+| `ui/` | `qtl-browser` | workers.dev only | `.github/workflows/deploy-ui.yml` |
+
+A push to main that touches an app's directory builds it (`npm ci && npm run build`) and runs
+`wrangler deploy` there; `workflow_dispatch` reruns either by hand. Both workflows read the repo
+secrets `CLOUDFLARE_API_TOKEN` (Workers edit permission, plus Workers Routes and DNS edit on the
+databio.org zone for the custom domain) and `CLOUDFLARE_ACCOUNT_ID`. `topchef.databio.org` is
+declared in `ui-topchef/wrangler.jsonc`, so a deploy of that app attaches it to
+`qtl-browser-topchef`.
 
 **Known issue:** `cloud2.databio.org` sends no `ETag` or `Last-Modified`, and Chromium
 stores a 206 (range) response only with a strong validator, so range reads are re-fetched on every
@@ -69,16 +82,17 @@ visit instead of coming from the browser cache. Whole-file reads are cached norm
 
 Credentials and the upload checks are in the cloud-management repo, at
 `backblaze/qtl-browser.md`. Upload the store with the `immutable/` files first and the pointer files
-and `store.json` last, then build and deploy the app:
+and `store.json` last. A store upload needs no app redeploy. To deploy an app by hand instead of
+through Actions:
 
 ```bash
-cd ui
-VITE_DATA_BASE=https://cloud2.databio.org/qtl-browser npm run build
+cd ui-topchef            # or ui
+npm run build
 npx wrangler deploy
 ```
 
-`ui/.env.production` already holds that `VITE_DATA_BASE`, so a plain `npm run build` reads the same
-bucket. `VITE_DATA_BASE= npm run build` (empty) makes a bundle that reads `/data` on its own origin.
+Each app's `.env.production` sets `VITE_DATA_BASE=https://cloud2.databio.org/qtl-browser`, so a
+plain `npm run build` reads the B2 bucket. `VITE_DATA_BASE= npm run build` (empty) makes a bundle that reads `/data` on its own origin.
 
 ## Data notes
 

@@ -1,0 +1,52 @@
+name: Deploy TOPCHeF UI
+
+# Builds ui-topchef/ and deploys it to the Worker `qtl-browser-topchef`, which
+# serves https://topchef.databio.org (custom domain declared in wrangler.jsonc).
+# Replaces the Workers Builds git connection, which stopped receiving pushes when
+# the repo moved to databio.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'ui-topchef/**'
+      - '.github/workflows/deploy-topchef.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-topchef
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ui-topchef
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: ui-topchef/package-lock.json
+
+      - name: Install
+        run: npm ci
+
+      # `tsc -b && vite build`; VITE_DATA_BASE comes from .env.production (the B2 store)
+      - name: Build
+        run: npm run build
+
+      - name: Deploy to Cloudflare Workers
+        uses: cloudflare/wrangler-action@v3
+        with:
+          wranglerVersion: '4'
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          workingDirectory: ui-topchef
+          command: deploy

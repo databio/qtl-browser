@@ -54,7 +54,7 @@ flags = [
     "--ignore=node_modules",
     "--ignore=ui/dist",
     "--ignore=ui/bench/out",
-    "--ignore=ui-general/dist",
-    "--ignore=ui-general/bench/out",
+    "--ignore=ui-topchef/dist",
+    "--ignore=ui-topchef/bench/out",
     "--ignore=*.log",
 ]

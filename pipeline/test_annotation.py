@@ -162,7 +162,7 @@ def same_gtf_gives_the_same_digests():
                (d / "s2" / "annotations" / "gencode_v34.json").read_bytes()
 
 
-# (key as given, key normalized, bucket of 1024): the same vectors are checked in ui/scripts/store-check.ts,
+# (key as given, key normalized, bucket of 1024): the same vectors are checked in ui-topchef/scripts/store-check.ts,
 # so the Python builder and the browser reader cannot hash a key into different buckets
 LOOKUP_VECTORS = [("", "", 453), ("a", "A", 716), ("FLNC", "FLNC", 208), ("flnc", "FLNC", 208),
                   ("ENSG00000128591", "ENSG00000128591", 414), ("HLA-DRB1", "HLA-DRB1", 280),

@@ -1,11 +1,9 @@
-// Cloudflare Workers static-assets deploy for the TOPCHeF site. Workers Builds: root directory
-// `ui`, build command `npm run build`, deploy command `npx wrangler deploy`. `ui-general/` is the
-// general multi-study browser and deliberately carries no wrangler config, so it cannot deploy over
-// this; the dashboard setting moves to it only when that directory takes over, which is also when
-// `ui-general/` has to already carry everything this one does.
-// The SPA fallback for /gene/... paths
-// is `not_found_handling`; a `public/_redirects` with `/* /index.html 200` is rejected by
-// Workers as a redirect loop, so there is none.
+// Cloudflare Workers static-assets deploy for the general multi-study browser.
+// `.github/workflows/deploy-ui.yml` builds and deploys it on every push to main that touches `ui/`.
+// No custom domain yet, so it is served at qtl-browser.<account>.workers.dev. topchef.databio.org
+// belongs to `qtl-browser-topchef` (`ui-topchef/wrangler.jsonc`); do not declare it here.
+// The SPA fallback for client-side routes is `not_found_handling`; a `public/_redirects`
+// with `/* /index.html 200` is rejected by Workers as a redirect loop, so there is none.
 {
   "name": "qtl-browser",
   "compatibility_date": "2026-09-01",
