@@ -50,6 +50,7 @@ writes into the frozen v0 tree (`adapter.sbatch` refuses it). Iterate with
 | Store build | `QTLB_CHROMS=all QTLB_STORE=<store> EXPERIMENTS="topchef:<tree>/_tables/topchef:gencode_v34 gtex_v8_heart_lv:<tree>/_tables/gtex_v8_heart_lv" CROSSCAT="topchef_grch38 gtex_v8_heart_lv_grch38" sbatch --time=6:00:00 --mem=64G store.sbatch` | `annotation.py`, `catalog.py`, `results.py`, `gwas.py`, `verify_v0.py` |
 | Store maintenance | `uv run python -m pipeline.qtlstore validate \| remove-experiment ID \| gc [--dry-run] \| crosscat A B --store <store>` | `qtlstore.py` |
 | Catalog overlap index | `uv run python -m pipeline.overlap build --store <store> --id <id> [--catalogs A B ...]` (run by `store.sbatch`; `OVERLAP=` skips it) | `overlap.py` |
+| Results-block code sweep | `uv run python -m pipeline.scan_codes --store <store> --experiment <id> [--chrom chr22 ...]`, or `--base <url>` to read a published store over HTTP | `scan_codes.py` |
 | Per-chromosome objects for a store built before them | `uv run python -m pipeline.annotation add-split --store <store> --id <annotation>`, then `uv run python -m pipeline.results add-split --store <store> --id <experiment>` (rewrites the pointer; no other object changes) | `annotation.py`, `results.py` |
 | Benchmark, v0 vs v1 | `QTLB_STORE=<store> sbatch bench_store.sbatch`; `EXPERIMENT=gtex_v8_heart_lv ... sbatch bench_store.sbatch --no-reads` for a study with no v0 twin | `bench_store.py` |
 
@@ -111,6 +112,26 @@ The pointer also counts positions two catalogs hold with no shared allele pair, 
 be one event written two ways. The second kind are candidates to check rather than
 conclusions: confirming one needs the reference sequence, and `CONTRACT.md` does not require
 left-aligned indels.
+
+### Results-block code sweep
+
+`validate` checks object digests, headers and pointers; it never reads the u16 codes inside a
+block. `scan_codes.py` sweeps those directly -- fast, because a v1 block stores them raw -- and
+counts the reserved values: `p_null` (65535, the phenotype was never tested against that variant),
+`p_zero` (65534, p underflowed to 0 in the source, so no z exists and a reader must drop the row),
+`se_null` (0xFFFF), and `both`. Those are legitimate data. The failure it does catch is the scale
+rule: a block's largest finite -log10 p code must be exactly 65533, or the codes and the header's
+`nlp_max` disagree and every -log10 p in the block decodes wrong. It exits 1 on one.
+
+It is not part of `store.sbatch`: the full sweep reads every results object (2.53 GB for TOPCHeF),
+which is too much for a routine validate. Run it after a format change, or to answer a question
+about a published store.
+
+TOPCHeF, v1f, all chromosomes and both results sets: 623,057,691 rows, **no underflowed p at all**,
+2,649 untested rows (1 in 235,000), and the scale rule holding in every block. `se_null` equals
+`p_null` on every chromosome and `both` equals both, so an untested row never carries a standard
+error either. The row count reconciles to the pointer: 623,057,691 - 2,649 equals
+`slope_rows_compared` summed over the two results sets, which counts only rows that rebuild a slope.
 
 ### Configuration
 

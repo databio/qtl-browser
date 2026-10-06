@@ -205,9 +205,10 @@ function ColocSection({ sym, qtlType, gp, phenotypeId }: {
               })() },
               { label: 'Top variant posterior', value: fmtNum(res.top.snpPP4, 3) },
               { label: 'Variants shared with GWAS', value: `${fmtInt(res.nShared)} of ${fmtInt(res.nQtlRows)}` },
-              ...(res.nNotTested ? [{ label: 'Not tested here', value: fmtInt(res.nNotTested) }] : []),
-              ...(res.nUnderflow ? [{ label: 'p underflowed', value: <span className="text-warning">{fmtInt(res.nUnderflow)}</span> }] : []),
-              ...(res.nNoStats ? [{ label: 'No standard error', value: fmtInt(res.nNoStats) }] : []),
+              // `colocLocus` still counts the rows it had to drop (nNotTested, nUnderflow,
+              // nNoStats) and they stay on LocusColoc for diagnostics, but the table does not
+              // report counts of failures: the shared-of-total row above already says what the
+              // run covered.
               { label: 'Priors', value: <span className="tabular-nums">p1 {res.priors.p1} · p2 {res.priors.p2} · p12 {res.priors.p12}</span> },
             ]} />
           </div>

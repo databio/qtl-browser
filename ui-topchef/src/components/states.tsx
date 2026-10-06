@@ -64,7 +64,8 @@ export function TabSkeleton({ plot = false, kvRows = 9, chr }: { plot?: boolean;
       <div className="grid items-start gap-4 md:grid-cols-2"><KvSkeleton rows={kvRows} /><KvSkeleton rows={kvRows} /></div>
       {plot && (
         <div className="space-y-3">
-          <h2 className="text-sm font-medium text-base-content/65">Locus</h2>
+          {/* matches SectionPanel's heading, or it would resize when the real section mounts */}
+          <h2 className="text-sm font-medium text-base-content/70">Locus</h2>
           <div className="flex flex-col gap-6 md:flex-row md:gap-2">
             <div className="min-w-0 flex-1"><LocusSkeleton chr={chr} /></div>
             <div className="size-[290px] shrink-0"><CompareSkeleton /></div>

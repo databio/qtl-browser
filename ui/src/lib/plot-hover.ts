@@ -9,17 +9,37 @@ import { DOT_R } from '@/lib/plot-theme'
  */
 const CLASS = 'plot-hovered'
 
+const within = (r: DOMRect, x: number, y: number) => x >= r.left && x <= r.right && y >= r.top && y <= r.bottom
+
+/**
+ * Forget which variant Mosaic's `nearest` interactor last published for a plot.
+ *
+ * It stashes that as `valueIndex` on the plot's `<svg>` (d3 binds `this` to the node) and skips the
+ * update when the pointer lands on the same index again, but its own `pointerleave` handler clears
+ * the *selection* and leaves the *index* alone (`@uwdata/mosaic-plot` `interactors/Nearest.js`).
+ * So after the pointer leaves the plot -- to another window, or just to another part of the page --
+ * and comes back onto the same variant, the interactor publishes nothing, no value event fires, and
+ * the overlay never redraws: that one variant cannot be re-hovered until a different one has been.
+ * Clearing the index wherever the pointer is not makes the next entry publish.
+ */
+function forgetNearest(host: Element, x?: number, y?: number) {
+  const svg = host.querySelector('svg') as (SVGSVGElement & { valueIndex?: number }) | null
+  if (svg && !(x !== undefined && y !== undefined && within(svg.getBoundingClientRect(), x, y))) svg.valueIndex = -1
+}
+
 export function onPlotPointerMove(e: PointerEvent | React.PointerEvent) {
   const x = e.clientX, y = e.clientY
   document.querySelectorAll<HTMLElement>('.plot-host').forEach(el => {
-    const r = el.getBoundingClientRect()
-    const inside = x >= r.left && x <= r.right && y >= r.top && y <= r.bottom
-    el.classList.toggle(CLASS, inside)
+    el.classList.toggle(CLASS, within(el.getBoundingClientRect(), x, y))
+    forgetNearest(el, x, y)
   })
 }
 
 export function clearPlotHover() {
-  document.querySelectorAll<HTMLElement>(`.plot-host.${CLASS}`).forEach(el => el.classList.remove(CLASS))
+  document.querySelectorAll<HTMLElement>('.plot-host').forEach(el => {
+    el.classList.remove(CLASS)
+    forgetNearest(el)
+  })
 }
 
 /** What the hover overlay needs for one variant of the window, keyed by position. `cs` and
@@ -39,8 +59,10 @@ type NumScale = { apply(v: number): number }
 type SymbolScale = { apply(v: string): { draw(context: PathSink, area: number): void } | undefined }
 
 const SVG_NS = 'http://www.w3.org/2000/svg'
-const MARK = 'hover-mark'
-const FONT = 10   // px; the label's line height is 1em, as Plot's text mark draws it
+const MARK = 'hover-mark'     // the ring and the label together
+const LABEL = 'hover-label'   // the label alone; app.css hides it in the plot not under the pointer
+const FONT = 10               // px; the label's line height is 1em, as Plot's text mark draws it
+const HALO = 6                // px of stroke behind the label's glyphs, so it reaches 3px out
 /** How far outside the point's own edge the outline sits, in px of radius. */
 const GAP = 3
 
@@ -66,10 +88,11 @@ class PathSink {
 /**
  * Linked hover ring and label as a DOM overlay. The plots' `nearest` interactor publishes the
  * hovered variant's position into `link`; nothing in Mosaic consumes it, so a hover issues no
- * query and rebuilds no plot. This hook listens to the selection instead and appends one `<g>`
- * to the rendered SVG, placed with the SVG's own scales, so a hover costs a few DOM updates.
- * The `<g>` is not under the pointer (`pointer-events: none`) and overflow is visible, so a
- * label near an edge can hang past the plot as before.
+ * query and rebuilds no plot. This hook listens to the selection instead, so a hover costs a few
+ * DOM updates. Neither piece is under the pointer (`pointer-events: none`) and overflow is
+ * visible, so a label near an edge can hang past the plot.
+ *
+ * Both are SVG, appended to the rendered plot as one `<g>` and placed with the SVG's own scales.
  */
 export function useHoverOverlay(host: RefObject<HTMLElement | null>, link: Selection | null, lookup: HoverLookup,
   xField: 'position' | 'gwas_nlp', ink: string, surface: string) {
@@ -107,24 +130,39 @@ export function useHoverOverlay(host: RefObject<HTMLElement | null>, link: Selec
       ring.setAttribute('fill', 'none'); ring.setAttribute('stroke', ink); ring.setAttribute('stroke-width', '3')
       ring.setAttribute('stroke-linejoin', 'round')
       g.append(ring)
-      // the label, laid out like Plot's text mark with textAnchor middle, lineAnchor bottom, and
-      // lifted clear of the outline rather than the old fixed 12px
-      const text = document.createElementNS(SVG_NS, 'text')
-      text.setAttribute('class', 'hover-label')
-      text.setAttribute('transform', `translate(${px},${py - ringR - 5})`)
-      text.setAttribute('text-anchor', 'middle'); text.setAttribute('font-size', String(FONT))
-      text.setAttribute('fill', ink); text.setAttribute('stroke', surface); text.setAttribute('stroke-width', '5')
-      text.setAttribute('stroke-linejoin', 'round'); text.setAttribute('paint-order', 'stroke')
+
+      // The label, laid out like Plot's text mark with textAnchor middle and lineAnchor bottom,
+      // lifted clear of the outline. Two <text> elements over the same lines: the first draws only
+      // the halo, a round-jointed stroke of the surface colour, the second only the glyphs.
+      //
+      // One element with `paint-order: stroke` is the obvious way and is wrong: a browser paints a
+      // line box's stroke and then its glyphs, line by line, so the halo of one line lands on top
+      // of the line above it. Splitting the layers is the only way the halo is always underneath,
+      // and SVG is the only place a text stroke can round its joins at all -- CSS has no
+      // stroke-linejoin for `-webkit-text-stroke`, which miters and spikes at every corner.
+      const lab = document.createElementNS(SVG_NS, 'g')
+      lab.setAttribute('class', LABEL)
+      lab.setAttribute('transform', `translate(${px},${py - ringR - 5})`)
       const lines = row.label.split('\n')
-      lines.forEach((line, i) => {
-        const tspan = document.createElementNS(SVG_NS, 'tspan')
-        tspan.setAttribute('x', '0')
-        if (i === 0) tspan.setAttribute('y', `${1 - lines.length}em`)
-        else tspan.setAttribute('dy', '1em')
-        tspan.textContent = line
-        text.append(tspan)
-      })
-      g.append(text)
+      const layer = (halo: boolean) => {
+        const t = document.createElementNS(SVG_NS, 'text')
+        t.setAttribute('text-anchor', 'middle'); t.setAttribute('font-size', String(FONT))
+        if (halo) {
+          t.setAttribute('fill', 'none'); t.setAttribute('stroke', surface)
+          t.setAttribute('stroke-width', String(HALO)); t.setAttribute('stroke-linejoin', 'round')
+        } else t.setAttribute('fill', ink)
+        lines.forEach((line, i) => {
+          const tspan = document.createElementNS(SVG_NS, 'tspan')
+          tspan.setAttribute('x', '0')
+          if (i === 0) tspan.setAttribute('y', `${1 - lines.length}em`)
+          else tspan.setAttribute('dy', '1em')
+          tspan.textContent = line
+          t.append(tspan)
+        })
+        return t
+      }
+      lab.append(layer(true), layer(false))
+      g.append(lab)
       if (old) old.replaceWith(g)
       else svg.append(g)
     }

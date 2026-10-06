@@ -9,7 +9,7 @@ export function SectionPanel({ title, description, action, children, className =
       {(title || action) && (
         <div className="flex items-end justify-between gap-3">
           <div className="min-w-0">
-            {title && <h2 className="text-sm font-medium text-base-content/65">{title}</h2>}
+            {title && <h2 className="text-sm font-medium text-base-content/70">{title}</h2>}
             {description && <p className="text-xs text-base-content/55">{description}</p>}
           </div>
           {action}

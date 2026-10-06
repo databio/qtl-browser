@@ -283,8 +283,9 @@ const rawSource = (raw: string) => `(SELECT position, A1, A2,
   FROM ${raw})`
 
 /** One cis window as a table for the plots: -log10 p, credible-set class, a tooltip label, and
- *  the GWAS statistics for variants present there (matched on position and alleles in either
- *  orientation, GWAS beta re-signed to the QTL effect allele A1, which is ALT). Ordered so
+ *  the GWAS statistics for variants present there. Both sides are ref/alt oriented in a v1 store
+ *  (SPEC section 10), so a GWAS beta is already the effect of A1 = ALT, the allele the QTL beta
+ *  refers to, and the two are directly comparable in sign. Ordered so
  *  credible-set variants are drawn last (on top). A row with no p (a site the phenotype did not
  *  test) has no -log10 p; a results set without dof has no slopes, and the label says so. */
 const locusSQL = (qtl: string, gwas: string) => `
@@ -298,7 +299,7 @@ const locusSQL = (qtl: string, gwas: string) => `
            coalesce(q.cs_id::VARCHAR, 'none') AS cs,
            g.p AS gwas_p, -log10(g.p) AS gwas_nlp,
            CASE WHEN g.ea = q.A1 THEN g.beta ELSE -g.beta END AS gwas_beta,
-           -- four lines at most: the variant, its QTL statistics, the two posteriors, the GWAS.
+           -- four lines at most: the variant, its QTL statistics, the GWAS, the two posteriors.
            -- concat_ws skips NULL arguments, so an absent value leaves no separator behind, and
            -- nullif('') drops a line whose every part is absent. coloc_pp is here because a dot's
            -- radius cannot be read off exactly.
@@ -306,17 +307,21 @@ const locusSQL = (qtl: string, gwas: string) => `
              coalesce('rs' || q.rs_number, q.position::VARCHAR) || '  ' || q.A1 || '/' || q.A2,
              concat_ws(' · ',
                CASE WHEN q.pval_nominal IS NULL THEN 'not tested'
-                    WHEN q.pval_nominal = 0 THEN 'p = 0 (underflow; drawn above the max)'
-                    ELSE 'p = ' || format('{:.2e}', q.pval_nominal) END,
-               CASE WHEN q.beta IS NULL THEN CASE WHEN q.beta_se IS NULL THEN NULL ELSE 'SE ' || format('{:.3f}', q.beta_se) END
-                    ELSE 'beta ' || format('{:.3f}', q.beta) || ' ± ' || format('{:.3f}', q.beta_se) END,
+                    WHEN q.pval_nominal = 0 THEN 'QTL p = 0 (underflow; drawn above the max)'
+                    ELSE 'QTL p = ' || format('{:.2e}', q.pval_nominal) END,
+               CASE WHEN q.beta IS NULL THEN NULL ELSE 'beta ' || format('{:.3f}', q.beta) END,
                CASE WHEN q.af IS NULL THEN NULL ELSE 'AF ' || format('{:.3f}', q.af) END),
+             -- eaf is the GWAS pack's ALT frequency (see GWAS_DDL), so it is the frequency of A1
+             -- and sits on the same footing as the QTL af above. No backticks in here: the whole
+             -- query is a template literal.
+             CASE WHEN g.p IS NULL THEN NULL
+                  ELSE concat_ws(' · ',
+                         'GWAS p = ' || format('{:.2e}', g.p),
+                         'beta ' || format('{:+.3f}', CASE WHEN g.ea = q.A1 THEN g.beta ELSE -g.beta END),
+                         CASE WHEN g.eaf IS NULL THEN NULL ELSE 'AF ' || format('{:.3f}', g.eaf) END) END,
              nullif(concat_ws(' · ',
                CASE WHEN q.pip IS NULL THEN NULL ELSE 'SuSiE PIP ' || format('{:.3f}', q.pip) || ' (set ' || q.cs_id || ')' END,
-               CASE WHEN q.coloc_pp IS NULL THEN NULL ELSE 'coloc posterior ' || format('{:.3f}', q.coloc_pp) END), ''),
-             CASE WHEN g.p IS NULL THEN NULL
-                  ELSE 'DCM GWAS p = ' || format('{:.2e}', g.p) || ', A1 beta '
-                       || format('{:+.3f}', CASE WHEN g.ea = q.A1 THEN g.beta ELSE -g.beta END) END) AS label
+               CASE WHEN q.coloc_pp IS NULL THEN NULL ELSE 'coloc posterior ' || format('{:.3f}', q.coloc_pp) END), '')) AS label
     FROM ${qtl} q
     LEFT JOIN ${gwas} g
       ON g.position = q.position AND ((g.ea = q.A1 AND g.nea = q.A2) OR (g.ea = q.A2 AND g.nea = q.A1))

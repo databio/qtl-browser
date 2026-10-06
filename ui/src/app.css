@@ -116,8 +116,8 @@
 }
 
 /* Linked hover across the locus scatter and the LocusCompare panel: both draw a ring for the
-   shared hovered variant, but the label (the overlay's text, see useHoverOverlay) shows only in
-   the plot under the pointer. The host toggles .plot-hovered from pointer events. */
+   shared hovered variant, but the label shows only in the plot under the pointer. The host
+   toggles .plot-hovered from pointer events. */
 .plot-host:not(.plot-hovered) svg .hover-label {
   display: none;
 }
