@@ -1,5 +1,6 @@
 import { createContext, useContext, useEffect, useState, type ReactNode } from 'react'
 import { getStoreInfo, type StoreInfo } from '@/lib/store'
+import { significanceOf, type Significance } from '@/lib/significance'
 
 const Ctx = createContext<StoreInfo | null>(null)
 
@@ -30,3 +31,8 @@ export function StoreProvider({ children }: { children: ReactNode }) {
 
 /** Null until the store has opened. */
 export const useStoreInfo = () => useContext(Ctx)
+
+/** How the open experiment decides significance, for every label, tooltip and badge about it
+ *  (lib/significance.ts). `assessed` is false until the store opens, so nothing renders a rule it
+ *  has not read yet. */
+export const useSignificance = (): Significance => significanceOf(useStoreInfo()?.experiment)

@@ -501,18 +501,86 @@ def test_significance_uses_the_rules_column():
         assert doc["significance"] == rule
         r = rows_by_id(st, doc)
         assert r["G1"]["significant"] and not r["I1"]["significant"] and not r["I2"]["significant"]
-        assert r["I1"]["p_perm"] == 0.01                       # the index still reports p_perm
-        assert not rs.read_block(st, doc, r["I1"])["details"]["group"]["significant"]
+        # the index reports the column the rule tested, not p_perm (I1's p_perm is 0.01)
+        assert r["I1"]["sig_value"] == 0.02 and r["G1"]["sig_value"] == 0.002
+        # the block's details keep the source's own numbers under their own names
+        gi = rs.read_block(st, doc, r["I1"])["details"]["group"]
+        assert gi["p_perm"] == 0.01 and gi["p_beta"] == 0.02 and not gi["significant"]
         assert rs.read_block(st, doc, r["G1"])["details"]["group"]["significant"]
         h2 = rs.decode_hits((st.immutable / doc["hits"]["chr2"]).read_bytes())
         assert [int(x["flags"]) for x in h2 if x["kind"] == 0] == [0]
-        for bad in ({"column": "pvalue", "op": "<", "threshold": 0.05}, {"column": "p_beta", "op": ">", "threshold": 1}):
+        # the hit's value is the tested quantity too
+        assert [round(float(x["value"]), 3) for x in h2 if x["kind"] == 0] == [0.02]
+        for bad in ({"column": "pvalue", "op": "<", "threshold": 0.05}, {"column": "p_beta", "op": "~", "threshold": 1}):
             try:
                 rs.build(st, "exp2", t, "cat1", "ann", ["chr1", "chr2"], ingestion={**ing, "significance": bad})
             except ValueError as e:
                 assert "significance rule" in str(e), e
             else:
                 raise AssertionError(f"no error for {bad}")
+
+
+def test_significance_not_assessed():
+    """`significance: null` -- a source that ran no permutation pass. Every phenotype's `significant`
+    is null, not false: "never assessed" and "tested and not significant" are different claims. The
+    type counts say null rather than 0, the lead hits still exist with the flag clear, and a rule on
+    a column `permuted` does not have is an error rather than a silently false one."""
+    with tempfile.TemporaryDirectory() as d:
+        d = Path(d)
+        st, rg, cdoc = build_catalog(d)
+        build_annotation(st)
+        t = write_tables(d)
+        ing = json.loads((t / "ingestion.json").read_text())
+        doc = rs.build(st, "exp", t, "cat1", "ann", ["chr1", "chr2"], ingestion={**ing, "significance": None})
+        assert doc["significance"] is None
+        r = rows_by_id(st, doc)
+        assert all(v["significant"] is None for v in r.values()), {k: v["significant"] for k, v in r.items()}
+        assert all(v["sig_value"] is None for v in r.values())
+        for c in doc["counts"].values():
+            assert c["significant"] is None and c["significant_genes"] is None and c["phenotypes"] > 0
+        assert rs.read_block(st, doc, r["G1"])["details"]["group"]["significant"] is None
+        h2 = rs.decode_hits((st.immutable / doc["hits"]["chr2"]).read_bytes())
+        assert [int(x["flags"]) for x in h2 if x["kind"] == 0] == [0]
+        try:
+            rs.build(st, "exp2", t, "cat1", "ann", ["chr1", "chr2"],
+                     ingestion={**ing, "significance": {"column": "pval_perm", "op": "<", "threshold": 0.05}})
+        except ValueError as e:
+            assert "has no column 'pval_perm'" in str(e), e
+        else:
+            raise AssertionError("a rule naming a column `permuted` lacks must fail")
+
+
+def test_migrate_index_renames_p_perm():
+    """`migrate-index` renames a stored index's `p_perm` to `sig_value` and redoes the parts and
+    counts, leaving every other object alone. Idempotent, and it refuses an experiment whose rule
+    tested something other than `p_perm`, where the stored column is not the tested value."""
+    with tempfile.TemporaryDirectory() as d:
+        st, rg, doc = build_all(Path(d))
+        before = {k: v for k, v in doc.items() if k in ("results", "hits", "catalog", "annotation")}
+        # an index as a store built before the rename holds it
+        idx = rs.load_index(st, doc)
+        old = idx.rename_columns(["p_perm" if n == "sig_value" else n for n in idx.schema.names])
+        stale = {**doc, "search_index": st.put(rs.encode_arrow(old), rs.EXT_INDEX)}
+        st.write_pointer("experiments", doc["id"], stale)
+        assert "p_perm" in rs.load_index(st, st.load("experiments", doc["id"])).schema.names
+
+        out = rs.migrate_index(st, doc["id"])
+        names = rs.load_index(st, out).schema.names
+        assert "sig_value" in names and "p_perm" not in names
+        assert {k: v for k, v in out.items() if k in before} == before   # nothing else was touched
+        assert out["counts"] == doc["counts"] and len(out["search_index_parts"]) == len(doc["search_index_parts"])
+        for c, p in out["search_index_parts"].items():
+            assert "sig_value" in rs.decode_arrow((st.immutable / p["file"]).read_bytes()).schema.names
+        assert rs.migrate_index(st, doc["id"])["search_index"] == out["search_index"]   # idempotent
+
+        st.write_pointer("experiments", "exp_beta", {**stale, "id": "exp_beta",
+                                                     "significance": {"column": "p_beta", "op": "<", "threshold": 0.05}})
+        try:
+            rs.migrate_index(st, "exp_beta")
+        except ValueError as e:
+            assert "cannot be renamed" in str(e), e
+        else:
+            raise AssertionError("a rule on another column must not be silently renamed")
 
 
 def test_defaults_for_old_tables():

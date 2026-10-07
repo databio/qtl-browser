@@ -493,7 +493,7 @@ kind: one code path and one block layout serve every type.
  "annotation": "gencode_v34",
  "annotation_source": null,
  "allele_orientation_source": "topchef_refcheck_a2_is_ref",
- "significance": {"column": "p_perm", "op": "<", "threshold": 0.05},
+ "significance": {"column": "p_perm", "op": "<", "threshold": 0.05, "label": "Permutation p"},
  "search_index": "<digest>.arrow.zst",
  "search_index_parts": {"chr21": {"file": "<digest>.arrow.zst", "rows": 986, "ords": [[0, 189], [703, 1498]]}},
  "search_index_trans_only": {"file": "<digest>.arrow.zst", "rows": 53, "ords": [[686, 702], [3565, 3600]]},
@@ -524,9 +524,18 @@ kind: one code path and one block layout serve every type.
 - `catalog_identity` copies the variant catalog's `identity_digest` at build time.
 - `annotation_source` is the source's own annotation when it differs from the one attached
   (a known gap, reported), else null.
-- `significance` comes from the adapter's `ingestion.json`; default `p_perm < 0.05`. `column` is
-  `p_perm` or `p_beta` (the `permuted` column the rule tests), `op` is `<` or `<=`; the builder
-  refuses anything else. Every `significant` below means "the group's `column` passes the rule".
+- `significance` comes from the adapter's `ingestion.json`; absent there means `p_perm < 0.05`.
+  `column` names **any numeric column of `permuted`**, `op` is one of `<` `<=` `>` `>=`,
+  `threshold` is a number, and `label` is what a reader shows the metric as ("Permutation p",
+  "Bonferroni p"). The builder refuses a rule whose column `permuted` does not carry.
+  `p_perm` and `p_beta` are the conventional names for a tensorQTL-family permutation pass, not the
+  only possible metrics: a study whose source ran PLINK2 `--glm` or MatrixEQTL has neither, and may
+  declare a rule on whatever it does publish or compute.
+  **`significance` may be `null`**: the source assessed no significance. Then every `significant`
+  below is null too -- which is not false. "Never assessed" and "tested and not significant" are
+  different claims, and a reader that prints the second for the first is lying for the study.
+  Every `significant` below means "the group's `column` passes the rule", and `sig_value` is the
+  value that was tested, whichever column it came from.
 - `unplaced` counts phenotypes that no nominal row, permuted group or credible set places on a
   chromosome.
 - `results[].files` has one entry per chromosome built, including chromosomes with no blocks (a
@@ -618,7 +627,9 @@ Study fields only, never annotation (no symbol, TSS, biotype, bounds). `gene_id`
 `extra` is the contract's `phenotypes.extra`. `group` is the permutation row of the phenotype's
 group (`phenotype_object_id`), or null; it is labelled as the group's so a non-lead intron does not
 carry the cluster's lead as its own. `significant` applies the experiment's rule to the rule's
-`column` (`p_perm` or `p_beta`).
+`column`, and is null when the experiment declares no rule. `p_perm` and `p_beta` here are the
+source's own published numbers under their own names, null when it published neither; the quantity
+the rule tested is the search index's `sig_value`.
 Readers reject a details object whose `v` is not 1.
 
 ### Search index (`.arrow.zst`)
@@ -636,8 +647,8 @@ phenotypes last, position of the run's first site or else the group lead's posit
 | `chr` | string | the chromosome its cis results are on; **null for a trans-only phenotype** |
 | `has_nominal` | bool | the phenotype has nominal rows |
 | `is_group_lead` | bool | this phenotype is its group's lead |
-| `significant` | bool | the group passes the experiment's rule (on its `column`); false with no group |
-| `p_perm` | float64 | group's; null with no group |
+| `significant` | bool | the group passes the experiment's rule (on its `column`); false with no group; **null when the experiment declares no rule**, which is not the same as false |
+| `sig_value` | float64 | the value the rule tested, whichever `permuted` column it names; null with no group or no rule |
 | `blk_off`, `blk_len` | uint32 | the block in `results[type].files[chr]`; **null for a trans-only phenotype** |
 | `var_start`, `n_var` | uint32 | the run; null when `n_rows` is 0 |
 | `var_off`, `var_len` | uint32 | variant catalog `.qbv` bytes of the pages covering the run; null likewise |
@@ -694,11 +705,11 @@ vidx**: frame `g` holds the records of vidx `g * F .. (g + 1) * F - 1`, F = 1,02
 |---|---|---|
 | 0 | u32 | `vidx` (inside the frame's range) |
 | 4 | u32 | `ord`: search-index row |
-| 8 | f32 | `value`: kind 0 `p_perm` (NaN when null), kind 1 PIP, kind 2 `f32(-log10 p)` of the source p (+inf for p = 0) |
+| 8 | f32 | `value`: kind 0 the index's `sig_value`, the quantity the experiment's rule tested (NaN when null), kind 1 PIP, kind 2 `f32(-log10 p)` of the source p (+inf for p = 0) |
 | 12 | f32 | `beta`: kind 2 the ALT effect; NaN on kinds 0 and 1 |
 | 16 | u8 | kind: 0 lead of a group, 1 credible-set member, 2 trans association |
 | 17 | u8 | `cs_id` (kind 1), 0 otherwise |
-| 18 | u8 | flags: bit 0 significant by the experiment's rule (kind 0 only); other bits zero |
+| 18 | u8 | flags: bit 0 significant by the experiment's rule (kind 0 only); other bits zero. One bit, so an experiment that declares no rule reads 0 here -- the search index's null `significant` is where "not assessed" is recorded |
 | 19 | u8 | zero |
 
 Kind 0: `ord` is the group's lead phenotype. Kind 1: a site in two sets of one phenotype keeps both

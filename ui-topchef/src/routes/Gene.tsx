@@ -16,7 +16,7 @@ import TransTable from '@/components/TransTable'
 import LocusPlot, { LocusLegend } from '@/components/LocusPlot'
 import { COLOC_EQTL_GENES, COLOC_SQTL_GENES } from '@/lib/coloc'
 import { ensemblGene, geneCards, gtexGene, openTargetsGene, ucsc } from '@/lib/links'
-import { useStoreInfo } from '@/contexts/store-context'
+import { useSignificance, useStoreInfo } from '@/contexts/store-context'
 import { CopyButton } from '@/components/copy-button'
 import { fmtBp, fmtInt, fmtNum, fmtP, fmtPhenotype, fmtBetaSE } from '@/lib/format'
 import { resolveGene, type GeneDetail, type SplicePhenotype,
@@ -30,16 +30,19 @@ import { dropTable, getDB } from '@/lib/db'
 
 type Tab = 'eqtl' | 'sqtl'
 
-/** The intron a gene's sQTL tab opens on: its first significant intron, else the one with the smallest permutation p. */
+/** The intron a gene's sQTL tab opens on: its first significant intron, else the one with the
+ *  smallest tested significance value, else the first. An experiment that assessed no significance
+ *  has neither, so it opens on the first intron. */
 function defaultIntron(phens: SplicePhenotype[]): SplicePhenotype | null {
   return phens.find(p => p.is_sqtl)
-    ?? phens.reduce<SplicePhenotype | null>((best, p) => (p.pval_perm != null && (best === null || p.pval_perm < (best.pval_perm ?? Infinity)) ? p : best), null)
+    ?? phens.reduce<SplicePhenotype | null>((best, p) => (p.sig_value != null && (best === null || p.sig_value < (best.sig_value ?? Infinity)) ? p : best), null)
     ?? phens[0] ?? null
 }
 
 export default function Gene() {
   const { id = '' } = useParams()
   const [params, setParams] = useSearchParams()
+  const sig = useSignificance()
   const [hit, setHit] = useState<SearchHit | null | undefined>(undefined)
   // a gene tested for sQTL but not eQTL opens on its sQTL tab; any other tab value (old
   // `?tab=trans` links) falls back to eQTL
@@ -91,7 +94,7 @@ export default function Gene() {
   const sym = hit.symbol ?? hit.gene_id
   const tabs = [
     { value: 'eqtl' as Tab, label: 'eQTL' },
-    { value: 'sqtl' as Tab, label: `sQTL${hit.n_sqtl_sig ? ` (${hit.n_sqtl_sig})` : ''}` },
+    { value: 'sqtl' as Tab, label: `sQTL${sig.assessed && hit.n_sqtl_sig ? ` (${hit.n_sqtl_sig})` : ''}` },
   ]
   return (
     <Page>
@@ -100,8 +103,8 @@ export default function Gene() {
         title={sym}
         meta={hit.gene_id}
         description={<span className="mt-1 flex flex-wrap items-center gap-1.5">
-          {hit.is_egene && <Chip cls="badge-primary" tip="Significant cis-eQTL: permutation p < 0.05">eGene</Chip>}
-          {hit.n_sqtl_sig > 0 && <Chip cls="badge-secondary" tip="Introns with a significant cis-sQTL (permutation p < 0.05)">{hit.n_sqtl_sig} sQTL intron{hit.n_sqtl_sig > 1 ? 's' : ''}</Chip>}
+          {sig.assessed && hit.is_egene && <Chip cls="badge-primary" tip={`Significant cis-eQTL: ${sig.ruleText}`}>eGene</Chip>}
+          {sig.assessed && hit.n_sqtl_sig > 0 && <Chip cls="badge-secondary" tip={`Introns with a significant cis-sQTL (${sig.ruleText})`}>{hit.n_sqtl_sig} sQTL intron{hit.n_sqtl_sig > 1 ? 's' : ''}</Chip>}
           {COLOC_EQTL_GENES.includes(sym) && <Chip cls="badge-accent" tip="eQTL colocalizes with the Jurgens et al. 2024 DCM GWAS (coloc PP.H4 > 0.8)">DCM coloc · eQTL</Chip>}
           {COLOC_SQTL_GENES.includes(sym) && <Chip cls="badge-accent badge-outline" tip="sQTL colocalizes with the Jurgens et al. 2024 DCM GWAS (coloc PP.H4 > 0.8)">DCM coloc · sQTL</Chip>}
           {!hit.has_results && <Chip cls="badge-ghost" tip="Filtered out before QTL mapping (expression or mappability)">not tested</Chip>}
@@ -222,6 +225,7 @@ type LocusTable = { name: string | null; failed: boolean }
 const NO_TABLE: LocusTable = { name: null, failed: false }
 
 function EqtlTab({ hit, gp, d, transTable }: { hit: SearchHit; gp: GenePack; d: GeneDetail; transTable: string | null }) {
+  const sig = useSignificance()
   const g = d.gene
   const [cs, setCs] = useState<CredibleSetRow[] | null>(null)
   const [nVar, setNVar] = useState<number | null>(null)
@@ -247,8 +251,10 @@ function EqtlTab({ hit, gp, d, transTable }: { hit: SearchHit; gp: GenePack; d: 
           { label: 'Variants tested', value: fmtInt(g.num_var) },
           { label: 'beta ± SE', value: fmtBetaSE(g.beta, g.beta_se) },
           { label: 'Nominal p', value: fmtP(g.pval_nominal) },
-          { label: 'Permutation p', value: fmtP(g.pval_perm) },
-          { label: 'Beta-approximated p', value: fmtP(g.pval_beta) },
+          // the metric is the experiment's, so its name is too; an experiment that assessed none
+          // shows neither row rather than an empty one
+          ...(sig.assessed ? [{ label: sig.label, value: fmtP(g.sig_value) }] : []),
+          ...(g.pval_beta != null ? [{ label: 'Beta-approximated p', value: fmtP(g.pval_beta) }] : []),
           { label: 'Credible sets', value: String(g.n_credible_sets) },
         ]} />
       </div>
@@ -284,6 +290,7 @@ function SqtlTab(props: { hit: SearchHit; gp: GenePack; d: GeneDetail; transTabl
 }
 
 function SqtlIntrons({ hit, gp, d, transTable, phens }: { hit: SearchHit; gp: GenePack; d: GeneDetail; transTable: string | null; phens: SplicePhenotype[] }) {
+  const sig = useSignificance()
   const [cs, setCs] = useState<CredibleSetRow[] | null>(null)
   const [selected, setSelected] = useState<string | null>(() => defaultIntron(phens)?.phenotype_id ?? null)
   // every tested intron has its sQTL rows in the pack; the list starts with the significant ones
@@ -314,7 +321,7 @@ function SqtlIntrons({ hit, gp, d, transTable, phens }: { hit: SearchHit; gp: Ge
         {listed.length === 0 ? <Empty label={`None of the ${fmtInt(phens.length)} tested introns has a significant sQTL.`} /> : (
           <div className="overflow-x-auto rounded-lg border border-base-300">
             <table className="table table-sm">
-              <thead><tr><th>Cluster</th><th>Intron</th><th>Lead variant</th><th className="text-right">beta ± SE</th><th className="text-right">Perm p</th><th className="text-right">Sets</th></tr></thead>
+              <thead><tr><th>Cluster</th><th>Intron</th><th>Lead variant</th><th className="text-right">beta ± SE</th><th className="text-right">{sig.short || '—'}</th><th className="text-right">Sets</th></tr></thead>
               <tbody>
                 {listed.map(p => (
                   <tr key={p.phenotype_id} onClick={() => setSelected(p.phenotype_id)}
@@ -323,7 +330,7 @@ function SqtlIntrons({ hit, gp, d, transTable, phens }: { hit: SearchHit; gp: Ge
                     <td className="tabular-nums">{fmtInt(p.intron_start)}–{fmtInt(p.intron_end)} <span className="text-base-content/50">({fmtBp(p.intron_end - p.intron_start)})</span></td>
                     <td><Link className="link-quiet" to={`/variant/${p.lead_rsid ?? `${p.chr}:${p.lead_position}`}`}>{p.lead_rsid ?? `${p.chr}:${fmtInt(p.lead_position)}`}</Link></td>
                     <td className="text-right tabular-nums">{fmtBetaSE(p.beta, p.beta_se)}</td>
-                    <td className="text-right tabular-nums">{fmtP(p.pval_perm)}</td>
+                    <td className="text-right tabular-nums">{fmtP(p.sig_value)}</td>
                     <td className="text-right tabular-nums">{p.n_credible_sets}</td>
                   </tr>
                 ))}

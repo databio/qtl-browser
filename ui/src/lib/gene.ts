@@ -115,7 +115,8 @@ function leadRow(block: ResultBlock | null, range: VariantRange | null) {
 }
 
 /** The genes row the gene page prints: the annotation's fields, the eQTL block's details (group
- *  lead, permutation p, credible sets) and the lead's own nominal row. v1 stores no q-value: the
+ *  lead, credible sets), the search index's tested significance value and the lead's own nominal
+ *  row. v1 stores no q-value: the
  *  Zenodo release publishes none either, and the one the v0 site showed was this repo's own
  *  Benjamini-Hochberg over `pval_beta` (pipeline/steps_tables.py), which the contract drops. */
 function geneRow(hit: SearchHit, block: ResultBlock | null, range: VariantRange | null): Gene {
@@ -127,7 +128,10 @@ function geneRow(hit: SearchHit, block: ResultBlock | null, range: VariantRange 
     lead_position: lead?.pos ?? null, lead_A1: lead?.alt ?? null, lead_A2: lead?.ref ?? null,
     lead_rsid: row?.rsid ?? null, lead_af: row?.af ?? null, lead_tss_distance: lead ? lead.pos - hit.tss : null,
     beta: row?.beta ?? null, beta_se: row?.se ?? null, pval_nominal: row?.pval ?? null,
-    pval_perm: g?.p_perm ?? null, pval_beta: g?.p_beta ?? null, is_egene: hit.is_egene,
+    // the tested value comes from the search index, which carries it whatever column the rule named;
+    // the block's `group` holds only the source's own p_perm and p_beta, and a study with no
+    // permutation pass has neither
+    sig_value: hit.sig_value, pval_beta: g?.p_beta ?? null, is_egene: hit.is_egene,
     n_credible_sets: d?.n_credible_sets ?? 0, n_trans_pairs: 0,
   }
 }
@@ -146,7 +150,7 @@ function spliceRow(hit: SearchHit, p: Placed, block: ResultBlock, range: Variant
     lead_position: lead?.pos ?? null, lead_A1: lead?.alt ?? null, lead_A2: lead?.ref ?? null, lead_rsid: row?.rsid ?? null,
     lead_af: row?.af ?? null, lead_tss_distance: lead ? lead.pos - hit.tss : null,
     beta: row?.beta ?? null, beta_se: row?.se ?? null, pval_nominal: row?.pval ?? null,
-    pval_perm: g?.p_perm ?? p.p_perm, pval_beta: g?.p_beta ?? null, is_sqtl: p.significant,
+    sig_value: p.sig_value, pval_beta: g?.p_beta ?? null, is_sqtl: p.significant ?? false,
     n_credible_sets: block.details.n_credible_sets, blk_off: p.blk_off, blk_len: p.blk_len,
   }
 }

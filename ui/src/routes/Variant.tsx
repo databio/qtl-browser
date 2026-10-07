@@ -18,7 +18,7 @@ import { csValues, hitPhenotypes, leadValues, loadHits, lookupRsid, nominalsAt, 
 import { SQTL_TYPE } from '@/lib/store'
 import { variantTransTable } from '@/lib/trans'
 import { dropTable } from '@/lib/db'
-import { useStoreInfo } from '@/contexts/store-context'
+import { useSignificance, useStoreInfo } from '@/contexts/store-context'
 import { ROW_LINK, ROW_LINK_TEXT, useRowLink } from '@/lib/row-link'
 
 const gnomad = (v: VariantRecord) => `https://gnomad.broadinstitute.org/variant/${v.chr.replace('chr', '')}-${v.position}-${v.A2}-${v.A1}?dataset=gnomad_r4`
@@ -106,6 +106,8 @@ async function buildLists(v: VariantRecord, hits: Hits): Promise<{ leads: LeadRo
 }
 
 function VariantBody({ v, hits }: { v: VariantRecord; hits: Hits }) {
+  // `signif`, not `sig`: `sig` below is this variant's significant introns
+  const signif = useSignificance()
   const rowLink = useRowLink()
   const [lists, setLists] = useState<{ leads: LeadRow[]; cs: CsRow[] } | null>(null)
   // the variant's trans rows as an in-memory table, built from its hits records and dropped when
@@ -189,8 +191,8 @@ function VariantBody({ v, hits }: { v: VariantRecord; hits: Hits }) {
                         <td className="font-medium"><span className={ROW_LINK_TEXT}>{l.gene.symbol ?? l.gene.gene_id}</span></td>
                         <td className="tabular-nums text-base-content/60">{l.phenotypeId ? fmtPhenotype(l.phenotypeId) : l.gene.gene_id}</td>
                         <td className="text-right tabular-nums">{fmtBetaSE(l.beta, l.betaSe)}</td>
-                        <td className="text-right tabular-nums">{fmtP(val.pvalPerm)}</td>
-                        <td className="text-right">{val.significant ? <span className={`badge badge-xs ${l.qtlType === 'e' ? 'badge-primary' : 'badge-secondary'}`}>{l.qtlType === 'e' ? 'eGene' : 'sQTL'}</span> : ''}</td>
+                        <td className="text-right tabular-nums">{fmtP(val.sigValue)}</td>
+                        <td className="text-right">{signif.assessed && val.significant ? <span className={`badge badge-xs ${l.qtlType === 'e' ? 'badge-primary' : 'badge-secondary'}`}>{l.qtlType === 'e' ? 'eGene' : 'sQTL'}</span> : ''}</td>
                       </tr>
                     )
                   })}

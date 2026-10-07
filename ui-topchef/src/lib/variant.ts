@@ -200,10 +200,13 @@ export async function hitPhenotypes(ords: number[]): Promise<Map<number, HitPhen
   return out
 }
 
-/** A lead record: its permutation p and significance, from the hits file. */
+/** A lead record from the hits file: the value the experiment's significance rule tested (SPEC
+ *  section 9, kind 0 -- whichever `permuted` column the rule names) and whether it passed. The flag
+ *  is one bit, so an experiment that assessed no significance reads false here; the search index's
+ *  null is where that is recorded, and `useSignificance().assessed` is what a view should check. */
 export function leadValues(h: Hits, r: number) {
   const v = h.frame.value[r]
-  return { pvalPerm: Number.isNaN(v) ? null : v, significant: (h.frame.flags[r] & 1) !== 0 }
+  return { sigValue: Number.isNaN(v) ? null : v, significant: (h.frame.flags[r] & 1) !== 0 }
 }
 
 /** A credible-set record: PIP and set id. */

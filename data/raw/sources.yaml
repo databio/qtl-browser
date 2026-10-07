@@ -64,3 +64,131 @@ sources:
       - {file: GCF_000001405.40.gz.tbi,                    md5_url: https://ftp.ncbi.nih.gov/snp/latest_release/VCF/GCF_000001405.40.gz.tbi.md5}
       - url: https://ftp.ncbi.nih.gov/snp/latest_release/release_notes.txt
       - url: https://ftp.ncbi.nlm.nih.gov/genomes/all/GCF/000/001/405/GCF_000001405.40_GRCh38.p14/GCF_000001405.40_GRCh38.p14_assembly_report.txt
+
+  # Plasma proteome sources. Both carry cis-pQTL summary statistics anchored to GRCh38, checked by
+  # reading sampled reference alleles back out of hg38 and hg19: ARIC 6 of 6 and MESA 8 of 8 agree
+  # with hg38, the hg19 agreements being positions where both builds read the same base.
+
+  - name: aric_pqtl
+    description: >-
+      ARIC plasma cis-pQTL summary statistics (Zhang, Dutta, Chatterjee et al. 2022 Nat Genet, doi
+      10.1038/s41588-022-01051-w), European American and African American, 4,657 SOMAmers. One
+      PLINK2 .glm.linear per SOMAmer inside the zip (4,659 members each, 1.12 GB and 2.01 GB
+      uncompressed), cis window +/-500 kb of the protein-coding gene's TSS, OBS_CT 7,213 for EA.
+      BETA is relative to A1, which is the minor allele and NOT always ALT (A1 differs from ALT on
+      530 of 2,814 rows of the one member read), so an adapter must negate BETA and mirror A1_FREQ
+      wherever A1 is the reference. seqid.txt maps SeqId to uniprot_id and gene symbol, with no ENSG.
+    version: >-
+      site revision of 2021-10-06 (+/-500 kb windows), S3 objects last modified 2023-01-23, listed
+      2026-10-06 from nilanjanchatterjeelab.org/pwas
+    # No license is stated anywhere. The paper's data-availability section releases the sumstats
+    # without condition -- "Genome-wide summary-level statistics for all single SNP cis-pQTL
+    # analysis, irrespective of significance level, and data required to perform PWAS, are available
+    # from http://nilanjanchatterjeelab.org/pwas" -- and attaches its access restrictions to
+    # individual-level plasma protein data from the parent cohorts (ARIC, AASK), not to these files.
+    license: none stated; sumstats released unconditionally per the paper's data availability
+    dir: aric_pqtl_zhang2022
+    url_base: https://jh-pwas.s3.amazonaws.com/results/{file}
+    files:
+      # EA.zip and AA.zip are multipart S3 objects, so their ETags are not md5s and these checksums
+      # are of the bytes fetched on 2026-10-06. seqid.txt is single-part, so its ETag is its md5.
+      - {file: EA.zip,     size: 352021558, md5: 46523826374c031caba2dd5eb9eabfe0}
+      - {file: AA.zip,     size: 609907958, md5: de099b16905efd46560522e149615890}
+      - {file: seqid.txt,  size: 182152, md5: 4b9055ffecbb566482ce395576e9d7ac}
+
+  - name: mesa_pqtl
+    description: >-
+      MESA TOPMed plasma cis-pQTL summary statistics (Schubert et al., "Protein prediction for trait
+      mapping in diverse populations"), five populations: AFA, ALL, CHN, EUR, HIS. Only the
+      allele_info files are listed: their all_cis twins hold the same rows without ref/alt, and a
+      row with no source alleles cannot become a site (pipeline/CONTRACT.md). `snps` is chr:pos,
+      `gene` is SOMAmerID_ENSG.version, and there is no standard error -- `statistic` is the t, so
+      se is beta/statistic. Which allele beta counts is not stated in the files; the allele0/allele1
+      naming implies alt, and it is unverified.
+    version: Zenodo record 6536687 (version 3, 2021-05-28), concept DOI 10.5281/zenodo.4837327
+    license: CC-BY-4.0
+    dir: zenodo_6536687
+    url_base: https://zenodo.org/api/records/6536687/files/{file}/content
+    files:
+      - {file: cis_pQTLs_AFA_WG_allele_info.txt.gz, size: 379399991, md5: 4ee1e18cca1293ac2170f519d179dd13}
+      - {file: cis_pQTLs_ALL_WG_allele_info.txt.gz, size: 152518449, md5: 3f3fefa03ca956bd2b84877ead8debc1}
+      - {file: cis_pQTLs_CHN_WG_allele_info.txt.gz, size: 166788006, md5: 2571f2480ad071e4cb6b94ae59d2675d}
+      - {file: cis_pQTLs_EUR_WG_allele_info.txt.gz, size: 208088103, md5: 3ab6f0d149225dc20cc141e70a53e9b4}
+      - {file: cis_pQTLs_HIS_WG_allele_info.txt.gz, size: 300602814, md5: 50c6b47056c54623f2c5a441e05f8662}
+
+  - name: hgnc
+    description: >-
+      HGNC's complete gene set, for resolving a study's gene symbols to ENSG when the study
+      publishes no gene id. Carries `symbol`, `prev_symbol` and `alias_symbol` alongside
+      `ensembl_gene_id`, so a stale symbol maps in one hop rather than through a second annotation.
+      ARIC needs it: 4,270 of its 4,435 distinct symbols resolve against GENCODE v34 directly, 161
+      match no v34 symbol (they are retired names -- C10orf54 for VSIR, PVRL3 for NECTIN3, UFD1L
+      for UFD1, FAM19A1 for TAFA1, FDX1L for FDX2, ALPPL2 for ALPG), and 4 are ambiguous across two
+      ENSGs.
+    version: >-
+      no release in the file or the URL; it is rolled forward in place (Last-Modified 2026-10-06
+      when fetched 2026-10-07), so the md5 below is the identity.
+    license: HGNC data is free to use without restriction (genenames.org/about/license)
+    dir: hgnc
+    files:
+      - url: https://storage.googleapis.com/public-download-files/hgnc/tsv/tsv/hgnc_complete_set.txt
+        size: 16973125
+        md5: af43fd56a64ad57c0fcc72d6ef65e516
+
+  - name: mesa_eqtl
+    description: >-
+      MESA cis-eQTL summary statistics, five population sets: AFA, CAU, HIS, plus the pooled ALL
+      (everything) and AFHI (African + Hispanic). Same cohort as `mesa_pqtl`, so protein and
+      transcript abundance are measurable in the same people. Columns per the bundled README:
+      `snps` an rsID, `gene` an unversioned ENSG, `statistic` the t from MatrixEQTL modelLINEAR (so
+      se is beta/statistic), `FDR` Benjamini-Hochberg, and `alt` is "1 allele in dosage (beta
+      effect allele)" -- which is also the best evidence for which allele `mesa_pqtl`'s beta counts,
+      the two coming from the same pipeline and using the same 0/1-dosage naming.
+      **GRCh37.** The README says "rsid hg19" and "gene start hg19", and 8 of 8 sampled `ref`
+      alleles read hg19 rather than hg38. Positions therefore cannot enter the store as published;
+      every row carries an rsID, so the route in is a dbSNP b157 lookup to GRCh38 followed by the
+      ordinary refcheck, not a chain-file liftover.
+    version: >-
+      no publisher version; the bundled README's change log ends 2020-02-07 ("AFHI and ALL were
+      updated to include all summary statistics, not just the top hits"). Downloaded by hand
+      2026-10-07 from a Dropbox folder link, which serves an on-demand zip that ignores Range and
+      so cannot be fetched by download.py. The per-member checksums in `members.md5` are the
+      identity; the enclosing zip's bytes are not stable, being assembled per request.
+    license: not stated
+    dir: mesa_eqtl_2020
+    # The URL is here for provenance, not for fetching: `status` reports `present` while the file is
+    # on disk and never calls it. If the file ever goes missing, download.py will start an 11 GB
+    # unresumable transfer -- Dropbox answers a folder link with an on-demand zip and ignores Range,
+    # so a 400-byte probe returned 5.7 GB and climbing. Stop it and fetch by hand instead.
+    # `members.md5` holds the member digests, which are the real identity; the members are stored
+    # rather than deflated, so an adapter streams them straight out of the zip.
+    files:
+      - url: "https://www.dropbox.com/scl/fo/o01iknmahzn6zgohjf656/AFrWDT7qftyvnJvCn2ow_OA?rlkey=puqfc77vno34pkxgomyc15bio&dl=1"
+        file: MESA_cis-eQTLs.zip
+        size: 11142189434
+
+  - name: mesa_pwas_finemap
+    description: >-
+      Multi-ancestry PWAS fine-mapping output over the TOPMed MESA Olink proteome (Krueger et al.),
+      phenotypes named by Olink OID. Credible sets and PIPs only -- the record holds no nominal
+      summary statistics, so it cannot be an experiment under pipeline/CONTRACT.md, which requires
+      nominal.parquet. The record's other 48 files are PrediXcan prediction models (.db plus
+      covariances, by training method x ancestry x SNP input) and are not QTL results; they are left
+      out here.
+    version: Zenodo record 15483845 (2026-06-01), concept DOI 10.5281/zenodo.15483844
+    license: CC-BY-4.0
+    dir: zenodo_15483845
+    url_base: https://zenodo.org/api/records/15483845/files/{file}/content
+    files:
+      - {file: cis_finemap_ALL.tsv,   size: 1075518, md5: 6c94cbbf08c52ed32c253b840a85c283}
+      - {file: cis_finemap_EUR.tsv,   size: 1228140, md5: c9eb504c714a6abe8bb09993300db2d3}
+      - {file: cis_finemap_AFR.tsv,   size:  511749, md5: c1d998334eddc2986fbb3aa09659c60e}
+      - {file: cis_finemap_HIS.tsv,   size:  645125, md5: d194b0c05a03c9f8d4bb59de6048448d}
+      - {file: cis_finemap_CHN.tsv,   size:  627279, md5: 817a933d32144735f4b02bf4cfd6c775}
+      - {file: trans_finemap_ALL.tsv, size:  706128, md5: ec49cadd8f1e09ad9b71d123578eff24}
+      - {file: trans_finemap_EUR.tsv, size:  592823, md5: 7c49bbd87a723a835fe5ba16b77bf117}
+      - {file: trans_finemap_AFR.tsv, size:  627896, md5: 70160a4cc80141a1a5e616fdacc7f37a}
+      - {file: trans_finemap_HIS.tsv, size: 1097597, md5: b6ca78f0e9c171075e7b4ded868e1375}
+      - {file: trans_finemap_CHN.tsv, size: 1939620, md5: 66dd9ecb1198a84b7dbeaf080591f862}
+      - {file: meta_cis_tensor_vs_susier_vs_sushie_vs_multi_vs_susiex.tsv, size: 4467191, md5: 9feb895fde5cef77048fb6b709e86c59}
+      - {file: protein_coding_gene_boundaries.txt, size: 95057, md5: 57b02f2f9dad1011c57ac7f1f116a8d6}

@@ -22,6 +22,7 @@
 import { tableFromIPC, type Table } from 'apache-arrow'
 import { decodeArrowObject, decodeGwasBins, decodeLookupDir, DIGEST, FORMAT_VERSION, lookupBucket,
   lookupDirLen, lookupKey, OBJECT_NAME, parseFileHeader, type GwasBin } from './store-decode'
+import type { SignificanceRule } from './significance'
 
 /** The one data host. An empty `VITE_DATA_BASE` means "same origin" (`/data`), which is what the
  *  local dev server and preview serve. */
@@ -66,8 +67,13 @@ export interface AnnotationDoc {
 
 /** One part of the search index (SPEC section 8): its object, row count and inclusive ord runs. */
 export interface IndexPart { file: string; rows: number; ords: [number, number][] }
-/** What the Home and About pages print for one phenotype type (phenotypes with a cis result). */
-export interface TypeCounts { phenotypes: number; with_rows: number; significant: number; significant_genes: number }
+/** What the Home and About pages print for one phenotype type (phenotypes with a cis result).
+ *  `significant` and `significant_genes` are **null** when the experiment assessed no significance;
+ *  zero would say the study found nothing. */
+export interface TypeCounts {
+  phenotypes: number; with_rows: number
+  significant: number | null; significant_genes: number | null
+}
 
 /** How much one results set was rounded (SPEC section 8, `precision`). The first three are
  *  worst-case bounds; `slope_max_error_over_se` is measured at build time over `slope_rows_compared`
@@ -91,7 +97,9 @@ export interface ResultsSet {
 export interface ExperimentDoc {
   id: string; catalog: string; catalog_identity: string; annotation: string
   allele_orientation_source: string | null
-  significance: { column: string; op: string; threshold: number }
+  /** which `permuted` column the study tested, and at what threshold (SPEC section 8).
+   *  **Null when the source assessed no significance** -- see lib/significance.ts. */
+  significance: SignificanceRule | null
   search_index: string; n_phenotypes: number
   /** the search index by chromosome, which the browser reads instead of `search_index` */
   search_index_parts: Record<string, IndexPart>
@@ -422,8 +430,10 @@ export function variantsFile(s: Store, chr: string): { name: string } {
 
 /** Whole-experiment counts, from the experiment's `counts` and the catalog. */
 export interface Counts {
-  genes_tested?: number; egenes?: number
-  splice_phenotypes_tested?: number; sqtl_sig_phenotypes?: number; sqtl_sig_genes?: number
+  /** the significance-derived counts are null when the experiment assessed none; a page omits them
+   *  rather than printing 0, which would say the study found nothing */
+  genes_tested?: number; egenes?: number | null
+  splice_phenotypes_tested?: number; sqtl_sig_phenotypes?: number | null; sqtl_sig_genes?: number | null
   variants_cis?: number; variants_trans_only?: number
   gwas_variants?: number; trans_pairs?: number
 }
@@ -454,8 +464,9 @@ export const getStoreInfo = memo(async (): Promise<StoreInfo> => {
   const s = await getStore()
   // the builder's per-type counts (results.type_counts): no index read
   const ce = s.experiment.counts[EQTL_TYPE], cs = s.experiment.counts[SQTL_TYPE]
-  const c: Counts = { genes_tested: ce?.with_rows ?? 0, egenes: ce?.significant ?? 0,
-    splice_phenotypes_tested: cs?.phenotypes ?? 0, sqtl_sig_phenotypes: cs?.significant ?? 0, sqtl_sig_genes: cs?.significant_genes ?? 0 }
+  const c: Counts = { genes_tested: ce?.with_rows ?? 0, egenes: ce?.significant ?? null,
+    splice_phenotypes_tested: cs?.phenotypes ?? 0, sqtl_sig_phenotypes: cs?.significant ?? null,
+    sqtl_sig_genes: cs?.significant_genes ?? null }
   c.variants_cis = s.catalog.chromosomes.reduce((a, x) => a + x.n_cis, 0)
   c.variants_trans_only = s.catalog.n_sites - c.variants_cis
   if (s.experiment.gwas) c.gwas_variants = s.experiment.gwas.n_rows

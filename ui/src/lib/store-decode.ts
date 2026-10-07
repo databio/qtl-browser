@@ -441,7 +441,11 @@ export interface Details {
   has_nominal: boolean; n_nominal: number; n_credible_sets: number
   extra: Record<string, unknown>
   group: null | {
-    lead_phenotype_id: string; n_variants: number | null; p_perm: number | null; p_beta: number | null; significant: boolean
+    /** `p_perm` and `p_beta` are the source's own published numbers, null when it published
+     *  neither; the value the experiment's rule tested is the search index's `sig_value`.
+     *  `significant` is null when the experiment assessed no significance. */
+    lead_phenotype_id: string; n_variants: number | null; p_perm: number | null; p_beta: number | null
+    significant: boolean | null
     lead: { chr: string; pos: number; ref: string; alt: string }
   }
 }
@@ -673,7 +677,8 @@ export function decodeHitsTable(bytes: Uint8Array, expect: { chrom: string; seqD
 }
 
 /** One frame's records as parallel columns, sorted by (vidx, kind, ord, cs_id). Kind 0 is a group's
- *  lead (`value` p_perm, NaN when null; flags bit 0 significant), kind 1 a credible-set member
+ *  lead (`value` the index's `sig_value`, the quantity the experiment's rule tested, NaN when null;
+ *  flags bit 0 significant), kind 1 a credible-set member
  *  (`value` PIP), kind 2 a trans association (`value` -log10 p, +Infinity for p = 0; `beta` ALT). */
 export interface HitsFrame {
   count: number

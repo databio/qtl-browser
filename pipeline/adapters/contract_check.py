@@ -39,8 +39,14 @@ PHENOTYPES = {"phenotype_type": "VARCHAR", "phenotype_id": "VARCHAR", "phenotype
 NOMINAL = {"phenotype_type": "VARCHAR", "phenotype_id": "VARCHAR", "gene_id": "VARCHAR", "chr": "VARCHAR",
            "pos": "INTEGER", "ref": "VARCHAR", "alt": "VARCHAR", "beta": "FLOAT", "se": "FLOAT", "pvalue": "DOUBLE"}
 PERMUTED = {"phenotype_type": "VARCHAR", "phenotype_object_id": "VARCHAR", "phenotype_id": "VARCHAR",
-            "gene_id": "VARCHAR", "n_variants": "INTEGER", "p_perm": "DOUBLE", "p_beta": "DOUBLE",
+            "gene_id": "VARCHAR", "n_variants": "INTEGER",
             "lead_chr": "VARCHAR", "lead_pos": "INTEGER", "lead_ref": "VARCHAR", "lead_alt": "VARCHAR"}
+# `p_perm` and `p_beta` are conventional, not required: they are what a tensorQTL-family permutation
+# pass produces, and a source that ran none (PLINK2 --glm, MatrixEQTL) publishes neither. The column
+# a study's significance rule tests must exist and be numeric, whichever it is; `significance: null`
+# means the source assessed no significance at all.
+PERMUTED_CONVENTIONAL = {"p_perm": "DOUBLE", "p_beta": "DOUBLE"}
+NUMERIC = ("DOUBLE", "FLOAT", "INTEGER", "BIGINT", "SMALLINT", "DECIMAL")
 CREDIBLE_SETS = {"phenotype_type": "VARCHAR", "phenotype_object_id": "VARCHAR", "phenotype_id": "VARCHAR",
                  "cs_id": "SMALLINT", "chr": "VARCHAR", "pos": "INTEGER", "ref": "VARCHAR", "alt": "VARCHAR",
                  "pip": "FLOAT", "z": "FLOAT", "cs_size": "INTEGER", "cs_min_r2": "FLOAT"}
@@ -54,9 +60,14 @@ INGESTION_SECTIONS = {"experiment_id", "allele_orientation_source", "phenotype_t
                       "significance", "source", "rows"}
 
 
+NOT_GIVEN = object()   # `significance` absent from ingestion.json (the default rule) vs explicitly null
+
+
 class Checker:
     def __init__(self, tables: Path):
         self.T = Path(tables)
+        p = self.T / "ingestion.json"
+        self.ingestion_doc = json.loads(p.read_text()) if p.exists() else {}
         self.con = duckdb.connect()
         self.con.execute(f"SET memory_limit = '{os.environ.get('QTLB_DUCKDB_MEMORY', '24GB')}'; "
                          f"SET threads = {int(os.environ.get('QTLB_DUCKDB_THREADS', '4'))}; "
@@ -158,9 +169,20 @@ class Checker:
 
     def permuted(self) -> None:
         c, q = self.check, self.q
-        c("permuted types", *self.types(self.src("permuted"), PERMUTED))
+        src = self.src("permuted")
+        c("permuted types", *self.types(src, PERMUTED))
+        got = {r[0]: r[1] for r in self.con.execute(f"DESCRIBE SELECT * FROM {src}").fetchall()}
+        # the conventional permutation columns, when present, must still carry the conventional type
+        wrong = {k: (got[k], v) for k, v in PERMUTED_CONVENTIONAL.items() if k in got and got[k] != v}
+        c("permuted p_perm/p_beta types where present", len(wrong), str(wrong) if wrong else "")
+        # the column the experiment's rule tests must exist and be numeric
+        rule = (self.ingestion_doc or {}).get("significance", NOT_GIVEN)
+        if rule is not NOT_GIVEN and rule is not None:
+            col = (rule or {}).get("column")
+            bad = "" if got.get(col, "").startswith(NUMERIC) else f"significance column {col!r}: {got.get(col, 'absent')}"
+            c("permuted holds the significance rule's column, numeric", 1 if bad else 0, bad)
         if "pm" not in {r[0] for r in self.con.execute("SHOW TABLES").fetchall()}:
-            self.con.execute(f"CREATE TABLE pm AS SELECT * FROM {self.src('permuted')}")
+            self.con.execute(f"CREATE TABLE pm AS SELECT * FROM {src}")
         c("permuted one row per group",
           q("SELECT count(*) - count(DISTINCT (phenotype_type, phenotype_object_id)) FROM pm")[0])
         c("permuted lead phenotype is a phenotype of its group", q("""SELECT count(*) FROM pm ANTI JOIN ph
@@ -234,7 +256,7 @@ class Checker:
 
     def ingestion(self, n_nom: int) -> None:
         c, q = self.check, self.q
-        rep = json.loads((self.T / "ingestion.json").read_text())
+        rep = self.ingestion_doc
         c("ingestion.json has required sections", len(INGESTION_SECTIONS - set(rep)),
           str(sorted(INGESTION_SECTIONS - set(rep))))
         rows = rep.get("rows") or {}

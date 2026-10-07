@@ -19,7 +19,7 @@ uv run python -m pipeline build                                    # run what is
 uv run python -m pipeline build --step nominal --force
 
 # tests (no data needed)
-uv run python -m pipeline.test_qtlstore      # also test_catalog, test_annotation, test_results, test_dof,
+uv run python -m pipeline.test_qtlstore      # also test_catalog, test_annotation, test_results, test_dof, test_genemap,
                                              # test_gtf, test_refcheck, test_overlap,
                                              # adapters.test_topchef, adapters.test_eqtl_catalogue
 uv run python -m pipeline.test_packfmt --synthetic && uv run python -m pipeline.test_packtool   # the v0 reader
@@ -50,6 +50,8 @@ writes into the frozen v0 tree (`adapter.sbatch` refuses it). Iterate with
 | Store build | `QTLB_CHROMS=all QTLB_STORE=<store> EXPERIMENTS="topchef:<tree>/_tables/topchef:gencode_v34 gtex_v8_heart_lv:<tree>/_tables/gtex_v8_heart_lv" CROSSCAT="topchef_grch38 gtex_v8_heart_lv_grch38" sbatch --time=6:00:00 --mem=64G store.sbatch` | `annotation.py`, `catalog.py`, `results.py`, `gwas.py`, `verify_v0.py` |
 | Store maintenance | `uv run python -m pipeline.qtlstore validate \| remove-experiment ID \| gc [--dry-run] \| crosscat A B --store <store>` | `qtlstore.py` |
 | Catalog overlap index | `uv run python -m pipeline.overlap build --store <store> --id <id> [--catalogs A B ...]` (run by `store.sbatch`; `OVERLAP=` skips it) | `overlap.py` |
+| Gene symbols -> ENSG, for a source that publishes no gene id | `uv run python -m pipeline.genemap --symbols aric` (the report for ARIC's `seqid.txt`; any file of one symbol per line otherwise) | `genemap.py` |
+| Search index column rename, in place | `uv run python -m pipeline.results migrate-index --store <store> --id <experiment>` (25 objects per experiment; no results, variant, hits or GWAS object changes) | `results.py` |
 | Results-block code sweep | `uv run python -m pipeline.scan_codes --store <store> --experiment <id> [--chrom chr22 ...]`, or `--base <url>` to read a published store over HTTP | `scan_codes.py` |
 | Per-chromosome objects for a store built before them | `uv run python -m pipeline.annotation add-split --store <store> --id <annotation>`, then `uv run python -m pipeline.results add-split --store <store> --id <experiment>` (rewrites the pointer; no other object changes) | `annotation.py`, `results.py` |
 | Benchmark, v0 vs v1 | `QTLB_STORE=<store> sbatch bench_store.sbatch`; `EXPERIMENT=gtex_v8_heart_lv ... sbatch bench_store.sbatch --no-reads` for a study with no v0 twin | `bench_store.py` |

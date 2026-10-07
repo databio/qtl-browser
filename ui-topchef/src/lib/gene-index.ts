@@ -22,7 +22,10 @@ import type { Exon, SearchHit, WindowGene } from './queries'
 /** A search index row (SPEC section 8, `results.INDEX_SCHEMA`). */
 export interface PhenotypeRow {
   ord: number; phenotype_type: string; phenotype_id: string; gene_id: string | null; chr: string | null
-  significant: boolean; p_perm: number | null
+  /** null when the experiment assessed no significance, which is not false (lib/significance.ts) */
+  significant: boolean | null
+  /** the value the experiment's rule tested, whichever `permuted` column it names */
+  sig_value: number | null
   blk_off: number | null; blk_len: number | null; var_start: number | null; n_var: number | null
   var_off: number | null; var_len: number | null; w_lo: number | null; w_hi: number | null
   trans_off: number | null; trans_len: number | null; n_trans: number | null
@@ -31,7 +34,7 @@ export interface PhenotypeRow {
 /** An annotation genes row (SPEC section 6). */
 export interface GeneRow { gene_id: string; version: number; name: string; biotype: string; chr: string; tss: number; strand: string; start: number; end: number }
 
-const PHENOTYPE_COLS = ['ord', 'phenotype_type', 'phenotype_id', 'gene_id', 'chr', 'significant', 'p_perm', 'blk_off', 'blk_len',
+const PHENOTYPE_COLS = ['ord', 'phenotype_type', 'phenotype_id', 'gene_id', 'chr', 'significant', 'sig_value', 'blk_off', 'blk_len',
   'var_start', 'n_var', 'var_off', 'var_len', 'w_lo', 'w_hi', 'trans_off', 'trans_len', 'n_trans']
 const GENE_COLS = ['gene_id', 'version', 'name', 'biotype', 'chr', 'tss', 'strand', 'start', 'end']
 
@@ -111,7 +114,9 @@ const transOnly = (() => {
 
 /** The gene's search hit from its annotation row and its phenotypes on that chromosome: the rules of
  *  v1's former `search_index` table. `tested`: its eQTL phenotype has rows; `is_egene`: that
- *  phenotype is significant (null without one); `has_results`: any phenotype has a block. */
+ *  phenotype is significant -- null both without an eQTL phenotype and when the experiment assessed
+ *  no significance, which `tested` and `significanceOf().assessed` tell apart; `has_results`: any
+ *  phenotype has a block. */
 function hitOf(g: GeneRow, ps: PhenotypeRow[]): SearchHit {
   const e = ps.find(p => p.phenotype_type === EQTL_TYPE && p.blk_off != null) ?? null
   const sq = ps.filter(p => p.phenotype_type === SQTL_TYPE && p.blk_off != null)
@@ -120,7 +125,7 @@ function hitOf(g: GeneRow, ps: PhenotypeRow[]): SearchHit {
     gene_version: g.version,
     ord: e?.ord ?? null, blk_off: e?.blk_off ?? null, blk_len: e?.blk_len ?? null, var_start: e?.var_start ?? null, n_var: e?.n_var ?? null,
     var_off: e?.var_off ?? null, var_len: e?.var_len ?? null, w_lo: e?.w_lo ?? null, w_hi: e?.w_hi ?? null,
-    tested: e != null && e.n_var != null, is_egene: e ? e.significant : null,
+    tested: e != null && e.n_var != null, is_egene: e ? e.significant : null, sig_value: e?.sig_value ?? null,
     n_sqtl_sig: sq.filter(p => p.significant).length, n_sqtl: sq.length, has_results: e != null || sq.length > 0,
   }
 }

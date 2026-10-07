@@ -4,7 +4,7 @@ import { PageHeader } from '@/components/page-header'
 import { KvTable } from '@/components/kv-table'
 import { PIPELINE, PREPRINT, ZENODO } from '@/lib/links'
 import { seqcolCollectionUrl } from '@/lib/chrom-sizes'
-import { useStoreInfo } from '@/contexts/store-context'
+import { useSignificance, useStoreInfo } from '@/contexts/store-context'
 import { roundingFacts } from '@/lib/rounding'
 import { NOT_YET } from '@/components/states'
 
@@ -15,6 +15,7 @@ const REPO = 'https://github.com/databio/qtl-browser'
 
 export default function About() {
   const m = useStoreInfo()
+  const sig = useSignificance()
   const sources = m?.sources ?? {}
   const counts = m?.counts ?? {}
   const g = m?.experiment.gwas?.source
@@ -38,7 +39,7 @@ export default function About() {
             </p>
             <h2>Definitions</h2>
             <ul>
-              <li><strong>eGene, sQTL intron</strong>: permutation p-value below 0.05, the preprint's rule. An sGene has at least one significant intron. The beta-approximated permutation p is listed alongside.</li>
+              {sig.assessed && <li><strong>eGene, sQTL intron</strong>: {sig.ruleText}, this study's rule, which the experiment pointer records so a reader can see which test produced it. An sGene has at least one significant intron. The beta-approximated permutation p is listed alongside where the source published one.</li>}
               <li><strong>Lead variant</strong>: the variant with the smallest nominal p-value in the cis window, ±1 Mb of the transcription start site.</li>
               <li><strong>Credible sets and PIP</strong>: SuSiE 95% credible sets; PIP is the posterior inclusion probability. A variant in two sets of one phenotype is listed under both in the credible-set table; the locus plot and cis table show its higher-PIP membership.</li>
               <li><strong>A1 and A2</strong>: variants are stored against the GRCh38 reference, so A2 is the reference
@@ -74,9 +75,12 @@ export default function About() {
           {m && (
             <KvTable title="Counts" align="right" rows={[
               { label: 'Genes tested', value: counts.genes_tested?.toLocaleString() },
-              { label: 'eGenes', value: counts.egenes?.toLocaleString() },
+              // the significance rows only exist for an experiment that assessed it
+              ...(counts.egenes != null ? [{ label: 'eGenes', value: counts.egenes.toLocaleString() }] : []),
               { label: 'Splice phenotypes tested', value: counts.splice_phenotypes_tested?.toLocaleString() },
-              { label: 'Significant sQTL introns', value: `${counts.sqtl_sig_phenotypes?.toLocaleString()} in ${counts.sqtl_sig_genes?.toLocaleString()} genes` },
+              ...(counts.sqtl_sig_phenotypes != null
+                ? [{ label: 'Significant sQTL introns', value: `${counts.sqtl_sig_phenotypes.toLocaleString()} in ${counts.sqtl_sig_genes?.toLocaleString()} genes` }]
+                : []),
               { label: 'Variants in cis windows', value: counts.variants_cis?.toLocaleString() },
               { label: 'Variants seen only in trans', value: (counts.variants_trans_only ?? 0).toLocaleString() },
               { label: 'DCM GWAS variants', value: counts.gwas_variants?.toLocaleString() ?? NOT_YET },

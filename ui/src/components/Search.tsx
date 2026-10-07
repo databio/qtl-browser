@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router'
 import { ArrowRight } from 'lucide-react'
+import { useSignificance } from '@/contexts/store-context'
 import { searchGenes, type SearchHit } from '@/lib/queries'
 
 const RS = /^rs\d+$/i
@@ -22,6 +23,7 @@ export function routeFor(q: string): string | null {
 /** Search bar (atlas SearchBox): bordered bar, no leading icon, circular submit; `hero`
  *  uses a primary-tinted border. Gene typeahead drops below the bar. */
 export default function Search({ hero = false, autoFocus = false }: { hero?: boolean; autoFocus?: boolean }) {
+  const sig = useSignificance()
   const [q, setQ] = useState('')
   const [hits, setHits] = useState<SearchHit[]>([])
   const [open, setOpen] = useState(false)
@@ -83,8 +85,8 @@ export default function Search({ hero = false, autoFocus = false }: { hero?: boo
                 <span className="font-medium">{h.symbol ?? h.gene_id}</span>
                 <span className="min-w-0 truncate text-xs text-base-content/55">{h.gene_id} · {h.chr}:{h.tss.toLocaleString()}</span>
                 <span className="ml-auto flex shrink-0 gap-1">
-                  {h.is_egene && <span className="badge badge-primary badge-xs">eGene</span>}
-                  {h.n_sqtl_sig > 0 && <span className="badge badge-secondary badge-xs">sQTL</span>}
+                  {sig.assessed && h.is_egene && <span className="badge badge-primary badge-xs">eGene</span>}
+                  {sig.assessed && h.n_sqtl_sig > 0 && <span className="badge badge-secondary badge-xs">sQTL</span>}
                   {!h.tested && <span className="badge badge-ghost badge-xs">not tested</span>}
                 </span>
               </button>

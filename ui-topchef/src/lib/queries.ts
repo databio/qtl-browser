@@ -15,6 +15,8 @@ export interface SearchHit extends Row {
   ord: number | null; blk_off: number | null; blk_len: number | null; var_start: number | null; n_var: number | null
   var_off: number | null; var_len: number | null; w_lo: number | null; w_hi: number | null
   tested: boolean; is_egene: boolean | null; n_sqtl_sig: number; n_sqtl: number
+  /** the eQTL phenotype's tested significance value (lib/significance.ts names it) */
+  sig_value: number | null
   /** any phenotype of the gene (eQTL or an intron) has a block: false means not tested at all */
   has_results: boolean
 }
@@ -24,7 +26,9 @@ export interface Gene extends Row {
   start: number; end: number; strand: string; tss: number; biotype: string; tested: boolean
   num_var: number | null; lead_position: number | null; lead_A1: string | null; lead_A2: string | null
   lead_rsid: string | null; lead_af: number | null; lead_tss_distance: number | null
-  beta: number | null; beta_se: number | null; pval_nominal: number | null; pval_perm: number | null
+  beta: number | null; beta_se: number | null; pval_nominal: number | null
+  /** the value the experiment's significance rule tested; its name is in the experiment's rule */
+  sig_value: number | null
   pval_beta: number | null; is_egene: boolean | null
   n_credible_sets: number; n_trans_pairs: number
 }
@@ -45,7 +49,7 @@ export interface SplicePhenotype extends Row {
   intron_start: number; intron_end: number; cluster_id: string; strand: string; tss: number
   num_var: number; lead_position: number | null; lead_A1: string | null; lead_A2: string | null; lead_rsid: string | null
   lead_af: number | null; lead_tss_distance: number | null; beta: number | null; beta_se: number | null
-  pval_nominal: number | null; pval_perm: number | null; pval_beta: number | null
+  pval_nominal: number | null; sig_value: number | null; pval_beta: number | null
   /** not stored in v1 (null) */
   is_sqtl: boolean
   n_credible_sets: number

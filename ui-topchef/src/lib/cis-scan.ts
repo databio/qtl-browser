@@ -15,7 +15,7 @@ import { blockHeader, PackError, scanBlockRow, type VariantRecord } from './stor
 
 /** One nominal result at the variant. `phenotype_id` and `is_sqtl` are set on splicing rows only. */
 export interface CisHit {
-  gene_id: string; symbol: string | null; phenotype_id?: string; is_sqtl?: boolean
+  gene_id: string; symbol: string | null; phenotype_id?: string; is_sqtl?: boolean | null
   tss_distance: number; pval_nominal: number; beta: number; beta_se: number; af: number
   pip: number | null; cs_id: number | null
 }
@@ -24,7 +24,8 @@ export interface CisHit {
 export interface SpanBlock { off: number; len: number; ref: PhenotypeRef }
 export interface Span { file: string; off: number; len: number; blocks: SpanBlock[] }
 
-interface PhenotypeRef { gene_id: string; symbol: string | null; tss: number | null; phenotype_id: string; significant: boolean }
+/** `significant` is null when the experiment assessed no significance (lib/significance.ts). */
+interface PhenotypeRef { gene_id: string; symbol: string | null; tss: number | null; phenotype_id: string; significant: boolean | null }
 
 /** What the button knows before any request: the span per QTL type and their total size. */
 export interface ScanPlan {
@@ -37,7 +38,7 @@ export interface ScanPlan {
 }
 
 interface Covering extends Row {
-  phenotype_id: string; gene_id: string | null; symbol: string | null; tss: number | null; significant: boolean
+  phenotype_id: string; gene_id: string | null; symbol: string | null; tss: number | null; significant: boolean | null
   blk_off: number; blk_len: number
 }
 

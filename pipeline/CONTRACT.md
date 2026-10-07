@@ -129,8 +129,8 @@ source permuted (see `phenotype_object_id` under [`phenotypes`](#phenotypesparqu
 | `phenotype_id` | `string` | the group's **lead** phenotype (e.g. the lead intron of a leafcutter cluster) |
 | `gene_id` | `string`, nullable | primary gene of the group; null when the source publishes none |
 | `n_variants` | `int32` | variants tested in this group's window |
-| `p_perm` | `double` | permutation p-value (the significance rule reads this by default) |
-| `p_beta` | `double` | beta-approximated p-value (read instead when the rule's `column` is `p_beta`) |
+| `p_perm` | `double` | permutation p-value. **Conventional, not required** (see below); the significance rule reads it by default |
+| `p_beta` | `double` | beta-approximated p-value. Conventional, not required |
 | `lead_chr` | `string` | lead variant |
 | `lead_pos` | `int32` | |
 | `lead_ref` | `string` | |
@@ -161,8 +161,29 @@ Rules:
   for the same variant. `permuted` carries the permuted file's values; do not mix in nominal ones.
 - The significance rule itself (`p_perm < 0.05` for TOPCHeF) is **not** here: it is a field in the
   experiment JSON, so that two experiments can use different rules and a reader can see which.
-  The adapter reports the numbers; the experiment declares the rule: `column` (`p_perm` or
-  `p_beta`), `op` (`<` or `<=`) and `threshold`. The results builder tests exactly that column.
+  The adapter reports the numbers; the experiment declares the rule: `column` (any numeric column of
+  this table), `op` (`<` `<=` `>` `>=`), `threshold`, and `label` for display. The results builder
+  tests exactly that column and stores the value it tested as the search index's `sig_value`.
+
+**Decided: `p_perm` and `p_beta` are conventional names, not required columns.** *Decided
+2026-10-07.* They are what a tensorQTL-family permutation pass produces, and the first two sources
+ingested both ran one, which made them look universal. They are not: PLINK2 `--glm` (ARIC) and
+MatrixEQTL (MESA) publish no permutation p at all. So:
+
+- A source that publishes them uses these names, so two such studies agree on spelling -- the same
+  rule as the declared variant-catalog attributes above.
+- A source that publishes neither omits both columns and declares its own metric, or declares
+  `significance: null` in `ingestion.json` to say it assessed no significance. Null is **not** the
+  same as "nothing was significant": every `significant` in the store becomes null rather than
+  false, and a reader must not print "not significant" for a phenotype nobody tested.
+- A metric the source did not publish but the adapter computes is allowed, named for what it is and
+  recorded in `ingestion.json`. A per-phenotype Bonferroni (`min(1, p_nominal_lead * n_variants)`)
+  is a deterministic function of two published numbers and is recomputable from the store; that is
+  not the same as inferring an allele, which cannot be checked once written. Do not reuse `p_perm`
+  for a number no permutation produced.
+- Every other column of this table is universal -- the group, its lead variant and `n_variants` --
+  so a source with no permutation pass still writes a full row per group. The lead variant is the
+  minimum nominal p, which is what a lead is; the permutation pass only adds a calibrated p for it.
 
 **Decided: `permuted` is keyed by the group, not the phenotype.** *Decided 2026-09-22.* The eQTL
 Catalogue permutes on `molecular_trait_object_id`, not `molecular_trait_id`. For `ge` the two are

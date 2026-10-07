@@ -4,12 +4,14 @@ import ExternalLink from '@/components/ExternalLink'
 import { Page } from '@/components/page'
 import { PageHeader } from '@/components/page-header'
 import { Empty, TableSkeleton } from '@/components/states'
+import { useSignificance } from '@/contexts/store-context'
 import { ucsc } from '@/lib/links'
 import { fmtInt } from '@/lib/format'
 import { genesInRegion, type SearchHit } from '@/lib/queries'
 import { ROW_LINK, ROW_LINK_TEXT, useRowLink } from '@/lib/row-link'
 
 export default function Region() {
+  const sig = useSignificance()
   const { loc = '' } = useParams()
   const m = /^(chr[0-9XY]+):(\d+)-(\d+)$/i.exec(loc)
   const [genes, setGenes] = useState<SearchHit[] | null>(null)
@@ -37,8 +39,8 @@ export default function Region() {
                     <td className="text-base-content/60">{g.gene_id}</td>
                     <td className="text-right tabular-nums">{fmtInt(g.tss)}</td>
                     <td className="space-x-1">
-                      {g.is_egene && <span className="badge badge-primary badge-xs">eGene</span>}
-                      {g.n_sqtl_sig > 0 && <span className="badge badge-secondary badge-xs">{g.n_sqtl_sig} sQTL</span>}
+                      {sig.assessed && g.is_egene && <span className="badge badge-primary badge-xs">eGene</span>}
+                      {sig.assessed && g.n_sqtl_sig > 0 && <span className="badge badge-secondary badge-xs">{g.n_sqtl_sig} sQTL</span>}
                       {!g.tested && <span className="badge badge-ghost badge-xs">not tested</span>}
                     </td>
                   </tr>

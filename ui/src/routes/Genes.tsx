@@ -6,6 +6,7 @@ import { SortableTh, type SortState } from '@/components/sortable-th'
 import { Pager } from '@/components/pager'
 import { Empty, TableSkeleton } from '@/components/states'
 import { fmtInt } from '@/lib/format'
+import { useSignificance } from '@/contexts/store-context'
 import { allHits } from '@/lib/gene-index'
 import type { SearchHit } from '@/lib/queries'
 import { ROW_LINK, ROW_LINK_TEXT, useRowLink } from '@/lib/row-link'
@@ -15,8 +16,12 @@ const CHR_ORDER = [...Array.from({ length: 22 }, (_, i) => `chr${i + 1}`), 'chrX
 
 /** Browse every annotated gene (every chromosome's genes and search index part, read once): filter, sort, page. */
 export default function Genes() {
+  const sig = useSignificance()
   const [all, setAll] = useState<SearchHit[] | null>(null)
+  // the significance filters only exist for an experiment that assessed it, so the default moves to
+  // `tested` rather than opening on a filter that can match nothing (lib/significance.ts)
   const [filter, setFilter] = useState<Filter>('egenes')
+  useEffect(() => { if (!sig.assessed) setFilter(f => (f === 'egenes' || f === 'sqtl' ? 'tested' : f)) }, [sig.assessed])
   const [needle, setNeedle] = useState('')
   const [sort, setSort] = useState<SortState>({ by: 'symbol', order: 'asc' })
   const [offset, setOffset] = useState(0)
@@ -47,7 +52,7 @@ export default function Genes() {
       <div className="space-y-2">
         <div className="flex flex-wrap items-center justify-between gap-2">
           <Segmented value={filter} onChange={setFilter} options={[
-            { value: 'egenes', label: 'eGenes' }, { value: 'sqtl', label: 'sQTL genes' },
+            ...(sig.assessed ? [{ value: 'egenes' as Filter, label: 'eGenes' }, { value: 'sqtl' as Filter, label: 'sQTL genes' }] : []),
             { value: 'tested', label: 'Tested' }, { value: 'all', label: 'All' }]} />
           <label className="input input-bordered input-sm flex h-8 w-64 items-center gap-2 rounded-lg">
             <input type="search" className="grow bg-transparent outline-none" placeholder="Filter by symbol or ID…" value={needle} onChange={e => setNeedle(e.target.value)} />

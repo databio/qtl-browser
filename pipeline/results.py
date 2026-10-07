@@ -39,7 +39,8 @@ Hits (`.qbh`, kind 7)
 v1 header (count = records, page size = 1024 variants per frame, byte 24 = the chromosome's variant
 count), a u32 frame offset table, then one zstd frame per 1024 vidx (zero bytes when empty) of 20-byte
 records sorted by (vidx, kind, ord, cs_id): `u32 vidx, u32 ord, f32 value, f32 beta, u8 kind, u8 cs_id,
-u8 flags, u8 0`. kind 0 = lead variant of a group (value = p_perm, flags bit 0 = significant by the
+u8 flags, u8 0`. kind 0 = lead variant of a group (value = the quantity the experiment's significance
+rule tested, the index's `sig_value`; flags bit 0 = significant by the
 experiment's rule, ord = the lead phenotype), kind 1 = credible-set member (value = pip), kind 2 = trans
 association (value = -log10 p, beta = the ALT effect). `ord` is a u32 row number in the experiment's
 search index.
@@ -78,28 +79,50 @@ DETAILS_VERSION = 1
 ZSTD_LEVEL = 19
 HIT_LEAD, HIT_CS, HIT_TRANS, HIT_DTYPE = pf.HIT_LEAD, pf.HIT_CS, pf.HIT_TRANS, pf.HIT_DTYPE
 HITS_FRAME_VARIANTS = pf.HITS_FRAME_VARIANTS
-OPS = {"<": operator.lt, "<=": operator.le}
-SIG_COLUMNS = ("p_perm", "p_beta")              # `permuted` columns a significance rule may test
+OPS = {"<": operator.lt, "<=": operator.le, ">": operator.gt, ">=": operator.ge}
 DEFAULT_RULE = {"column": "p_perm", "op": "<", "threshold": 0.05}
 
 
-def significance_test(rule: dict):
-    """The experiment's rule as a test on a permuted group row: `test(group) -> bool`, false for no group
-    or a null value. The rule names its column (`p_perm` or `p_beta`); the test reads that column."""
+def significance_test(rule: dict | None, columns=()):
+    """The experiment's rule as a test on a permuted group row: `test(group) -> bool | None`.
+
+    The rule names any numeric column of `permuted` -- `p_perm` and `p_beta` are the conventional
+    names for a tensorQTL-family permutation pass, not the only possible metrics. A study whose
+    source never assessed significance declares `significance: null`, and then the test returns
+    `None`, which is **not** the same as false: "never assessed" and "tested and not significant"
+    are different claims, and the index stores the difference.
+
+    `columns` is `permuted`'s column names. The check matters because `col` reaches `getattr` from a
+    config file: an unvalidated name resolves to any attribute of the row tuple (a bound method,
+    `Index`) and would then be compared with the threshold, and a near-miss spelling (`pval_perm`,
+    which is what config.yaml calls it) would quietly make every phenotype non-significant.
+    """
+    if rule is None:
+        return lambda g: None
     col, op = rule.get("column"), rule.get("op")
-    if col not in SIG_COLUMNS or op not in OPS:
-        raise ValueError(f"significance rule {rule}: column must be one of {SIG_COLUMNS}, op one of {list(OPS)}")
+    if columns and col not in columns:
+        raise ValueError(f"significance rule {rule}: `permuted` has no column {col!r}; it has {sorted(columns)}")
+    if not isinstance(col, str) or op not in OPS:
+        raise ValueError(f"significance rule {rule}: column must be a `permuted` column, op one of {list(OPS)}")
     thr, fn = float(rule["threshold"]), OPS[op]
 
     def test(g) -> bool:
-        v = None if g is None else _none(getattr(g, col))
+        v = None if g is None else _none(getattr(g, col, None))
         return v is not None and not math.isnan(v) and fn(v, thr)
     return test
+
+
+def significance_value(rule: dict | None):
+    """The value the rule tested, for the index's `sig_value`: `value(group) -> float | None`. The
+    index carries the tested quantity whatever it is; the source's own `p_perm` and `p_beta` stay in
+    the block's details, under their own names."""
+    col = None if rule is None else rule.get("column")
+    return lambda g: None if (g is None or col is None) else _none(getattr(g, col, None))
 INDEX_SCHEMA = pa.schema([
     ("ord", pa.uint32()), ("phenotype_type", pa.string()), ("phenotype_id", pa.string()),
     ("phenotype_object_id", pa.string()), ("gene_id", pa.string()), ("chr", pa.string()),
     ("has_nominal", pa.bool_()), ("is_group_lead", pa.bool_()), ("significant", pa.bool_()),
-    ("p_perm", pa.float64()), ("blk_off", pa.uint32()), ("blk_len", pa.uint32()),
+    ("sig_value", pa.float64()), ("blk_off", pa.uint32()), ("blk_len", pa.uint32()),
     ("var_start", pa.uint32()), ("n_var", pa.uint32()), ("var_off", pa.uint32()), ("var_len", pa.uint32()),
     ("w_lo", pa.int32()), ("w_hi", pa.int32()),
     ("trans_off", pa.uint32()), ("trans_len", pa.uint32()), ("n_trans", pa.uint32())])
@@ -235,10 +258,13 @@ def build(store: qs.Store, exp_id: str, tables: Path, cat_id: str, annot_id: str
     chroms = [c["name"] for c in cdoc["chromosomes"] if c["name"] in chroms]      # variant catalog table order
     vidx_doc = cat.decode_vidx((store.immutable / cdoc["vidx"]).read_bytes(), [c["name"] for c in cdoc["chromosomes"]])
     page_size = vidx_doc["page_size"]
-    rule = ingestion.get("significance") or DEFAULT_RULE
-    sig = significance_test(rule)
+    # `significance: null` in ingestion.json means the source assessed none; absent means the
+    # default rule. The rule is compiled against `permuted`'s real columns, so it is read first.
+    rule = ingestion["significance"] if "significance" in ingestion else DEFAULT_RULE
     t = read_tables(tables, chroms)
     ph, perm, cs = t["phenotypes"], t["permuted"], t["credible_sets"]
+    sig = significance_test(rule, tuple(perm.columns))
+    sig_val = significance_value(rule)
     if ph.duplicated(["phenotype_type", "phenotype_id"]).any():
         raise ValueError("phenotypes: (phenotype_type, phenotype_id) is not unique")
     if perm.duplicated(["phenotype_type", "phenotype_object_id"]).any():
@@ -375,7 +401,7 @@ def build(store: qs.Store, exp_id: str, tables: Path, cat_id: str, annot_id: str
                     "has_nominal": info["has_nominal"],
                     "is_group_lead": g is not None and g.phenotype_id == r.phenotype_id,
                     "significant": sig(g),
-                    "p_perm": None if g is None else _none(g.p_perm),
+                    "sig_value": sig_val(g),
                     "blk_off": off, "blk_len": len(blk), "var_start": e["lo"],
                     "n_var": None if e["lo"] is None else e["hi"] - e["lo"] + 1,
                     "var_off": var[0], "var_len": var[1],
@@ -397,7 +423,7 @@ def build(store: qs.Store, exp_id: str, tables: Path, cat_id: str, annot_id: str
             index_rows[ords[e["k"]]] = {
                 "ord": ords[e["k"]], "phenotype_type": r.phenotype_type, "phenotype_id": r.phenotype_id,
                 "phenotype_object_id": r.phenotype_object_id, "gene_id": _none(r.gene_id), "chr": None,
-                "has_nominal": False, "is_group_lead": False, "significant": False, "p_perm": None,
+                "has_nominal": False, "is_group_lead": False, "significant": sig(None), "sig_value": None,
                 "blk_off": None, "blk_len": None, "var_start": None, "n_var": None, "var_off": None, "var_len": None,
                 "w_lo": None, "w_hi": None}
     for row in index_rows:
@@ -425,7 +451,9 @@ def build(store: qs.Store, exp_id: str, tables: Path, cat_id: str, annot_id: str
             if k not in ords:
                 raise ValueError(f"permuted: lead phenotype {k} is not in `phenotypes`")
             lv[0].append(v)
-            lv[1].append((ords[k], _nan(g.p_perm), int(sig(g))))
+            # `value` is the quantity the rule tested (SPEC section 9, kind 0); the flag bit is one
+            # bit, so an unassessed experiment reads as 0 there and the index's null is the record
+            lv[1].append((ords[k], _nan(sig_val(g)), int(bool(sig(g)))))
         parts = [pf.hit_records(lv[0], [x[0] for x in lv[1]], [x[1] for x in lv[1]], HIT_LEAD,
                                 flags=[x[2] for x in lv[1]])]
         for k, csr in pc_["cs"].items():
@@ -512,8 +540,12 @@ def _block(e: dict, nom: dict | None, span: tuple | None, pos: np.ndarray, sig, 
         raise ValueError(f"nominal: {e['k']} has {n_nom} rows in pass 2 and {e['n_nom']} in pass 1")
     group = None
     if g is not None:
-        group = {"lead_phenotype_id": g.phenotype_id, "n_variants": _none(g.n_variants), "p_perm": _none(g.p_perm),
-                 "p_beta": _none(g.p_beta), "significant": sig(g),
+        # p_perm and p_beta are the source's own published numbers, under their own names, and a
+        # source that ran no permutation pass has neither column at all (CONTRACT.md: conventional,
+        # not required). The quantity the rule tested is in the index as `sig_value`.
+        group = {"lead_phenotype_id": g.phenotype_id, "n_variants": _none(g.n_variants),
+                 "p_perm": _none(getattr(g, "p_perm", None)), "p_beta": _none(getattr(g, "p_beta", None)),
+                 "significant": sig(g),
                  "lead": {"chr": g.lead_chr, "pos": int(g.lead_pos), "ref": g.lead_ref, "alt": g.lead_alt}}
     details = {"v": DETAILS_VERSION, "phenotype_type": r.phenotype_type, "phenotype_id": r.phenotype_id,
                "phenotype_object_id": r.phenotype_object_id, "gene_id": _none(r.gene_id),
@@ -826,20 +858,27 @@ def ord_ranges(ords: list[int]) -> list[list[int]]:
 def type_counts(index: pa.Table) -> dict:
     """Per phenotype type, over its phenotypes with a cis result (`chr` set): `phenotypes`, `with_rows`
     (a run of variant rows), `significant`, and `significant_genes` (distinct gene ids among the
-    significant). What the Home and About pages print, so neither reads the index."""
+    significant). What the Home and About pages print, so neither reads the index.
+
+    `significant` and `significant_genes` are **null** when the experiment assessed no significance
+    (every `significant` null, see `significance_test`). Zero would say the study found nothing."""
     out: dict = {}
     for r in index.select(["phenotype_type", "gene_id", "chr", "significant", "n_var"]).to_pylist():
-        c = out.setdefault(r["phenotype_type"], {"phenotypes": 0, "with_rows": 0, "significant": 0, "significant_genes": set()})
+        c = out.setdefault(r["phenotype_type"], {"phenotypes": 0, "with_rows": 0, "significant": 0,
+                                                 "significant_genes": set(), "assessed": False})
         if r["chr"] is None:
             continue
         c["phenotypes"] += 1
         c["with_rows"] += r["n_var"] is not None
+        c["assessed"] |= r["significant"] is not None
         if r["significant"]:
             c["significant"] += 1
             if r["gene_id"]:
                 c["significant_genes"].add(r["gene_id"])
     for c in out.values():
-        c["significant_genes"] = len(c["significant_genes"])
+        c["significant_genes"] = len(c["significant_genes"]) if c["assessed"] else None
+        if not c.pop("assessed"):
+            c["significant"] = None
     return out
 
 
@@ -894,6 +933,43 @@ def add_split(store: qs.Store, exp_id: str, level: int = ZSTD_LEVEL) -> dict:
             out |= parts
     store.write_pointer("experiments", exp_id, out)
     return out
+
+
+def migrate_index(store: qs.Store, exp_id: str, level: int = ZSTD_LEVEL) -> dict:
+    """Rename a stored experiment's search-index column `p_perm` to `sig_value` and rewrite its
+    pointer. Idempotent: an index that already has `sig_value` is left alone.
+
+    The alternative is re-running `build`, which needs the experiment's contract tables -- for
+    TOPCHeF those are only on Rivanna, and tens of GB. The index is a self-contained Arrow file, so
+    this decodes it, renames one field, re-encodes, and redoes the parts and counts from the same
+    table: 25 objects per experiment (the whole index, one part per chromosome, the trans-only
+    part). No results, variants, hits or GWAS object changes, so their digests and bytes stand.
+
+    For an experiment whose rule tested `p_perm` -- every experiment built before this change -- the
+    rename is exact: the column already held the value the rule tested.
+    """
+    doc = store.load("experiments", exp_id)
+    index = load_index(store, doc)
+    if "sig_value" in index.schema.names:
+        return doc
+    if "p_perm" not in index.schema.names:
+        raise ValueError(f"experiments/{exp_id}: search index has neither p_perm nor sig_value")
+    rule = doc.get("significance")
+    col = (rule or {}).get("column")
+    if col not in (None, "p_perm"):
+        raise ValueError(f"experiments/{exp_id}: rule tests {col!r}, so the stored p_perm column is not "
+                         f"the tested value and cannot be renamed; rebuild this experiment instead")
+    index = index.rename_columns(["sig_value" if n == "p_perm" else n for n in index.schema.names])
+    out = {k: v for k, v in doc.items() if k not in SPLIT_KEYS}
+    out["search_index"] = store.put(encode_arrow(index, level), EXT_INDEX)
+    parts = split_index(store, index, _chroms_of(doc, store.load("variant_catalogs", doc["catalog"])), level)
+    merged = {}
+    for k, v in out.items():
+        merged[k] = v
+        if k == "search_index":
+            merged |= parts
+    store.write_pointer("experiments", exp_id, merged)
+    return merged
 
 
 def check_split(store: qs.Store, doc: dict, cdoc: dict) -> list[str]:
@@ -970,10 +1046,18 @@ def main(argv: list[str] | None = None) -> int:
     s = sub.add_parser("add-split", help="give a stored experiment its search index parts and counts (rewrites its pointer)")
     s.add_argument("--store", required=True, type=Path)
     s.add_argument("--id", required=True)
+    m = sub.add_parser("migrate-index", help="rename the search index's p_perm column to sig_value (rewrites its pointer)")
+    m.add_argument("--store", required=True, type=Path)
+    m.add_argument("--id", required=True)
     args = ap.parse_args(argv)
     if args.cmd == "add-split":
         doc = add_split(qs.Store(args.store), args.id)
         print(json.dumps({"parts": len(doc["search_index_parts"]), "counts": doc["counts"]}))
+        return 0
+    if args.cmd == "migrate-index":
+        doc = migrate_index(qs.Store(args.store), args.id)
+        print(json.dumps({"search_index": doc["search_index"], "parts": len(doc["search_index_parts"]),
+                          "counts": doc["counts"]}))
         return 0
     from .common import CHROMS
     doc = build(qs.Store(args.store), args.id, args.tables, args.catalog, args.annotation, CHROMS)
