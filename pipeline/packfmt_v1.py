@@ -25,6 +25,8 @@ import pyarrow as pa
 import zstandard
 from scipy.special import gammaln, stdtrit
 
+FORMAT_VERSION = 1          # the version a file header declares when this codec wrote its body
+
 # ---- quantization codes ---------------------------------------------------------------------
 NLP_NULL, NLP_ZERO, NLP_MAXQ = 65535, 65534, 65533      # u16 codes for -log10 p
 SE_NULL, SE_SIGN, SE_MAXQ = 0xFFFF, 0x8000, 32766        # u16 SE field: bit 15 slope sign, bits 0-14 log(SE) code
@@ -781,9 +783,10 @@ def gwas_p_value(p_mant, p_exp) -> np.ndarray:
     return np.asarray(p_mant, dtype=np.float64) / _POW10[-np.asarray(p_exp, dtype=np.int64)]
 
 
-def gwas_codes(position, beta, se, af, p, rs_number, n, n_values) -> dict[str, np.ndarray]:
-    """Whole columns (a chromosome, or one block) to SPEC.md section 10 codes, enforcing the lossless rules. ValueError names
-    the column and the first bad row. `n_values` is the index's sorted table of distinct n. Alleles are coded per block."""
+def gwas_shared_codes(position, rs_number, n, n_values) -> dict[str, np.ndarray]:
+    """The three columns whose rules do not depend on how p/beta/se are stored: ascending u32 position,
+    u32 rs_number, and `n_code`, the index of each row's N in the index's table. Both codecs enforce
+    these identically, so v2 reuses them rather than restating them."""
     k = len(position)
     pos = np.asarray(position, dtype=np.int64)
     if pos.size and (pos.min() < 1 or pos.max() > U32_MAX):
@@ -802,10 +805,17 @@ def gwas_codes(position, beta, se, af, p, rs_number, n, n_values) -> dict[str, n
     if bad.any():
         i = _first(bad)
         raise ValueError(f"gwas n: row {i} value {nn[i]} is not in the n table")
+    return {"position": pos, "rs_number": rs, "n_code": code.astype(np.uint8)}
+
+
+def gwas_codes(position, beta, se, af, p, rs_number, n, n_values) -> dict[str, np.ndarray]:
+    """Whole columns (a chromosome, or one block) to SPEC.md section 10 codes, enforcing the lossless rules. ValueError names
+    the column and the first bad row. `n_values` is the index's sorted table of distinct n. Alleles are coded per block."""
     mant, exp = gwas_p_codes(p)
-    return {"position": pos, "beta": gwas_scaled(beta, "beta", -(2**31 - 1), 2**31 - 1), "rs_number": rs,
+    return {**gwas_shared_codes(position, rs_number, n, n_values),
+            "beta": gwas_scaled(beta, "beta", -(2**31 - 1), 2**31 - 1),
             "se": gwas_scaled(se, "se", 0, 65535), "af": gwas_scaled(af, "af", 0, GWAS_SCALE),
-            "p_mant": mant, "p_exp": exp, "n_code": code.astype(np.uint8)}
+            "p_mant": mant, "p_exp": exp}
 
 
 def encode_gwas_block(codes: dict, ref: list, alt: list, level: int) -> bytes:
@@ -834,6 +844,12 @@ def encode_gwas_block(codes: dict, ref: list, alt: list, level: int) -> bytes:
     payload = b"".join([struct.pack("<II", n, len(heap_b))] + [np.asarray(cols[c]).astype(t).tobytes() for c, t in GWAS_COLUMNS] + [heap_b])
     assert len(payload) == GWAS_HEADER_LEN + GWAS_ROW_BYTES * n + len(heap_b)
     return zstd_frame(payload, level)
+
+
+# The call `gwas.build` makes, so one loop drives either codec: `gwas_codes` output sliced to a
+# block, then its ref/alt. v2 quantizes per block and so cannot precode a whole chromosome, which is
+# why this indirection exists at all; here the codes are already final and this is just the encoder.
+encode_gwas_columns = encode_gwas_block
 
 
 def decode_gwas_block(frame: bytes, n_values, *, expect_rows: int | None = None, what: str = "gwas block") -> dict:

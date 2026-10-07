@@ -43,8 +43,13 @@ BINS_SCHEMA = pa.schema([("chr", pa.string()), ("bin_start", pa.uint32()), ("bin
 
 
 def build(store: qs.Store, tables: Path, cdoc: dict, chroms: list[str], block_rows: int = BLOCK_ROWS,
-          level: int = ZSTD_LEVEL) -> dict | None:
-    """The `gwas` entry of an experiment, or None when `tables` has no `gwas.parquet`."""
+          level: int = ZSTD_LEVEL, codec=pf) -> dict | None:
+    """The `gwas` entry of an experiment, or None when `tables` has no `gwas.parquet`.
+
+    `codec` decides how p/beta/se are stored. v1 is lossless there and refuses a source carrying
+    more precision than its fixed scales hold; v2 quantizes to the same triple the QTL side uses,
+    with per-block scales, and records the error instead of refusing (plan D2). The loop is the same
+    either way: precode the chromosome, then encode block by block."""
     path = Path(tables) / "gwas.parquet"
     if not path.exists():
         return None
@@ -75,28 +80,30 @@ def build(store: qs.Store, tables: Path, cdoc: dict, chroms: list[str], block_ro
             raise ValueError(f"gwas {c}: position outside 1..{table[c]['length']}")
         rs = np.where(d["rs_number"].to_numpy(dtype=np.int64) < 0, 0, d["rs_number"].to_numpy(dtype=np.int64))
         try:
-            codes = pf.gwas_codes(pos, d["beta"].to_numpy(), d["se"].to_numpy(), d["af"].to_numpy(),
-                                  d["pvalue"].to_numpy(), rs, d["n"].to_numpy(dtype=np.int64), n_values)
+            codes = codec.gwas_codes(pos, d["beta"].to_numpy(), d["se"].to_numpy(), d["af"].to_numpy(),
+                                     d["pvalue"].to_numpy(), rs, d["n"].to_numpy(dtype=np.int64), n_values)
         except ValueError as e:
             raise ValueError(f"gwas {c}: {e}") from None
         ref, alt = d["ref"].tolist(), d["alt"].tolist()
         blocks, fp, eo, off = [], [], [], qs.HEADER_LEN
         for s in range(0, len(d), block_rows):
             e = min(s + block_rows, len(d))
-            fr = pf.encode_gwas_block({k: v[s:e] for k, v in codes.items()}, ref[s:e], alt[s:e], level)
+            fr = codec.encode_gwas_columns({k: v[s:e] for k, v in codes.items()}, ref[s:e], alt[s:e], level)
             blocks.append(fr)
             off += len(fr)
             fp.append(int(pos[s]))
             eo.append(off)
         if off > pf.U32_MAX:
             raise ValueError(f"gwas {c}: over 4 GiB")
-        body = qs.file_header(KIND_GWAS, c, len(d), block_rows, 0, table[c]["seq_digest"]) + b"".join(blocks)
+        body = qs.file_header(KIND_GWAS, c, len(d), block_rows, 0, table[c]["seq_digest"],
+                              codec.FORMAT_VERSION) + b"".join(blocks)
         files[c] = store.put(body, EXT_GWAS)
         index_chroms.append((c, np.array(fp), np.array(eo)))
         rows_by_chrom[c] = len(d)
-    payload = pf.encode_gwas_index_payload(n_values, index_chroms, qs.HEADER_LEN)
-    index = qs.file_header(KIND_GWAS_INDEX, qs.ALL, len(index_chroms), block_rows, 0, cdoc["collection_digest"]) + \
-        pf.zstd_frame(payload, level)
+    payload = codec.encode_gwas_index_payload(n_values, index_chroms, qs.HEADER_LEN)
+    index = qs.file_header(KIND_GWAS_INDEX, qs.ALL, len(index_chroms), block_rows, 0,
+                           cdoc["collection_digest"], codec.FORMAT_VERSION) + \
+        codec.zstd_frame(payload, level)
     return {"id": meta.get("id"), "title": meta.get("title"), "files": files, "index": store.put(index, EXT_GWAS_INDEX),
             "n_rows": int(sum(rows_by_chrom.values())), "rows_by_chrom": rows_by_chrom,
             "rows_sharing_a_site": sharing, "block_rows": block_rows,
@@ -199,26 +206,36 @@ def check_bins(t: pa.Table, cdoc: dict, bin_bp: int, n_bins: int) -> list[str]:
 
 
 def decode_index(buf: bytes) -> dict:
-    """{block_rows, n_values, chroms: {name: (first_position, end_offset)}} from a `.qgi` object."""
+    """{block_rows, version, n_values, chroms: {name: (first_position, end_offset)}} from a `.qgi` object.
+    The payload itself is offsets and the N table, identical in both versions; `version` comes from the
+    header and is what names the codec the `.qbg` files it points into were written with."""
     h = qs.parse_file_header(buf)
     if h["kind"] != KIND_GWAS_INDEX or h["chrom"] != qs.ALL:
         raise ValueError(f"gwas index: header kind {h['kind']} chromosome {h['chrom']!r}")
     out = pf.decode_gwas_index_payload(pf.zstd_unframe(buf[qs.HEADER_LEN:], None, "gwas index"), qs.HEADER_LEN)
     if len(out["chroms"]) != h["count"]:
         raise ValueError(f"gwas index: {len(out['chroms'])} chromosomes, header count {h['count']}")
-    return {"block_rows": h["page_size"], **out}
+    return {"block_rows": h["page_size"], "version": h["version"], **out}
 
 
-def read_window(store: qs.Store, doc: dict, chrom: str, lo: int, hi: int) -> dict:
-    """The GWAS rows with lo <= pos <= hi on `chrom`, through the index (one byte range), as columns."""
+def read_window(store: qs.Store, doc: dict, chrom: str, lo: int, hi: int, codec=pf) -> dict:
+    """The GWAS rows with lo <= pos <= hi on `chrom`, through the index (one byte range), as columns.
+
+    A GWAS block carries no magic, so `codec` cannot be inferred from a block's bytes: the file
+    header's version byte is the only thing that says which one wrote them, and reading a v2 file
+    with the v1 codec would decode 18-byte rows at a 21-byte stride and return plausible nonsense.
+    So the version is checked against `codec` and a mismatch raises."""
     g = doc["gwas"]
     idx = decode_index((store.immutable / g["index"]).read_bytes())
+    if idx["version"] != codec.FORMAT_VERSION:
+        raise ValueError(f"gwas: index declares format version {idx['version']}, "
+                         f"reading with the v{codec.FORMAT_VERSION} codec")
     empty = {"pos": np.zeros(0, np.int64), "ref": [], "alt": [], "beta": np.zeros(0), "se": np.zeros(0),
              "af": np.zeros(0), "p": np.zeros(0), "n": np.zeros(0, np.int64), "rs_number": np.zeros(0, np.int64)}
     if chrom not in idx["chroms"]:
         return empty
     fp, eo = idx["chroms"][chrom]
-    w = pf.gwas_window(fp, eo, lo, hi, qs.HEADER_LEN)
+    w = codec.gwas_window(fp, eo, lo, hi, qs.HEADER_LEN)
     if w is None:
         return empty
     start, end, a, b = w
@@ -229,7 +246,7 @@ def read_window(store: qs.Store, doc: dict, chrom: str, lo: int, hi: int) -> dic
     base = a
     for k in range(start, end + 1):
         s0 = (qs.HEADER_LEN if k == 0 else int(eo[k - 1])) - base
-        r = pf.decode_gwas_block(buf[s0:int(eo[k]) - base], idx["n_values"])
+        r = codec.decode_gwas_block(buf[s0:int(eo[k]) - base], idx["n_values"])
         keep = (r["position"] >= lo) & (r["position"] <= hi)
         cols["pos"].append(r["position"][keep])
         for c in ("beta", "se", "af", "p", "n", "rs_number"):

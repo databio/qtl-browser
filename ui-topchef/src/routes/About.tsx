@@ -52,6 +52,7 @@ export default function About() {
                 Zenodo</ExternalLink>.</li>}
               <li><strong>Splice phenotypes</strong>: leafcutter intron excision ratios, shown as intron coordinates and strand. Introns sharing a splice site share a cluster. Every tested intron has its permutation result and its per-variant nominal statistics.</li>
               <li><strong>Colocalized loci</strong>: the 21 eQTL and 4 sQTL genes with coloc PP.H4 above 0.8 against the DCM GWAS. PJVK and CDKN1A are not eGenes by the permutation rule; their colocalization used nominal statistics.</li>
+              <li><strong>Colocalization</strong>: coloc.abf (Giambartolomei et al. 2014) runs in your browser over the locus in view, from the z statistic and standard error of each trait, with coloc's default priors. It assumes one causal variant in the region and uses no LD. The quantitative-trait prior (W = 0.15²) is a prior on the effect per <em>standard deviation of the phenotype</em>, so it holds because every QTL set here was quantified on a standardized scale — tensorQTL inverse-normal transforms expression and splice ratios. A study reporting effects in raw units (a methylation β-value, an untransformed concentration) would need a different prior, and nothing in the store records the scale, so check it before adding one.</li>
             </ul>
             <h2>Coordinates and identifiers</h2>
             <ul>

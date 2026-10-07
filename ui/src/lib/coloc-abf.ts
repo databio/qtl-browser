@@ -20,7 +20,27 @@
  */
 
 /** Prior variance on the effect size, and the three configuration priors. coloc's defaults:
- *  W 0.15^2 for a quantitative trait, 0.2^2 on the log-odds scale for a case-control one. */
+ *  W 0.15^2 for a quantitative trait, 0.2^2 on the log-odds scale for a case-control one.
+ *
+ *  **`W1` assumes the QTL's phenotype has unit variance -- `sdY = 1` -- and nothing in the store
+ *  records that.** It is a real assumption, not a convention: the shrinkage is `W / (W + se^2)`, so
+ *  rescaling a phenotype by `c` sends `se^2 -> c^2 se^2` while `W` stays fixed, and the Bayes factor
+ *  moves on identical data. `0.15^2` means "a prior effect SD of 0.15 phenotype SDs per allele",
+ *  which only describes `beta` if `beta` is per phenotype SD.
+ *
+ *  It holds for everything in the store today, measured 2026-10-07: tensorQTL inverse-normal
+ *  transforms expression and splice ratios, and ARIC's plasma phenotypes were standardized before
+ *  PLINK2 saw them (coloc's own `sdY` estimator returns 0.9990 there, and with only two model
+ *  parameters it is unbiased). A source reporting raw units -- a methylation beta-value, an
+ *  untransformed concentration, Olink NPX -- would have `sdY` far from 1 and would silently inherit
+ *  this prior.
+ *
+ *  Do **not** fix that by estimating `sdY` from the data. coloc's `sdY.est` recovers the *residual*
+ *  SD, which equals the phenotype SD only when the source fitted no covariates. On TOPCHeF's eQTL,
+ *  whose model carries 81 parameters, it returns 0.5639 against a true 1 -- applying it would shrink
+ *  `W1` from 0.0225 to 0.00716 and make the posteriors 3x wrong in the name of correctness. Per
+ *  gene it ranges 0.19 to 0.99, which would make `W1` vary 27-fold between genes of one study. The
+ *  scale is not recoverable from `(se, af, n)`; it has to come from the study. */
 export interface AbfPriors {
   /** prior variance for trait 1 (the QTL) */
   W1: number

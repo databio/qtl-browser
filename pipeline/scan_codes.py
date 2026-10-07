@@ -1,10 +1,12 @@
-"""Sweep every results block's u16 codes: the reserved -log10 p and SE values, and the scale rule.
+"""Sweep every results block's codes: the reserved values, the scale rules, and the stated limits.
 
 `Store.validate` checks that each object's bytes hash to its name and that headers and pointers
 agree, but it never looks at the 2n u16 codes inside a block -- there are hundreds of millions of
 them and decoding each block fully (details frame, credible sets, rebuilt slopes) to count four
-things would be absurd. This sweeps the codes directly instead, which is fast because a v1 block
-stores them raw: 64-byte header, then `nlp_code, se_code` interleaved, one pair per row.
+things would be absurd. This sweeps the codes directly instead, which is fast because a block
+stores them raw -- v1 as `nlp_code, se_code` interleaved after a 64-byte header, v2 as three
+columns (`nlp` u16, `beta` i16, `se` u16) after a 72-byte one. The store's `format_version` picks
+which.
 
 What it counts, per (phenotype_type, chromosome):
 
@@ -15,11 +17,21 @@ What it counts, per (phenotype_type, chromosome):
                 in its window -- see `ui/src/lib/coloc-abf.ts`, where it would move the posteriors
     se_null     SE code 0xFFFF: no standard error
     both        rows that are p_null and se_null at once
+    beta_null   v2 only: beta code -32768, no effect size. v1 has no such code -- it *derives*
+                beta, so a row with no effect size is not something v1 can express
 
-Reserved codes are legitimate data, not failures. The one thing here that *is* a failure is the
-scale rule: a block's largest finite -log10 p code must be exactly 65533, since `nlp_max` in the
-header is defined as that row's value. A violation means the codes and the header disagree and
-every -log10 p in the block decodes to the wrong number, so the sweep exits non-zero on one.
+Reserved codes are legitimate data, not failures. What *is* a failure is a scale rule, because each
+header scale is defined as a particular row's value and a violation means every decoded number in
+the block is wrong:
+
+    bad_scale   the largest finite -log10 p code is not 65533 (`nlp_max` is that row's value)
+    bad_beta    v2: the largest |beta| code is not 32766, with `beta_max` > 0
+    bad_se      v2: the SE codes do not reach both 0 and 65534, with `lse_max` > `lse_min`
+
+And one check that is not about codes at all: every `precision` block's `measured_worst` must be
+within its own `theoretical_limit`. A bad scale is the first thing that would break it, which is
+why it belongs in the same pass -- the limit is computed from the stored scales and the measurement
+from the source rows, so agreement means the two halves of the claim were derived independently.
 
 The published store lives on B2 rather than on disk, so `--base` reads objects over HTTP:
 
@@ -62,33 +74,96 @@ class Objects:
             return json.loads(r.read())
 
 
-def block_codes(buf: bytes, blk_off: int, n_var: int) -> tuple[np.ndarray, np.ndarray]:
-    """One block's `(nlp_code, se_code)` arrays, as views into `buf`. The codes are the `2 * n_var`
-    u16s after the block's 64-byte header, interleaved one pair per row."""
-    u16 = np.frombuffer(buf, dtype="<u2", count=2 * n_var, offset=blk_off + 64)
-    return u16[0::2], u16[1::2]
+FIELDS = ("blocks", "rows", "p_null", "p_zero", "se_null", "both", "beta_null",
+          "bad_scale", "bad_beta", "bad_se")
 
 
-def scan_file(buf: bytes, blocks: list[tuple[int, int]]) -> dict:
+def block_codes(buf: bytes, blk_off: int, n_var: int, codec=pf) -> dict[str, np.ndarray | None]:
+    """One block's code arrays, as views into `buf`.
+
+    v1 interleaves `nlp_code, se_code` as `2n` u16s after its 64-byte header. v2 lays its three
+    codes out as columns -- `nlp` u16, `beta` i16, `se` u16 -- after a 72-byte one, which is why
+    this returns a dict rather than a pair: `beta` exists only in v2."""
+    if codec.FORMAT_VERSION == 1:
+        u16 = np.frombuffer(buf, dtype="<u2", count=2 * n_var, offset=blk_off + 64)
+        return {"nlp": u16[0::2], "se": u16[1::2], "beta": None}
+    o = blk_off + codec.BLOCK_HEADER_LEN
+    return {"nlp": np.frombuffer(buf, "<u2", n_var, o),
+            "beta": np.frombuffer(buf, "<i2", n_var, o + 2 * n_var),
+            "se": np.frombuffer(buf, "<u2", n_var, o + 4 * n_var)}
+
+
+def scan_file(buf: bytes, blocks: list[tuple[int, int]], codec=pf) -> dict:
     """Counts over every block of one results object. `blocks` is `(blk_off, n_var)` per phenotype."""
-    c = dict(blocks=len(blocks), rows=0, p_null=0, p_zero=0, se_null=0, both=0, bad_scale=0)
+    c = dict.fromkeys(FIELDS, 0)
+    c["blocks"] = len(blocks)
+    v2 = codec.FORMAT_VERSION != 1
     for off, n in blocks:
-        nlp, se = block_codes(buf, off, n)
-        pn, se_n = nlp == pf.NLP_NULL, se == pf.SE_NULL
-        finite = nlp[nlp <= pf.NLP_MAXQ]
-        if finite.size and int(finite.max()) != pf.NLP_MAXQ:
+        col = block_codes(buf, off, n, codec)
+        nlp, se = col["nlp"], col["se"]
+        pn, se_n = nlp == codec.NLP_NULL, se == codec.SE_NULL
+        finite = nlp[nlp <= codec.NLP_MAXQ]
+        if finite.size and int(finite.max()) != codec.NLP_MAXQ:
             c["bad_scale"] += 1
         c["rows"] += n
         c["p_null"] += int(pn.sum())
-        c["p_zero"] += int((nlp == pf.NLP_ZERO).sum())
+        c["p_zero"] += int((nlp == codec.NLP_ZERO).sum())
         c["se_null"] += int(se_n.sum())
         c["both"] += int((pn & se_n).sum())
+        if not v2:
+            continue
+        beta = col["beta"]
+        bn = beta == codec.BETA_NULL
+        c["beta_null"] += int(bn.sum())
+        # `beta_max` is the largest |beta| over the non-null rows, so some row must code 32766.
+        # An all-null or all-zero block has beta_max = 0 and codes nothing, which is not a breach.
+        live = beta[~bn]
+        if live.size and int(np.abs(live.astype(np.int32)).max()) not in (0, codec.BETA_MAXQ):
+            c["bad_beta"] += 1
+        # se is a log ruler between lse_min and lse_max, so the extremes code 0 and 65534 -- unless
+        # every live se is equal, when the span is zero and every code is 0.
+        live_se = se[~se_n]
+        if live_se.size:
+            lo, hi = int(live_se.min()), int(live_se.max())
+            if not (lo == hi == 0 or (lo == 0 and hi == codec.SE_MAXQ)):
+                c["bad_se"] += 1
     return c
 
 
-def scan(objects: Objects, exp_id: str, chroms: list[str] | None = None, log=lambda m: None) -> dict:
+def check_limits(doc: dict) -> list[str]:
+    """Every `precision` block's `measured_worst` within its own `theoretical_limit`, over the cis and
+    trans entries of an experiment pointer.
+
+    The limit comes from the stored header scales and the measurement from the source rows at build
+    time, so this compares two independently derived halves of the same claim. v1 states no limit
+    for `beta_over_se` -- it never bounded the quantity it breaches -- and a 0.0 limit there is read
+    as "not stated" rather than as a breach of zero."""
+    out, unstated = [], []
+    for r in doc.get("results") or []:
+        for scope, entry in (("cis", r), ("trans", r.get("trans") or {})):
+            p = entry.get("precision") or {}
+            lim, got = p.get("theoretical_limit") or {}, p.get("measured_worst") or {}
+            for field, g in got.items():
+                if field == "rows_compared" or field not in lim:
+                    continue
+                where = f"{r.get('phenotype_type')} {scope} {field}"
+                if lim[field] == 0.0:
+                    if g > 0.0:
+                        unstated.append(f"{where}: measured {g:.6g}, no limit stated")
+                    continue
+                if g > lim[field]:
+                    out.append(f"{where}: measured {g:.6g} exceeds the limit {lim[field]:.6g}")
+    return {"breaches": out, "unstated": unstated}
+
+
+def scan(objects: Objects, exp_id: str, chroms: list[str] | None = None, log=lambda m: None,
+         codec=None) -> dict:
     """Every nominal block of one experiment, keyed `(phenotype_type, chromosome)`. `chroms` limits
-    it to some chromosomes, which is the difference between a spot check and a 2.5 GB read."""
+    it to some chromosomes, which is the difference between a spot check and a 2.5 GB read.
+
+    `codec` defaults to whatever the objects' own file headers declare, so the right code layout is
+    read without being told. Reading a v2 block at the v1 layout would not raise -- it would count
+    beta codes as if they were SE codes and report a store full of reserved values."""
     doc = objects.pointer("experiments", exp_id)
     if objects.store:
         index = results.load_index(qs.Store(objects.store), doc)
@@ -105,17 +180,18 @@ def scan(objects: Objects, exp_id: str, chroms: list[str] | None = None, log=lam
     out = {}
     for key in sorted(want, key=lambda k: (k[0], list(files[k[0]]).index(k[1]))):
         ptype, chrom = key
-        out[key] = c = scan_file(objects(files[ptype][chrom]), want[key])
-        log(f"{ptype:11s} {chrom:6s} rows {c['rows']:>12,}  p_null {c['p_null']:>7,}  "
+        buf = objects(files[ptype][chrom])
+        cd = codec or qs.codec_for(qs.parse_file_header(buf)["version"])
+        out[key] = c = scan_file(buf, want[key], cd)
+        log(f"v{cd.FORMAT_VERSION} {ptype:11s} {chrom:6s} rows {c['rows']:>12,}  p_null {c['p_null']:>7,}  "
             f"p_zero {c['p_zero']:>7,}  se_null {c['se_null']:>7,}  both {c['both']:>7,}  "
-            f"bad_scale {c['bad_scale']}")
+            f"beta_null {c['beta_null']:>7,}  bad {c['bad_scale']}/{c['bad_beta']}/{c['bad_se']}")
     return out
 
 
 def totals(scanned: dict, ptype: str | None = None) -> dict:
     keys = [k for k in scanned if ptype is None or k[0] == ptype]
-    return {f: sum(scanned[k][f] for k in keys) for f in
-            ("blocks", "rows", "p_null", "p_zero", "se_null", "both", "bad_scale")}
+    return {f: sum(scanned[k][f] for k in keys) for f in FIELDS}
 
 
 # ---- CLI --------------------------------------------------------------------------------------
@@ -137,11 +213,25 @@ def main(argv: list[str] | None = None) -> int:
         t = totals(scanned, ptype)
         print(f"{ptype or 'ALL':11s} blocks {t['blocks']:>7,}  rows {t['rows']:>12,}  "
               f"p_null {t['p_null']:>7,}  p_zero {t['p_zero']:>7,}  se_null {t['se_null']:>7,}  "
-              f"both {t['both']:>7,}  bad_scale {t['bad_scale']}")
-    bad = totals(scanned)["bad_scale"]
-    if bad:
-        print(f"\nFAIL: {bad} blocks break the -log10 p scale rule", file=sys.stderr)
-    return 1 if bad else 0
+              f"both {t['both']:>7,}  beta_null {t['beta_null']:>7,}  "
+              f"bad_scale {t['bad_scale']}  bad_beta {t['bad_beta']}  bad_se {t['bad_se']}")
+    t = totals(scanned)
+    broken = {k: t[k] for k in ("bad_scale", "bad_beta", "bad_se") if t[k]}
+    lim = check_limits(objects.pointer("experiments", a.experiment))
+    print()
+    for b in lim["breaches"]:
+        print(f"LIMIT BREACH: {b}", file=sys.stderr)
+    # A measurement with no limit to compare it to is the v1 asymmetry, not a pass: the figure that
+    # sits at 99.9% of v1's slope budget is one of these, and reporting it as "0 breaches" would
+    # repeat exactly the silence that let it ship.
+    for u in lim["unstated"]:
+        print(f"NO LIMIT STATED: {u}")
+    n = len(lim["breaches"])
+    print(f"precision: {n or 'no'} measured value{'' if n == 1 else 's'} outside a stated limit, "
+          f"{len(lim['unstated'])} with no limit to compare against")
+    if broken:
+        print(f"FAIL: {broken}", file=sys.stderr)
+    return 1 if (broken or lim["breaches"]) else 0
 
 
 if __name__ == "__main__":
