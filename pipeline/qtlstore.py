@@ -24,7 +24,8 @@ from pathlib import Path
 
 import numpy as np
 
-FORMAT_VERSION = 1
+FORMAT_VERSION = 1                 # the version written when a caller names none
+SUPPORTED_VERSIONS = (1, 2)        # versions this reader accepts; 2 is the unified p/beta/se triple
 
 # ---- digest -----------------------------------------------------------------------------------
 DIGEST = re.compile(r"^[A-Za-z0-9_-]{32}$")
@@ -59,9 +60,17 @@ KIND_OVERLAP = 11                        # catalog overlap index (section 19), i
 ALL = "all"                        # header chromosome of objects spanning a whole variant catalog (seq_digest: the collection) or annotation (its identity)
 
 
-def file_header(kind: int, chrom: str, count: int, page_size: int, n_cis: int, seq_digest: str) -> bytes:
+def file_header(kind: int, chrom: str, count: int, page_size: int, n_cis: int, seq_digest: str,
+                version: int = FORMAT_VERSION) -> bytes:
     """64 bytes. `seq_digest` names the exact sequence the file's positions index, so a pack found
-    alone still says which genome it belongs to."""
+    alone still says which genome it belongs to.
+
+    `version` is the layout of the file's *body*, not a property of this header, and every builder
+    threads it from the codec it encodes with. It has to be a parameter rather than a module
+    constant because a GWAS block carries no magic of its own (unlike `QGB2`/`QTT3`), so this byte
+    is the only thing in a `.qbg` that says which codec wrote its rows."""
+    if version not in SUPPORTED_VERSIONS:
+        raise ValueError(f"file header: version {version} not in {SUPPORTED_VERSIONS}")
     if not 1 <= kind <= 255:
         raise ValueError(f"file header: kind {kind} not in 1..255")
     try:
@@ -75,7 +84,7 @@ def file_header(kind: int, chrom: str, count: int, page_size: int, n_cis: int, s
             raise ValueError(f"file header: {field} {v} does not fit u32")
     if not DIGEST.match(seq_digest):
         raise ValueError(f"file header: seq_digest {seq_digest!r} is not a 32-character sha512t24u")
-    return _HEADER.pack(MAGIC_FILE, kind, FORMAT_VERSION, HEADER_LEN, name.ljust(8, b"\0"), count, page_size, n_cis,
+    return _HEADER.pack(MAGIC_FILE, kind, version, HEADER_LEN, name.ljust(8, b"\0"), count, page_size, n_cis,
                         seq_digest.encode("ascii"))
 
 
@@ -85,8 +94,8 @@ def parse_file_header(b: bytes) -> dict:
     magic, kind, version, hlen, name, count, page_size, n_cis, sd = _HEADER.unpack_from(b, 0)
     if magic != MAGIC_FILE:
         raise ValueError(f"file header: magic {magic!r} is not {MAGIC_FILE!r}")
-    if version != FORMAT_VERSION:
-        raise ValueError(f"file header: version {version}, this reader supports {FORMAT_VERSION}")
+    if version not in SUPPORTED_VERSIONS:
+        raise ValueError(f"file header: version {version}, this reader supports {SUPPORTED_VERSIONS}")
     if hlen != HEADER_LEN:
         raise ValueError(f"file header: header length {hlen} != {HEADER_LEN}")
     if any(b[60:64]):
@@ -99,6 +108,17 @@ def parse_file_header(b: bytes) -> dict:
         raise ValueError(f"file header: bad seq_digest field {sd!r}")
     return {"kind": kind, "version": version, "chrom": chrom.decode("ascii"), "count": count,
             "page_size": page_size, "n_cis": n_cis, "seq_digest": seq_digest}
+
+
+def codec_for(version: int):
+    """The codec module a header version names, so every builder and every CLI resolves it one way.
+    Imported late: this module is the format core and hashing some bytes should not pull in Arrow
+    and scipy behind the codecs."""
+    from . import packfmt_v1, packfmt_v2
+    try:
+        return {packfmt_v1.FORMAT_VERSION: packfmt_v1, packfmt_v2.FORMAT_VERSION: packfmt_v2}[version]
+    except KeyError:
+        raise ValueError(f"no codec for format version {version}") from None
 
 
 # ---- variant catalog identity -----------------------------------------------------------------
@@ -188,6 +208,7 @@ class Store:
         self.root = Path(root)
         self.immutable = self.root / "immutable"
         self.notes = []                 # what the last validate() could not check, and why
+        self._version = None            # store.json's format_version, set by validate()
 
     def put(self, src: Path | bytes, ext: str) -> str:
         """Copy bytes into immutable/ under their digest; returns the object name `<digest>.<ext>`."""
@@ -213,10 +234,14 @@ class Store:
             raise ValueError(f"{level}/{pid}: objects not in the store (write objects first): {missing[:3]}")
         return _write_json(self.root / level / f"{pid}.json", doc)
 
-    def write_store(self, name: str, refget: list[str]) -> Path:
-        """store.json last: it lists whatever pointers exist now."""
+    def write_store(self, name: str, refget: list[str], version: int = FORMAT_VERSION) -> Path:
+        """store.json last: it lists whatever pointers exist now. `version` must be the version every
+        object's header declares -- `validate` compares the two, which is what turns a store built
+        half with one codec and half with another into a failure rather than a surprise."""
+        if version not in SUPPORTED_VERSIONS:
+            raise ValueError(f"store.json: format_version {version} not in {SUPPORTED_VERSIONS}")
         ids = {lvl: sorted(p.stem for p in (self.root / lvl).glob("*.json")) for lvl in POINTER_DIRS}
-        return _write_json(self.root / "store.json", {"name": name, "format_version": FORMAT_VERSION,
+        return _write_json(self.root / "store.json", {"name": name, "format_version": version,
                                                       "refget": refget, **ids})
 
     def load(self, level: str, pid: str) -> dict:
@@ -251,8 +276,10 @@ class Store:
         store = self._refgetstore(refget)
         fails = []
         st = json.loads((self.root / "store.json").read_text())
-        if st.get("format_version") != FORMAT_VERSION:
-            fails.append(f"store.json: format_version {st.get('format_version')}")
+        self._version = st.get("format_version")
+        if self._version not in SUPPORTED_VERSIONS:
+            fails.append(f"store.json: format_version {self._version} not in {SUPPORTED_VERSIONS}")
+            self._version = None            # nothing to compare the headers against
         docs = {}
         for lvl in POINTER_DIRS:
             for pid in st.get(lvl, []):
@@ -347,6 +374,7 @@ class Store:
                 if chrom in counts and obj.exists():
                     with open(obj, "rb") as f:
                         h = parse_file_header(f.read(HEADER_LEN))
+                    fails += self._check_version(f"experiments/{pid} hits {chrom}", h)
                     if h["n_cis"] != counts[chrom] or h["page_size"] < 1:
                         fails.append(f"experiments/{pid} hits {chrom}: header covers {h['n_cis']} variants in frames "
                                      f"of {h['page_size']}; the variant catalog has {counts[chrom]}")
@@ -380,6 +408,7 @@ class Store:
         except Exception as e:                 # noqa: BLE001 -- any decode failure is a validation failure
             return fails + [f"{what}: {e}"]
         h = d["header"]
+        fails += self._check_version(what, h)
         if h["kind"] != KIND_OVERLAP or h["chrom"] != "all" or h["seq_digest"] != doc.get("collection_digest"):
             fails.append(f"{what}: header kind {h['kind']}, chromosome {h['chrom']}, seq_digest {h['seq_digest']}")
         if d["k"] != len(named):
@@ -394,6 +423,14 @@ class Store:
                 fails.append(f"{what}: catalog {c['id']} has {total} set bits for {c['n_sites']} sites")
         return fails
 
+    def _check_version(self, what: str, h: dict) -> list[str]:
+        """Every object's header declares the store's format version. A v1 object in a v2 store decodes
+        at the wrong stride, and a GWAS block has no magic of its own, so this byte is the only
+        discriminator a `.qbg` carries -- which makes disagreement a failure, not a note."""
+        if self._version is None or h["version"] == self._version:
+            return []
+        return [f"{what}: header version {h['version']}, store.json says {self._version}"]
+
     def _check_header(self, what: str, name: str, chrom: str, seq_digest: str, kind: int) -> list[str]:
         obj = self.immutable / name
         if not obj.exists():
@@ -403,7 +440,7 @@ class Store:
                 h = parse_file_header(f.read(HEADER_LEN))
             except ValueError as e:
                 return [f"{what}: {e}"]
-        out = []
+        out = self._check_version(what, h)
         if h["kind"] != kind:
             out.append(f"{what}: header kind {h['kind']} != {kind}")
         if h["chrom"] != chrom:
@@ -496,7 +533,7 @@ def remove_experiment(store: Store, exp_id: str) -> dict:
     st = json.loads((store.root / "store.json").read_text())
     doc = json.loads(p.read_text())
     p.unlink()
-    store.write_store(st["name"], st.get("refget", []))
+    store.write_store(st["name"], st.get("refget", []), st.get("format_version", FORMAT_VERSION))
     return {"experiment": exp_id, "objects_now_unreferenced_candidates": len(object_names(doc))}
 
 

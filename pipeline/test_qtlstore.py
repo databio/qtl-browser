@@ -101,6 +101,39 @@ def header_round_trip():
 
 
 @case
+def header_version_is_a_parameter():
+    """A GWAS block carries no magic of its own, so this byte is the only thing in a `.qbg` that says
+    which codec wrote its rows -- which is why the version cannot be a module constant. Byte 5, and
+    nothing else, moves between v1 and v2."""
+    v1 = qs.file_header(4, "chr1", 10, 2048, 0, SEQ["chr1"], 1)
+    v2 = qs.file_header(4, "chr1", 10, 2048, 0, SEQ["chr1"], 2)
+    assert qs.parse_file_header(v1)["version"] == 1
+    assert qs.parse_file_header(v2)["version"] == 2
+    assert [i for i in range(64) if v1[i] != v2[i]] == [5]
+    assert qs.file_header(4, "chr1", 10, 2048, 0, SEQ["chr1"]) == v1, "the default stays v1"
+    raises("version 3", qs.file_header, 4, "chr1", 10, 2048, 0, SEQ["chr1"], 3)
+    assert qs.codec_for(1).FORMAT_VERSION == 1 and qs.codec_for(2).FORMAT_VERSION == 2
+    raises("no codec", qs.codec_for, 3)
+
+
+@case
+def a_store_rejects_an_object_of_another_version():
+    """The failure `which_codec` had to be written to find. Two v1 trans objects sat in a v2 store and
+    validate passed, because nothing compared an object's header to store.json. Now it does, so a
+    half-migrated store is a failure and not a surprise."""
+    with tempfile.TemporaryDirectory() as d:
+        st = build_store(Path(d))
+        assert st.validate() == [], st.validate()
+        st.write_store("test", ["https://refget.example/store"], 2)
+        fails = st.validate()
+        assert fails and all("header version 1, store.json says 2" in f for f in fails), fails
+        n = len(fails)
+        st.write_store("test", ["https://refget.example/store"], 1)
+        assert st.validate() == []
+        assert n >= 4, f"only {n} objects had their version checked"
+
+
+@case
 def identity_is_canonical():
     """The identity is the set of sites: chromosomes by seq_digest, sites by (pos, ref, alt), whatever
     order they are handed in."""
@@ -341,8 +374,18 @@ def validate_degrades_honestly():
 
 @case
 def codecs_do_not_mix():
-    """The v1 store modules import packfmt_v1 and never packfmt_v0; the v0 reader tools import only packfmt_v0.
-    `verify_v0` and `bench_store` compare the two formats and are the only modules allowed both."""
+    """Who may name which codec by module.
+
+    The v0 line and the v1/v2 line never meet: the v0 reader tools import only packfmt_v0, and the
+    store modules never import it. `verify_v0` and `bench_store` compare the two formats and are the
+    only modules allowed both.
+
+    Within the v1/v2 line the rule is tighter, and it is the one that matters: **a builder imports
+    packfmt_v1 only**. v1 is its default `codec=pf`, and v2 reaches it as a parameter or not at all.
+    A builder that also imported packfmt_v2 by name could encode part of an object with one codec
+    and part with another -- which is exactly what happened when `build_trans` kept calling the v1
+    encoder inside a v2 store, and is invisible in a diff. `qtlstore.codec_for` is the one place
+    both are named, because resolving a header version to a codec is its whole job."""
     import ast
     here = Path(__file__).parent
 
@@ -357,10 +400,13 @@ def codecs_do_not_mix():
                 out |= {a.name.rsplit(".", 1)[-1] for a in node.names if "packfmt" in a.name}
         return out
     assert not (here / "packfmt.py").exists(), "pipeline/packfmt.py is gone: use packfmt_v0 or packfmt_v1"
-    for m in ("qtlstore.py", "catalog.py", "annotation.py", "results.py", "gwas.py", "test_catalog.py",
-              "test_results.py"):
+    for m in ("catalog.py", "annotation.py", "results.py", "gwas.py", "test_catalog.py"):
         if (here / m).exists():
-            assert codecs(m) <= {"packfmt_v1"}, f"{m} imports {codecs(m)}"
+            assert codecs(m) <= {"packfmt_v1"}, f"{m} imports {codecs(m)}: a builder takes its codec as a parameter"
+    for m in ("qtlstore.py", "test_results.py", "test_packfmt_v2.py", "build_store.py", "which_codec.py"):
+        if (here / m).exists():
+            assert codecs(m) <= {"packfmt_v1", "packfmt_v2"}, f"{m} imports {codecs(m)}"
+    assert "codec_for" in (here / "qtlstore.py").read_text(), "qtlstore.codec_for is the version -> codec registry"
     for m in ("packtool.py", "common.py", "test_packfmt.py", "test_packtool.py", "adapters/verify_topchef.py"):
         assert codecs(m) <= {"packfmt_v0"}, f"{m} imports {codecs(m)}"
 

@@ -136,7 +136,7 @@ Struct `<4sBBH8sIII32s4x>` (`qtlstore._HEADER`).
 |---|---|---|
 | 0 | 4 bytes | magic `QTLB` |
 | 4 | u8 | kind, 1..255 (section 3 table) |
-| 5 | u8 | version: 1 |
+| 5 | u8 | version: the layout of the file's **body**, 1 here. A v2 store writes 2 (`plans/2026-10-07-qtlstore-v2.md`); the header itself is unchanged, and a GWAS block carries no magic of its own, so this byte is the only thing in a `.qbg` that names the codec that wrote its rows |
 | 6 | u16 | header length: 64 |
 | 8 | 8 bytes | chromosome name, ASCII, 1-8 bytes, no NUL inside, zero-padded; `all` for objects that span a whole variant catalog |
 | 16 | u32 | count (by kind, below) |
@@ -169,8 +169,11 @@ table, a whole-object read). A range read at a pointer-given offset trusts the p
 what the content-addressed name and `validate` guarantee, and the decoders reject bytes that are
 not what the offsets promise (block magic and length, zstd framing, record counts).
 
-**Reader rules** (`parse_file_header`): magic `QTLB`; version 1; header length 64; bytes 60-63
-zero; chromosome non-empty, ASCII, no inner NUL; `seq_digest` matches `^[A-Za-z0-9_-]{32}$`.
+**Reader rules** (`parse_file_header`): magic `QTLB`; version in `SUPPORTED_VERSIONS`; header length
+64; bytes 60-63 zero; chromosome non-empty, ASCII, no inner NUL; `seq_digest` matches
+`^[A-Za-z0-9_-]{32}$`. A reader that decodes bodies must then check the version against the codec it
+is about to use: the layouts differ in row width, so the wrong one returns plausible nonsense rather
+than failing.
 
 **Example**, kind 1, `chr1`, count 3, page size 512, `n_cis` 2, GRCh38 chr1
 (`file_header(1, "chr1", 3, 512, 2, "Ya6Rs7DHhDeg7YaOSg1EoNi3U_nQ9SvO")`):
@@ -989,7 +992,9 @@ with the trans objects and the slope measurement together).
 `Store.validate(refget, sites)` returns failures; `Store.notes` lists checks it could not run. **An
 empty failure list with non-empty notes is a partial pass.**
 
-1. `store.json` `format_version` is 1; every listed id has its pointer file.
+1. `store.json` `format_version` is a supported version, every listed id has its pointer file, and
+   **every object header declares that same version** -- a store half-built with one codec and half
+   with another fails here rather than decoding at the wrong stride.
 2. Every object any pointer names exists and its bytes hash to its name.
 3. Every variant catalog chromosome's `.qbv` header parses, and its chromosome and `seq_digest` equal the
    table entry.

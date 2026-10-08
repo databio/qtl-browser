@@ -172,7 +172,7 @@ def read_sites(store: qs.Store, chrom: dict):
 
 # ---- variant index and rsID index -------------------------------------------------------------
 def encode_vidx(chroms: list[dict], page_size: int, rsid_first: np.ndarray, rsid_n: int, collection: str,
-                level: int = ZSTD_LEVEL) -> bytes:
+                level: int = ZSTD_LEVEL, version: int = qs.FORMAT_VERSION) -> bytes:
     """Kind 9: header (chromosome `all`, the collection digest), one zstd frame: `QVX1` header, then per
     chromosome **in variant catalog table order** n_cis, n_trans, n_pages_cis, n_pages_trans, page offsets
     (n_pages + 1, the last the file size), page first positions; then the rsID block samples."""
@@ -186,7 +186,7 @@ def encode_vidx(chroms: list[dict], page_size: int, rsid_first: np.ndarray, rsid
                   np.asarray(c["page_off"], dtype="<u4").tobytes(),
                   np.asarray(c["page_first_position"], dtype="<u4").tobytes()]
     parts.append(np.asarray(rsid_first, dtype="<u4").tobytes())
-    return qs.file_header(KIND_VARIANT_INDEX, ALL, len(chroms), page_size, 0, collection) + \
+    return qs.file_header(KIND_VARIANT_INDEX, ALL, len(chroms), page_size, 0, collection, version) + \
         pf.zstd_frame(b"".join(parts), level)
 
 
@@ -211,14 +211,14 @@ def decode_vidx(buf: bytes, names: list[str]) -> dict:
     return {"page_size": page_size, "rsid_block_records": rbr, "rsid_n": rsid_n, "rsid_first": rf, "chroms": out}
 
 
-def encode_rsid(rs_number, vidx, ordinal, collection: str) -> tuple[bytes, np.ndarray]:
+def encode_rsid(rs_number, vidx, ordinal, collection: str, version: int = qs.FORMAT_VERSION) -> tuple[bytes, np.ndarray]:
     """Kind 8: 12-byte records (rs_number u32, vidx u32, ordinal u16, 0 u16) sorted by (rs_number,
     ordinal, vidx). rs_number may repeat -- one rsID names every allele pair dbSNP puts under it -- so a
     lookup returns a run, not a single record. Returns the bytes and each block's first rs_number."""
     rec = np.zeros(len(rs_number), dtype=RSID_DTYPE)
     rec["rs_number"], rec["vidx"], rec["ordinal"] = rs_number, vidx, ordinal
     rec = rec[np.lexsort((rec["vidx"], rec["ordinal"], rec["rs_number"]))]
-    return (qs.file_header(KIND_RSID, ALL, len(rec), RSID_BLOCK_RECORDS, 0, collection) + rec.tobytes(),
+    return (qs.file_header(KIND_RSID, ALL, len(rec), RSID_BLOCK_RECORDS, 0, collection, version) + rec.tobytes(),
             rec["rs_number"][::RSID_BLOCK_RECORDS].astype(np.int64))
 
 
@@ -298,8 +298,13 @@ def _column(t: pa.Table, name: str, fill, dtype) -> np.ndarray:
 
 
 def build(store: qs.Store, cat_id: str, sites: Path | pa.Table, refget, collection: str, chroms: list[str],
-          page_size: int = PAGE_SIZE, level: int = ZSTD_LEVEL, source: dict | None = None) -> dict:
-    """Write the chromosome files, the variant and rsID indexes, and `variant_catalogs/<cat_id>.json`."""
+          page_size: int = PAGE_SIZE, level: int = ZSTD_LEVEL, source: dict | None = None,
+          version: int = qs.FORMAT_VERSION) -> dict:
+    """Write the chromosome files, the variant and rsID indexes, and `variant_catalogs/<cat_id>.json`.
+
+    Nothing here changed between v1 and v2 -- a site is a position and two alleles either way -- but
+    `version` still has to be threaded, because `validate` requires every object in a store to
+    declare the store's version and a catalog is as much an object as a results pack."""
     if isinstance(sites, pa.Table):
         table = sites
     else:
@@ -337,7 +342,7 @@ def build(store: qs.Store, cat_id: str, sites: Path | pa.Table, refget, collecti
             match = np.fromiter((pf.MATCH_CODES[x] for x in m), dtype=np.uint8, count=n)
         else:
             match = np.zeros(n, dtype=np.uint8)
-        parts = [qs.file_header(KIND_VARIANTS, s["name"], n, page_size, n_cis, s["seq_digest"])]
+        parts = [qs.file_header(KIND_VARIANTS, s["name"], n, page_size, n_cis, s["seq_digest"], version)]
         offs, firsts = [qs.HEADER_LEN], []
         for lo, hi in ((0, n_cis), (n_cis, n)):
             for a in range(lo, hi, page_size):
@@ -358,8 +363,8 @@ def build(store: qs.Store, cat_id: str, sites: Path | pa.Table, refget, collecti
     ident = qs.catalog_identity(ident_parts)
     rs_all = np.concatenate([p[0] for p in rs_parts]) if rs_parts else np.zeros(0, np.int64)
     rbytes, rsid_first = encode_rsid(rs_all, np.concatenate([p[1] for p in rs_parts]),
-                                     np.concatenate([p[2] for p in rs_parts]), collection)
-    vbytes = encode_vidx([e["_idx"] for e in entries], page_size, rsid_first, len(rs_all), collection, level)
+                                     np.concatenate([p[2] for p in rs_parts]), collection, version)
+    vbytes = encode_vidx([e["_idx"] for e in entries], page_size, rsid_first, len(rs_all), collection, level, version)
     for e in entries:
         del e["_idx"]
     doc = {
@@ -391,12 +396,14 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--sites", required=True, type=Path)
     ap.add_argument("--store", required=True, type=Path)
     ap.add_argument("--id", required=True)
+    ap.add_argument("--version", type=int, default=qs.FORMAT_VERSION, choices=qs.SUPPORTED_VERSIONS,
+                    help="store format version to declare in the object headers")
     args = ap.parse_args(argv)
     from .common import CHROMS, Config
     from .steps_refget import open_store
     cfg = Config()
     doc = build(qs.Store(args.store), args.id, args.sites, open_store(cfg), cfg["reference"]["collection"], CHROMS,
-                source={"sites": str(args.sites)})
+                source={"sites": str(args.sites)}, version=args.version)
     print(json.dumps({k: v for k, v in doc.items() if k != "chromosomes"}, indent=1))
     return 0
 

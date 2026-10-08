@@ -285,7 +285,8 @@ def lookup_buckets(genes: pa.Table, n_buckets: int = LOOKUP_BUCKETS) -> list[pa.
     return out
 
 
-def encode_lookup(buckets: list[pa.Table], identity: str, level: int = ZSTD_LEVEL) -> bytes:
+def encode_lookup(buckets: list[pa.Table], identity: str, level: int = ZSTD_LEVEL,
+                  version: int = qs.FORMAT_VERSION) -> bytes:
     """Kind 10: the v1 header (chromosome `all`, count = buckets, seq_digest = the annotation's
     identity digest), u32 byte offsets of each bucket plus the end, then each bucket as one
     `encode`d Arrow object (an empty bucket is zero bytes)."""
@@ -299,7 +300,7 @@ def encode_lookup(buckets: list[pa.Table], identity: str, level: int = ZSTD_LEVE
     offs.append(off)
     if off > qs.U32_MAX:
         raise ValueError("gene lookup: over 4 GiB")
-    return (qs.file_header(qs.KIND_GENE_LOOKUP, qs.ALL, n, 0, 0, identity)
+    return (qs.file_header(qs.KIND_GENE_LOOKUP, qs.ALL, n, 0, 0, identity, version)
             + struct.pack(f"<{n + 1}I", *offs) + b"".join(frames))
 
 
@@ -322,21 +323,22 @@ def decode_lookup(buf: bytes, what: str = "gene lookup") -> tuple[dict, list[pa.
 SPLIT_KEYS = ("chroms", "lookup")
 
 
-def split(store: qs.Store, tables: dict[str, pa.Table], identity: str, level: int = ZSTD_LEVEL) -> dict:
+def split(store: qs.Store, tables: dict[str, pa.Table], identity: str, level: int = ZSTD_LEVEL,
+          version: int = qs.FORMAT_VERSION) -> dict:
     """Put the objects the browser reads and return their pointer keys: `chroms` (chromosome ->
     `{genes, exon_models}`) and `lookup`. `build` and `add_split` both come here, so a store migrated in
     place and a store built from scratch hold the same bytes."""
     return {"chroms": {c: {k: store.put(encode(t, level), EXT) for k, t in parts.items()}
                        for c, parts in chrom_tables(tables).items()},
-            "lookup": store.put(encode_lookup(lookup_buckets(tables["genes"]), identity, level), LOOKUP_EXT)}
+            "lookup": store.put(encode_lookup(lookup_buckets(tables["genes"]), identity, level, version), LOOKUP_EXT)}
 
 
-def add_split(store: qs.Store, annot_id: str, level: int = ZSTD_LEVEL) -> dict:
+def add_split(store: qs.Store, annot_id: str, level: int = ZSTD_LEVEL, version: int = qs.FORMAT_VERSION) -> dict:
     """Give an annotation built before the split objects existed its `chroms` and `lookup`, from the
     tables it already names, and rewrite its pointer (objects first). Returns the new pointer."""
     a = load(store, annot_id)
     doc = {k: v for k, v in a["doc"].items() if k not in SPLIT_KEYS}
-    parts = split(store, {"genes": a["genes"], "exons": a["exons"]}, doc["identity_digest"], level)
+    parts = split(store, {"genes": a["genes"], "exons": a["exons"]}, doc["identity_digest"], level, version)
     out = {}
     for k, v in doc.items():            # the split keys go right after `exons`, as `build` writes them
         out[k] = v
@@ -387,7 +389,7 @@ def check_split(store: qs.Store, doc: dict) -> list[str]:
 
 # ---- build ------------------------------------------------------------------------------------
 def build(store: qs.Store, annot_id: str, gtf: Path, source: dict | None = None,
-          level: int = ZSTD_LEVEL) -> dict:
+          level: int = ZSTD_LEVEL, version: int = qs.FORMAT_VERSION) -> dict:
     """Parse `gtf`, put both tables and the browser's split objects in the store, write
     `annotations/<annot_id>.json`, return it.
 
@@ -400,7 +402,7 @@ def build(store: qs.Store, annot_id: str, gtf: Path, source: dict | None = None,
         "identity_digest": identity,
         "genes": store.put(encode(tables["genes"], level), EXT),
         "exons": store.put(encode(tables["exons"], level), EXT),
-        **split(store, tables, identity, level),
+        **split(store, tables, identity, level, version),
         "n_genes": tables["genes"].num_rows,
         "n_transcripts": len(set(tables["exons"].column("transcript_id").to_pylist())),
         "n_exons": tables["exons"].num_rows,
@@ -516,22 +518,25 @@ def main(argv: list[str] | None = None) -> int:
     b.add_argument("--store", required=True, type=Path, help="store root (immutable/ and annotations/ live here)")
     b.add_argument("--id", required=True, help="annotation id, e.g. gencode_v34")
     b.add_argument("--sources", type=Path, default=Path("data/raw/sources.yaml"))
+    b.add_argument("--version", type=int, default=qs.FORMAT_VERSION, choices=qs.SUPPORTED_VERSIONS,
+                   help="store format version to declare in the lookup object's header")
     s = sub.add_parser("add-split", help="give a stored annotation its per-chromosome objects and lookup (rewrites its pointer)")
     s.add_argument("--store", required=True, type=Path)
     s.add_argument("--id", required=True)
+    s.add_argument("--version", type=int, default=qs.FORMAT_VERSION, choices=qs.SUPPORTED_VERSIONS)
     v = sub.add_parser("verify", help="compare a fresh parse against the v0 _tables (migration check)")
     v.add_argument("--gtf", required=True, type=Path)
     v.add_argument("--tables", required=True, type=Path)
     args = ap.parse_args(argv)
     if args.cmd == "add-split":
-        doc = add_split(qs.Store(args.store), args.id)
+        doc = add_split(qs.Store(args.store), args.id, version=args.version)
         print(json.dumps({"lookup": doc["lookup"], "chroms": len(doc["chroms"])}))
         return 0
     if args.cmd == "verify":
         bad = verify(args.gtf, args.tables)
         print(f"{'MISMATCHES: ' + str(bad) if bad else 'all comparisons agree'}")
         return 1 if bad else 0
-    doc = build(qs.Store(args.store), args.id, args.gtf, gtf_source(args.sources, args.gtf))
+    doc = build(qs.Store(args.store), args.id, args.gtf, gtf_source(args.sources, args.gtf), version=args.version)
     print(json.dumps(doc, indent=1))
     return 0
 

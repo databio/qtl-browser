@@ -92,14 +92,19 @@ def test_pointer_and_validate():
         assert [r["phenotype_type"] for r in doc["results"]] == ["ge", "leafcutter"]
         assert [r["dof"] for r in doc["results"]] == [435, 480]
         assert set(doc["results"][0]["files"]) == {"chr1", "chr2"} and set(doc["hits"]) == {"chr1", "chr2"}
-        assert doc["results"][0]["precision"]["neglog10p_max_error"] > 0
+        assert doc["results"][0]["precision"]["theoretical_limit"]["neglog10p"] > 0
         h = qs.parse_file_header((st.immutable / doc["results"][1]["files"]["chr2"]).read_bytes())
         assert (h["kind"], h["chrom"], h["count"]) == (rs.KIND_RESULTS, "chr2", 3)
 
 
 def test_slope_precision_is_measured():
-    """`slope_max_error_over_se` is the largest |slope rebuilt from the stored codes - source beta| / se over
-    every row, measured, not a bound; null when the results set has no dof."""
+    """`measured_worst.beta_over_se` is the largest |slope rebuilt from the stored codes - source
+    beta| / se over every row, measured, not a limit; null when the results set has no dof.
+
+    Under v1 this is the only quantity that can be measured at all: `nlp` and `se` are what v1
+    stores, so there is nothing to compare them against, and it has no `beta_max` from which to
+    derive a ceiling for the effect size. `theoretical_limit.beta_over_se` is therefore 0.0 here --
+    which is why v1's budget breach went unnoticed for so long."""
     from . import catalog
     with tempfile.TemporaryDirectory() as d:
         st, rg, doc = build_all(Path(d))
@@ -117,8 +122,10 @@ def test_slope_precision_is_measured():
                         b, se = (float(np.float32(x)) for x in src[key])
                         want, n = max(want, abs(sl - b) / se), n + 1
             pr = res["precision"]
-            assert pr["slope_rows_compared"] == n and n > 0
-            assert abs(pr["slope_max_error_over_se"] - want) < 1e-12, (pr, want)
+            assert pr["measured_worst"]["rows_compared"] == n and n > 0
+            assert abs(pr["measured_worst"]["beta_over_se"] - want) < 1e-12, (pr, want)
+            assert pr["theoretical_limit"]["beta_over_se"] == 0.0        # v1 stores no beta_max
+            assert pr["theoretical_limit"]["neglog10p"] > 0 and pr["theoretical_limit"]["se_rel"] > 0
         buf = (st.immutable / doc["results"][0]["files"]["chr1"]).read_bytes()
         blk = buf[r["G1"]["blk_off"]:r["G1"]["blk_off"] + r["G1"]["blk_len"]]
         err, n = rs.slope_error(blk, np.array([0.5, np.nan, -0.2]), np.array([0.1, np.nan, 0.2]), None)
@@ -341,6 +348,67 @@ def test_gwas_object_and_window():
             assert "more than 4 decimals" in str(e), e
 
 
+def test_gwas_v2_quantizes_and_declares_its_version():
+    """The v2 GWAS path, which no store held until the codec was threaded into `gwas.build`.
+
+    Three things have to hold at once. The header says 2, which is the only discriminator a `.qbg`
+    has. The rows are smaller -- 18 bytes against v1's 21 -- because 9 bytes of lossless p/beta/se
+    became 6 codes. And the 5-decimal beta v1 *refuses* is now accepted and comes back within the
+    block's limit, which is the whole trade in plan D2: quantize and record the error, rather than
+    refuse the source.
+    """
+    from . import gwas
+    from . import packfmt_v2 as p2
+    with tempfile.TemporaryDirectory() as d:
+        d = Path(d)
+        st, rg, cdoc = build_catalog(d)
+        t = write_tables(d)
+        add_trans_and_gwas(t)
+        gw = pq.read_table(t / "gwas.parquet").to_pylist()
+        five_dp = next(r for r in gw if r["chr"] == "chr1" and r["pos"] == 1)
+        five_dp["beta"] = 0.12345                   # v1 refuses this; v2 quantizes it
+        pq.write_table(pa.Table.from_pylist(gw), t / "gwas.parquet")
+        raised = ""
+        try:
+            gwas.build(st, t, cdoc, ["chr1", "chr2"])
+        except ValueError as e:
+            raised = str(e)
+        assert "more than 4 decimals" in raised, f"v1 accepted a 5-decimal beta: {raised!r}"
+
+        g = gwas.build(st, t, cdoc, ["chr1", "chr2"], codec=p2)
+        h = qs.parse_file_header((st.immutable / g["files"]["chr1"]).read_bytes())
+        assert h["version"] == 2 and h["kind"] == gwas.KIND_GWAS
+        assert qs.parse_file_header((st.immutable / g["index"]).read_bytes())["version"] == 2
+        assert p2.GWAS_ROW_BYTES == 18 and pf.GWAS_ROW_BYTES == 21
+
+        # reading it with the v1 codec would decode 18-byte rows at a 21-byte stride, so it must refuse
+        doc2 = {"gwas": g}
+        try:
+            gwas.read_window(st, doc2, "chr1", 1, 2)
+            raise AssertionError("a v2 GWAS file was read with the v1 codec")
+        except ValueError as e:
+            assert "format version 2" in str(e), e
+
+        w = gwas.read_window(st, doc2, "chr1", 1, 2, codec=p2)
+        assert w["pos"].tolist() == [1, 2] and w["ref"] == ["A", "C"] and w["alt"] == ["C", "CA"]
+        assert w["n"].tolist() == [1000, 1000] and w["rs_number"].tolist() == [0, 2]
+        src = {r["pos"]: r for r in gw if r["chr"] == "chr1"}
+        lim = p2.theoretical_limit(*_gwas_scales(st, g, "chr1"))
+        for i, pos in enumerate(w["pos"].tolist()):
+            assert abs(w["beta"][i] - src[pos]["beta"]) <= lim["beta_over_se"] * w["se"][i] + 1e-12
+            assert abs(w["se"][i] / src[pos]["se"] - 1) <= lim["se_rel"] + 1e-12
+        assert abs(w["beta"][0] - 0.12345) < 1e-4, w["beta"][0]
+
+
+def _gwas_scales(st, g, chrom):
+    """The four f64 scales out of a v2 GWAS block's own header, which is what a reader has."""
+    from . import packfmt_v2 as p2
+    buf = (st.immutable / g["files"][chrom]).read_bytes()
+    payload = p2.zstd_unframe(buf[qs.HEADER_LEN:], None, "gwas block")
+    _, _, nlp_max, beta_max, lse_min, lse_max = p2._GWAS_HEADER.unpack_from(payload, 0)
+    return nlp_max, beta_max, lse_min, lse_max
+
+
 def test_gwas_bins():
     """The bin summary: v0's values and rounding, catalog table order, named from `gwas.bins`, checked by
     validate; bad bins refused at build and caught by validate."""
@@ -458,6 +526,28 @@ def test_blocks_codes_and_gaps():
         assert det["group"]["p_perm"] == 0.001 and det["group"]["significant"]
         assert not {"symbol", "tss", "biotype", "start", "end", "strand"} & set(det)
         assert (r["G1"]["w_lo"], r["G1"]["w_hi"], r["G1"]["n_var"]) == (1, 3, 3)
+
+
+def test_builds_with_no_credible_sets():
+    """An experiment with no fine-mapping writes `credible_sets` with zero rows (CONTRACT.md), and a
+    chromosome of a normal experiment can have none either. Both used to crash: an empty pandas
+    slice loses its string dtypes, so `_vidx`'s merge raised "str and float64" on `ref` rather than
+    returning nothing. ARIC's plasma pQTL has no fine-mapping at all, so every chromosome hit it."""
+    with tempfile.TemporaryDirectory() as d:
+        d = Path(d)
+        st, rg, cdoc = build_catalog(d)
+        build_annotation(st)
+        t = write_tables(d)
+        cs = pq.read_table(t / "credible_sets.parquet")
+        pq.write_table(cs.slice(0, 0), t / "credible_sets.parquet")      # keep the table, drop the rows
+        ing = json.loads((t / "ingestion.json").read_text())
+        doc = rs.build(st, "exp", t, "cat1", "ann", ["chr1", "chr2"], ingestion=ing)
+        r = rows_by_id(st, doc)
+        assert doc["counts"], doc
+        assert rs.read_block(st, doc, r["G1"])["details"]["n_credible_sets"] == 0
+        # the hits files still exist and still carry the lead records, just no credible-set kind
+        h = rs.decode_hits((st.immutable / doc["hits"]["chr1"]).read_bytes())
+        assert len(h) and not any(int(x["kind"]) == rs.HIT_CS for x in h)
 
 
 def test_no_nominal_and_groups():

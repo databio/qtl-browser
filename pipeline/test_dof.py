@@ -61,6 +61,42 @@ def recovers_a_known_dof():
 
 
 @case
+def a_saturated_model_is_usable_not_edged():
+    """ARIC's shape: a bare additive model on pre-adjusted phenotypes, so dof is n - 2 and the fit
+    sits against `n_samples - 1`, the only place it could. That ceiling is the model's, not the
+    search box's, so it must not disqualify the fit -- otherwise `dof_for_manifest` returns null and
+    no slope can be rebuilt. `identified` is not asserted: at this dof the fit genuinely cannot
+    separate n-2 from n-1, which `IDENTIFIED_MARGIN` already calls harmless."""
+    n = 7213
+    beta, se, p = synthetic(n - 2, n=200_000)
+    r = dof.fit(beta, se, p, n_samples=n, sample=20_000)
+    assert r["usable"], r
+    assert not r["uniform"]["at_edge"] and not r["tail"]["at_edge"], r
+    assert r["uniform"]["at_model_limit"], r
+    assert abs(r["dof"] - (n - 2)) <= 2, r
+    assert dof.dof_for_manifest(r) == r["dof"], r
+
+
+@case
+def an_upper_edge_below_the_ceiling_still_disqualifies():
+    """The guard has to keep working where the end is the search's own, or the fix above just
+    deleted it.
+
+    Starting from a grid of 100..399 the search widens four times -- to 699, 1299, 2499, 4899 -- and
+    still cannot reach 5000, so the minimum ends on a top edge far below the ceiling of
+    n - 1 = 19,999. That is a box that was too small, and it must still refuse the fit even though
+    the residual there is small: 4899 is within 2% of the answer. A grid the search *can* resolve is
+    covered by `widens_past_the_plans_grid`.
+    """
+    beta, se, p = synthetic(5000, n=200_000)
+    r = dof.fit(beta, se, p, n_samples=20_000, grid=range(100, 400), sample=20_000)
+    assert r["uniform"]["at_edge"], r["uniform"]
+    assert not r["uniform"]["at_model_limit"], r["uniform"]
+    assert not r["usable"], {k: r[k] for k in ("dof", "usable", "residual_log10p", "reason")}
+    assert dof.dof_for_manifest(r) is None, r["dof"]
+
+
+@case
 def the_minimum_is_sharp():
     """A wrong dof has to stand out, or the fit means nothing on a dataset with no known answer.
     Measured on float32 data, because exact doubles put the residual at the optimum at 0.0 and any

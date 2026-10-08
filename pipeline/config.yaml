@@ -88,6 +88,32 @@ packs:
     - ENSG00000142798       # HSPG2, chr1, 40 introns (the most for one gene)
     - ENSG00000268575       # AL031282.2, chr1, sQTL only, 27 introns
 
+# ARIC plasma cis-pQTL adapter (pipeline/adapters/aric_pqtl.py): one entry per cohort. Paths are
+# relative to `raw` (QTLB_ARIC_ROOT overrides that root). The two cohorts are disjoint sets of
+# people -- OBS_CT is exactly 7,213 on every EA row and 1,871 on every AA row, and 7,213 + 1,871 is
+# the ~9,000 the source site claims for the whole dataset -- so neither pools the other.
+#
+# `significance` names p_bonferroni because PLINK2 --glm publishes no permutation p and the adapter
+# computes min(1, p_lead * n_variants) instead. `label` is what the browser prints, so it never says
+# "permutation p" about a number no permutation produced.
+aric_pqtl:
+  aric_plasma_ea:
+    zip: aric_pqtl_zhang2022/EA.zip
+    seqid: aric_pqtl_zhang2022/seqid.txt
+    member_prefix: EA
+    n_samples: 7213
+    cis_window_bp: 500000              # the site's stated +/-500 kb around the gene's TSS
+    gene_annotation: gencode_v34
+    significance: {column: p_bonferroni, op: "<", threshold: 0.05, label: Bonferroni p}
+  aric_plasma_aa:
+    zip: aric_pqtl_zhang2022/AA.zip
+    seqid: aric_pqtl_zhang2022/seqid.txt
+    member_prefix: AA
+    n_samples: 1871
+    cis_window_bp: 500000
+    gene_annotation: gencode_v34
+    significance: {column: p_bonferroni, op: "<", threshold: 0.05, label: Bonferroni p}
+
 # eQTL Catalogue adapter (pipeline/adapters/eqtl_catalogue.py): one entry per experiment, keyed by
 # the experiment id its tables go under (`_tables/<id>/`). Paths are absolute (brickyard on
 # Rivanna); QTLB_EQTLCAT_ROOT overrides `root`.

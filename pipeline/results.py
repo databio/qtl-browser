@@ -217,7 +217,16 @@ def nominal_arrays(con, tables: Path, chrom: str) -> dict:
 
 
 def _vidx(sites: pd.DataFrame, df: pd.DataFrame, what: str, pos="pos", ref="ref", alt="alt") -> np.ndarray:
-    """Catalog vidx of every row of `df`; an orphan is a hard error (CONTRACT.md: never dropped)."""
+    """Catalog vidx of every row of `df`; an orphan is a hard error (CONTRACT.md: never dropped).
+
+    The empty case is returned early rather than merged. An empty pandas slice does not keep its
+    column dtypes -- `ref` and `alt` come back as float64 -- so the merge would raise "trying to
+    merge on str and float64" instead of yielding nothing. That is reachable from a valid build: a
+    chromosome can have no credible sets, and an experiment with no fine-mapping at all writes the
+    table with zero rows on purpose (CONTRACT.md).
+    """
+    if df.empty:
+        return np.zeros(0, dtype=np.int64)
     k = df[[pos, ref, alt]].rename(columns={pos: "pos", ref: "ref", alt: "alt"})
     k = k.astype({"pos": np.int64})
     m = k.merge(sites, on=["pos", "ref", "alt"], how="left", validate="many_to_one")
@@ -245,7 +254,10 @@ def _clean(x):
 
 # ---- build ------------------------------------------------------------------------------------
 def build(store: qs.Store, exp_id: str, tables: Path, cat_id: str, annot_id: str, chroms: list[str],
-          ingestion: dict | None = None, level: int = ZSTD_LEVEL) -> dict:
+          ingestion: dict | None = None, level: int = ZSTD_LEVEL, codec=pf) -> dict:
+    """`codec` is `packfmt_v1` (the default) or `packfmt_v2`, so the same contract tables build
+    either format and the two stores can be diffed object for object. Everything above the codec --
+    table reading, the search index, hits, trans, the pointer -- is shared."""
     tables = Path(tables)
     if ingestion is None:
         ip = tables / "ingestion.json"
@@ -369,7 +381,9 @@ def build(store: qs.Store, exp_id: str, tables: Path, cat_id: str, annot_id: str
     # memory at a time
     dofs = {k: _dof(v) for k, v in (ingestion.get("dof") or {}).items()}
     index_rows = [None] * len(entries)
-    acc = {pt: {"files": {}, "n_blocks": 0, "nlp_err": 0.0, "se_err": 0.0, "slope_err": 0.0, "slope_n": 0}
+    acc = {pt: {"files": {}, "n_blocks": 0,
+                "limit": {"neglog10p": 0.0, "beta_over_se": 0.0, "se_rel": 0.0},
+                "worst": {"neglog10p": 0.0, "beta_over_se": 0.0, "se_rel": 0.0, "rows_compared": 0}}
            for pt in types}
     for c in chroms:
         pc_ = per_chrom[c]
@@ -387,12 +401,13 @@ def build(store: qs.Store, exp_id: str, tables: Path, cat_id: str, annot_id: str
             blocks, off = [], qs.HEADER_LEN
             for e in by_chrom_type.get((c, ptype), []):
                 span = None if nom is None else nom["runs"].get(e["code"])
-                blk, info = _block(e, nom, span, pc_["pos"], sig, level, dofs.get(ptype, (None, None))[0])
-                h = pf.parse_block_header(blk)
-                a["nlp_err"] = max(a["nlp_err"], h["nlp_max"] / (2 * pf.NLP_MAXQ))
-                a["se_err"] = max(a["se_err"], math.expm1((h["lse_max"] - h["lse_min"]) / (2 * pf.SE_MAXQ)))
-                a["slope_err"] = max(a["slope_err"], info["slope_err"])
-                a["slope_n"] += info["slope_n"]
+                blk, info = _block(e, nom, span, pc_["pos"], sig, level,
+                                   dofs.get(ptype, (None, None))[0], codec)
+                lim = _block_limit(codec, blk)
+                for k in ("neglog10p", "beta_over_se", "se_rel"):
+                    a["limit"][k] = max(a["limit"][k], lim[k])
+                    a["worst"][k] = max(a["worst"][k], info["error"][k])
+                a["worst"]["rows_compared"] += info["error"]["rows_compared"]
                 var = (None, None) if e["lo"] is None else _page_range(ci, page_size, e["lo"], e["hi"])
                 r, g = e["row"], e["group"]
                 index_rows[ords[e["k"]]] = {
@@ -411,7 +426,8 @@ def build(store: qs.Store, exp_id: str, tables: Path, cat_id: str, annot_id: str
                 off += len(blk)
             if off > pf.U32_MAX:
                 raise ValueError(f"results {ptype} {c}: over 4 GiB")
-            body = qs.file_header(KIND_RESULTS, c, len(blocks), 0, 0, table[c]["seq_digest"]) + b"".join(blocks)
+            body = qs.file_header(KIND_RESULTS, c, len(blocks), 0, 0, table[c]["seq_digest"],
+                                  codec.FORMAT_VERSION) + b"".join(blocks)
             a["files"][c] = store.put(body, EXT_RESULTS)
             a["n_blocks"] += len(blocks)
             del blocks, body
@@ -428,8 +444,8 @@ def build(store: qs.Store, exp_id: str, tables: Path, cat_id: str, annot_id: str
                 "w_lo": None, "w_hi": None}
     for row in index_rows:
         row.update({"trans_off": None, "trans_len": None, "n_trans": None})
-    trans_doc, trans_hits = build_trans(store, con, trans_src, cdoc, chroms, ords, index_rows, types, level)
-    gwas_doc = gwas.build(store, tables, cdoc, chroms, level=level)
+    trans_doc, trans_hits = build_trans(store, con, trans_src, cdoc, chroms, ords, index_rows, types, level, codec)
+    gwas_doc = gwas.build(store, tables, cdoc, chroms, level=level, codec=codec)
     con.close()
     results = []
     for ptype in types:
@@ -438,7 +454,7 @@ def build(store: qs.Store, exp_id: str, tables: Path, cat_id: str, annot_id: str
                         "dof_fit": dofs.get(ptype, (None, None))[1],
                         "dof_source": "ingestion.json" if ptype in dofs else None,
                         "n_phenotypes": a["n_blocks"], "files": a["files"],
-                        "precision": _precision(a, dofs.get(ptype, (None, None))[0]),
+                        "precision": _precision(a, dofs.get(ptype, (None, None))[0], codec),
                         "trans": None if trans_doc is None else trans_doc["types"].get(ptype)})
 
     # hits, one object per chromosome
@@ -463,7 +479,8 @@ def build(store: qs.Store, exp_id: str, tables: Path, cat_id: str, annot_id: str
                                         cs_id=csr["cs_id"].to_numpy()))
         parts += trans_hits.get(c, [])
         recs = np.concatenate(parts)
-        hits[c] = store.put(encode_hits(c, table[c]["seq_digest"], recs, table[c]["count"], level=level), EXT_HITS)
+        hits[c] = store.put(encode_hits(c, table[c]["seq_digest"], recs, table[c]["count"], level=level,
+                                        codec=codec), EXT_HITS)
 
     index = pa.Table.from_pylist(index_rows, schema=INDEX_SCHEMA)
     if "has_nominal" in ph.columns:
@@ -526,8 +543,90 @@ def _nan(x) -> float:
     return float("nan") if x is None else float(x)
 
 
+def _encode_trans(codec, col: dict, ref: list, alt: list, a: int, b: int, level: int) -> bytes:
+    """`encode_trans_frame` across both codecs. v1 takes no `se` -- it stores `(nlp, beta)` and has
+    the reader rebuild `se = |beta| / t(nlp, dof)`, the mirror of its missing cis beta. v2 stores
+    all three."""
+    args = (col["ordinal"][a:b], col["pos"][a:b], col["rs"][a:b], col["af_code"][a:b],
+            ref[a:b], alt[a:b], col["pvalue"][a:b], col["beta"][a:b])
+    if codec is pf:
+        return codec.encode_trans_frame(*args, level)
+    return codec.encode_trans_frame(*args, col["se"][a:b], level)
+
+
+def _trans_error(codec, fr: bytes, col: dict, a: int, b: int, lim: dict, worst: dict) -> None:
+    """Fold one trans frame's limits and measured errors into the running worsts.
+
+    Under v1 two limits stay 0.0 and say why: `se_rel` because v1 stores no se in a trans frame at
+    all, and `beta_over_se` because a ceiling in SE units would need an `se_min` the object does not
+    carry -- a limit that is not recomputable from the stored bytes is not a limit."""
+    p = col["pvalue"][a:b]
+    beta = col["beta"][a:b]
+    se = col["se"][a:b]
+    if codec is pf:
+        h = pf._TRANS_HEADER.unpack_from(pf.zstd_unframe(fr, None, "trans frame")[:pf.TRANS_HEADER_LEN], 0)
+        nlp_max, beta_max = h[2], h[3]
+        d = pf.decode_trans_frame(fr)
+        lim["neglog10p"] = max(lim["neglog10p"], nlp_max / (2 * pf.NLP_MAXQ))
+        mw = {"neglog10p": float(np.max(np.abs(d["nlp"] - -np.log10(p)))) if len(p) else 0.0,
+              "beta_over_se": float(np.max(np.abs(d["beta"] - beta) / se)) if len(p) else 0.0,
+              "se_rel": 0.0, "rows_compared": int(len(p))}
+    else:
+        d = codec.decode_trans_frame(fr)
+        tl = codec.theoretical_limit(d["nlp_max"], d["beta_max"], d["lse_min"], d["lse_max"])
+        for k in ("neglog10p", "beta_over_se", "se_rel"):
+            lim[k] = max(lim[k], tl[k])
+        mw = codec.measured_worst(p, beta, se, d["nlp"], d["beta"], d["se"])
+    for k in ("neglog10p", "beta_over_se", "se_rel"):
+        worst[k] = max(worst[k], mw[k])
+    worst["rows_compared"] += mw["rows_compared"]
+
+
+def _block_limit(codec, blk: bytes) -> dict:
+    """One block's `theoretical_limit`, from its header's scales and nothing else.
+
+    v1 has no `beta_max` to work from -- it does not store beta -- so its beta entry stays 0.0 and
+    the measured slope error is the only figure it can report for the effect size. That asymmetry is
+    the reason v1's budget breach went unnoticed: the ceiling it would have been compared against
+    did not exist."""
+    h = codec.parse_block_header(blk) if codec is pf else None
+    if codec is pf:
+        return {"neglog10p": h["nlp_max"] / (2 * pf.NLP_MAXQ),
+                "beta_over_se": 0.0,
+                "se_rel": math.expm1((h["lse_max"] - h["lse_min"]) / (2 * pf.SE_MAXQ)),
+                "af": 0.5 / pf.AF_MAXQ}
+    d = codec.decode_gene_block(blk)
+    return codec.theoretical_limit(d["nlp_max"], d["beta_max"], d["lse_min"], d["lse_max"])
+
+
+def _encode_block(codec, details, var_start, p, beta, se, cs_row, cs_pip, cs_id, level,
+                  pos_first=None, pos_last=None) -> bytes:
+    """`encode_gene_block` across both codecs, whose signatures differ by one argument: v1 takes an
+    `anchor` i32 that has always been 0 (v0 put the gene TSS there, which is annotation), and v2
+    repurposes those bytes as `flags` and does not take it."""
+    if codec is pf:
+        return codec.encode_gene_block(details, var_start, None if var_start is None else 0,
+                                       p, beta, se, cs_row, cs_pip, cs_id, level,
+                                       pos_first=pos_first, pos_last=pos_last)
+    return codec.encode_gene_block(details, var_start, p, beta, se, cs_row, cs_pip, cs_id, level,
+                                   pos_first=pos_first, pos_last=pos_last)
+
+
+def _block_error(codec, blk: bytes, p, beta, se, dof: int | None) -> dict:
+    """What the block's encoding actually cost, in the shape `_precision` wants.
+
+    v1 can only measure the rebuilt slope, and only when a `dof` exists -- the other two quantities
+    are bounds from the scales and there is nothing to compare them against, because `nlp` and `se`
+    are what it stores. v2 stores all three, so all three are measured against the source."""
+    if codec is pf:
+        err, n_cmp = slope_error(blk, beta, se, dof)
+        return {"neglog10p": 0.0, "beta_over_se": err, "se_rel": 0.0, "rows_compared": n_cmp}
+    d = codec.decode_gene_block(blk)
+    return codec.measured_worst(p, beta, se, d["nlp"], d["beta"], d["se"])
+
+
 def _block(e: dict, nom: dict | None, span: tuple | None, pos: np.ndarray, sig, level: int,
-           dof: int | None = None) -> tuple[bytes, dict]:
+           dof: int | None = None, codec=pf) -> tuple[bytes, dict]:
     """One phenotype's block. `nom` is `nominal_arrays` for its chromosome and `span` its (start, end)
     there, or None when it has no nominal rows. With a `dof`, the block is decoded again and every
     rebuilt slope is compared to the source `beta` (`info["slope_err"]`, the largest
@@ -553,8 +652,9 @@ def _block(e: dict, nom: dict | None, span: tuple | None, pos: np.ndarray, sig, 
                "n_credible_sets": 0 if csr is None else int(csr["cs_id"].nunique()),
                "extra": extra, "group": group}
     if lo is None:
-        blk = pf.encode_gene_block(details, None, None, [], [], [], None, None, None, level)
-        return blk, {"has_nominal": False, "slope_err": 0.0, "slope_n": 0}
+        blk = _encode_block(codec, details, None, [], [], [], None, None, None, level)
+        return blk, {"has_nominal": False,
+                     "error": {"neglog10p": 0.0, "beta_over_se": 0.0, "se_rel": 0.0, "rows_compared": 0}}
     n = hi - lo + 1
     p, beta, se = (np.full(n, np.nan) for _ in range(3))
     if span is not None:
@@ -572,10 +672,9 @@ def _block(e: dict, nom: dict | None, span: tuple | None, pos: np.ndarray, sig, 
         cs_id = csr["cs_id"].to_numpy().astype(np.int64)
         if cs_id.min() < 0 or cs_id.max() > 127:
             raise ValueError(f"credible_sets: {e['k']} cs_id outside 0..127")
-    blk = pf.encode_gene_block(details, lo, 0, p, beta, se, cs_row, cs_pip, cs_id, level,
-                               pos_first=int(pos[lo]), pos_last=int(pos[hi]))
-    err, n_cmp = slope_error(blk, beta, se, dof)
-    return blk, {"has_nominal": n_nom > 0, "slope_err": err, "slope_n": n_cmp}
+    blk = _encode_block(codec, details, lo, p, beta, se, cs_row, cs_pip, cs_id, level,
+                        pos_first=int(pos[lo]), pos_last=int(pos[hi]))
+    return blk, {"has_nominal": n_nom > 0, "error": _block_error(codec, blk, p, beta, se, dof)}
 
 
 def slope_error(blk: bytes, beta: np.ndarray, se: np.ndarray, dof: int | None) -> tuple[float, int]:
@@ -592,13 +691,27 @@ def slope_error(blk: bytes, beta: np.ndarray, se: np.ndarray, dof: int | None) -
     return float(np.max(np.abs(d["slope"][ok] - beta[ok]) / se[ok])), int(ok.sum())
 
 
-def _precision(a: dict, dof: int | None) -> dict:
-    """The `precision` block of one results set (SPEC.md section 13). The first two are worst-case
-    bounds from the block scales; `slope_max_error_over_se` is measured on every row against the source
-    (null with `dof` null, when no slope is rebuilt)."""
-    return {"neglog10p_max_error": a["nlp_err"], "slope_se_max_rel_error": a["se_err"],
-            "slope_max_error_over_se": None if dof is None else a["slope_err"],
-            "slope_rows_compared": a["slope_n"], "af_max_error": 0.5 / pf.AF_MAXQ}
+def _precision(a: dict, dof: int | None, codec=pf) -> dict:
+    """The `precision` block of one results set, worst over its blocks.
+
+    `theoretical_limit` is half a quantization step in each quantity's own unit, from the block
+    scales alone -- nothing decoded, so any reader recomputes it. `measured_worst` is every row
+    decoded and compared against the source values, with `rows_compared` as the n.
+
+    Both names say "extreme" because every entry is a maximum, and **`measured_worst` exceeding
+    `theoretical_limit` is a detectable defect**: the arithmetic forbids it, so the encoder or the
+    scales are wrong.
+
+    Under v1 two entries are necessarily empty. `theoretical_limit.beta_over_se` is 0.0 because v1
+    stores no `beta_max` to derive a ceiling from, and `measured_worst.neglog10p` and `.se_rel` are
+    0.0 because `nlp` and `se` are what v1 stores -- there is nothing to compare them against. Only
+    the rebuilt slope can be measured, and only when a dof exists."""
+    lim = dict(a["limit"])
+    lim["af"] = 0.5 / pf.AF_MAXQ
+    worst = dict(a["worst"])
+    if codec is pf and dof is None:
+        worst["beta_over_se"] = None             # no slope is rebuilt, so nothing was compared
+    return {"theoretical_limit": lim, "measured_worst": worst}
 
 
 # ---- trans ------------------------------------------------------------------------------------
@@ -634,7 +747,7 @@ def _trans_phenotypes(src: str | None, ph: pd.DataFrame) -> set:
 
 
 def build_trans(store: qs.Store, con, src: str | None, cdoc: dict, chroms: list[str], ords: dict, index_rows: list,
-                types: list[str], level: int) -> tuple[dict | None, dict]:
+                types: list[str], level: int, codec=pf) -> tuple[dict | None, dict]:
     """One trans object per phenotype type (kind 6, `.qbt`): a v1 header with chromosome `all` and the
     collection digest, then one zstd frame per phenotype with trans rows, grouped by gene
     (`trans_frame_order`), so a gene page reads one byte range per object. Fills `trans_off`,
@@ -681,39 +794,41 @@ def build_trans(store: qs.Store, con, src: str | None, cdoc: dict, chroms: list[
            "rows_skipped_phenotype_outside_build": int(out_ph), "types": {}}
     hits_by_chrom: dict[str, list] = {}
     for ptype in types:
-        t = con.execute(f"""SELECT o.ord, s.ordinal, s.vidx, s.pos, s.ref, s.alt, s.af_code, s.rs, t.pvalue, t.beta
-            {j} AND t.phenotype_type = ? ORDER BY o.ord, s.ordinal, s.pos, s.ref, s.alt""", [ptype]).arrow()
+        t = con.execute(f"""SELECT o.ord, s.ordinal, s.vidx, s.pos, s.ref, s.alt, s.af_code, s.rs, t.pvalue,
+            t.beta, t.se {j} AND t.phenotype_type = ? ORDER BY o.ord, s.ordinal, s.pos, s.ref, s.alt""", [ptype]).arrow()
         if not isinstance(t, pa.Table):
             t = t.read_all()
         n = t.num_rows
         if n == 0:
             continue
-        col = {k: t[k].to_numpy(zero_copy_only=False) for k in ("ord", "ordinal", "vidx", "pos", "af_code", "rs", "pvalue", "beta")}
+        col = {k: t[k].to_numpy(zero_copy_only=False)
+               for k in ("ord", "ordinal", "vidx", "pos", "af_code", "rs", "pvalue", "beta", "se")}
         ref, alt = t["ref"].to_pylist(), t["alt"].to_pylist()
         del t
         o = col["ord"]
         starts = np.r_[0, np.flatnonzero(o[1:] != o[:-1]) + 1]
         ends = np.r_[starts[1:], n]
         runs = {int(o[a]): (a, b) for a, b in zip(starts.tolist(), ends.tolist())}
-        parts, off, nlp_err, beta_err = [], qs.HEADER_LEN, 0.0, 0.0
+        parts, off = [], qs.HEADER_LEN
+        lim = {"neglog10p": 0.0, "beta_over_se": 0.0, "se_rel": 0.0}
+        worst = {"neglog10p": 0.0, "beta_over_se": 0.0, "se_rel": 0.0, "rows_compared": 0}
         for k in trans_frame_order(index_rows, runs):
             a, b = runs[k]
-            fr = pf.encode_trans_frame(col["ordinal"][a:b], col["pos"][a:b], col["rs"][a:b],
-                                       col["af_code"][a:b], ref[a:b], alt[a:b], col["pvalue"][a:b], col["beta"][a:b], level)
+            fr = _encode_trans(codec, col, ref, alt, a, b, level)
             row = index_rows[int(o[a])]
             row["trans_off"], row["trans_len"], row["n_trans"] = off, len(fr), b - a
-            h = pf._TRANS_HEADER.unpack_from(pf.zstd_unframe(fr, None, "trans frame")[:pf.TRANS_HEADER_LEN], 0)
-            nlp_err, beta_err = max(nlp_err, h[2] / (2 * pf.NLP_MAXQ)), max(beta_err, h[3] / (2 * pf.BETA_MAXQ))
+            _trans_error(codec, fr, col, a, b, lim, worst)
             parts.append(fr)
             off += len(fr)
         if off > pf.U32_MAX:
             raise ValueError(f"trans {ptype}: over 4 GiB")
-        body = qs.file_header(KIND_TRANS, qs.ALL, len(parts), 0, 0, header_collection) + b"".join(parts)
+        body = qs.file_header(KIND_TRANS, qs.ALL, len(parts), 0, 0, header_collection,
+                              codec.FORMAT_VERSION) + b"".join(parts)
         name = store.put(body, EXT_TRANS)
         del parts, body
+        lim["af"] = 0.5 / pf.AF_MAXQ
         doc["types"][ptype] = {"file": name, "n_rows": int(n), "n_phenotypes": int(len(starts)),
-                               "precision": {"neglog10p_max_error": nlp_err, "beta_max_error": beta_err,
-                                             "af_max_error": 0.5 / pf.AF_MAXQ}}
+                               "precision": {"theoretical_limit": lim, "measured_worst": worst}}
         doc["rows"] += int(n)
         with np.errstate(divide="ignore"):
             nlp = -np.log10(col["pvalue"])
@@ -810,12 +925,16 @@ def read_trans(store: qs.Store, doc: dict, row: dict) -> dict | None:
 
 # ---- hits -------------------------------------------------------------------------------------
 def encode_hits(chrom: str, seq_digest: str, recs: np.ndarray, n_variants: int,
-                frame_variants: int = HITS_FRAME_VARIANTS, level: int = ZSTD_LEVEL) -> bytes:
+                frame_variants: int = HITS_FRAME_VARIANTS, level: int = ZSTD_LEVEL, codec=pf) -> bytes:
     """Kind 7: header (count = records, page size = variants per frame, the u32 at byte 24 = the
     chromosome's variant count), the frame offset table, then one zstd frame per `frame_variants`
-    variant indices (zero bytes when a frame has no records). `recs` is a HIT_DTYPE array."""
-    body, _ = pf.encode_hits_body(recs, n_variants, frame_variants, level)
-    return qs.file_header(KIND_HITS, chrom, len(recs), frame_variants, n_variants, seq_digest) + body
+    variant indices (zero bytes when a frame has no records). `recs` is a HIT_DTYPE array.
+
+    A hit record holds `value` and `beta` as `f4` and nothing quantized, so v2 changes none of these
+    bytes; `codec` is here for the header version alone."""
+    body, _ = codec.encode_hits_body(recs, n_variants, frame_variants, level)
+    return qs.file_header(KIND_HITS, chrom, len(recs), frame_variants, n_variants, seq_digest,
+                          codec.FORMAT_VERSION) + body
 
 
 def hits_frame(buf: bytes, vidx: int) -> np.ndarray:
@@ -1043,6 +1162,9 @@ def main(argv: list[str] | None = None) -> int:
     b.add_argument("--id", required=True)
     b.add_argument("--catalog", required=True)
     b.add_argument("--annotation", required=True)
+    b.add_argument("--version", type=int, default=qs.FORMAT_VERSION, choices=qs.SUPPORTED_VERSIONS,
+                   help="format version, which selects the codec: 1 is the v1 cis/trans/GWAS layouts, "
+                        "2 the unified p/beta/se triple")
     s = sub.add_parser("add-split", help="give a stored experiment its search index parts and counts (rewrites its pointer)")
     s.add_argument("--store", required=True, type=Path)
     s.add_argument("--id", required=True)
@@ -1060,7 +1182,8 @@ def main(argv: list[str] | None = None) -> int:
                           "counts": doc["counts"]}))
         return 0
     from .common import CHROMS
-    doc = build(qs.Store(args.store), args.id, args.tables, args.catalog, args.annotation, CHROMS)
+    doc = build(qs.Store(args.store), args.id, args.tables, args.catalog, args.annotation, CHROMS,
+                codec=qs.codec_for(args.version))
     print(json.dumps({k: v for k, v in doc.items() if k not in ("hits",)}, indent=1))
     return 0
 
