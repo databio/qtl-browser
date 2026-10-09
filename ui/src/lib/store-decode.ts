@@ -1,11 +1,13 @@
 /**
- * Decoder for the qtlb format, version 1 (SPEC.md at the repo root): the 64-byte file header,
- * variant pages, the variant index, rsID index records, result blocks with their v1 details, paged
- * hits files, trans frames, GWAS blocks and the GWAS index, and the inverse Student t that rebuilds
- * a cis slope and a trans SE. The Python reference decoders are `pipeline/catalog.py`
- * (`decode_file`, `decode_vidx`, `decode_rsid`, `rsid_lookup`), `pipeline/results.py`
- * (`read_block`, `read_trans`, `hits_frame`, `decode_hits`), `pipeline/gwas.py` (`read_window`, `read_bins`)
- * and the codec `pipeline/packfmt_v1.py`.
+ * Decoder for the qtlb format, version 2 (SPEC.md at the repo root): the 64-byte file header,
+ * variant pages, the variant index, rsID index records, result blocks with their details, paged
+ * hits files, trans frames, GWAS blocks and the GWAS index. Every statistic is stored -- -log10 p,
+ * beta and the standard error each as a 16-bit code against its scope's scales (SPEC section 13)
+ * -- so nothing here rebuilds a value from another; the inverse Student t at the bottom serves only
+ * the trans table's r² and the variant page's trans rows, whose hits records carry p and beta but
+ * no SE. The Python reference decoders are `pipeline/catalog.py` (`decode_file`, `decode_vidx`,
+ * `decode_rsid`, `rsid_lookup`), `pipeline/results.py` (`read_block`, `read_trans`, `hits_frame`,
+ * `decode_hits`), `pipeline/gwas.py` (`read_window`, `read_bins`) and the codec `pipeline/packfmt_v2.py`.
  *
  * Pure functions only: no DuckDB, no import.meta.env, no relative imports, and only erasable
  * TypeScript, so `npm run store-check` (Node) runs this exact file against the Python decoders.
@@ -17,8 +19,8 @@ import { tableFromIPC } from 'apache-arrow'
 export class PackError extends Error {}
 
 /** The one format version this file reads (`store.json` `format_version`, header byte 5). */
-export const FORMAT_VERSION = 1
-/** Header kinds v1 writes (SPEC section 3). */
+export const FORMAT_VERSION = 2
+/** Header kinds the store writes (SPEC section 3). */
 export const KIND = { variants: 1, results: 2, gwas: 4, gwasIndex: 5, trans: 6, hits: 7, rsid: 8, variantIndex: 9, geneLookup: 10 } as const
 export const HEADER_LEN = 64
 /** Header chromosome of the catalog-wide objects (variant index, rsID index) and of the gene lookup. */
@@ -28,18 +30,40 @@ export const DIGEST = /^[A-Za-z0-9_-]{32}$/
 /** `<digest>.<ext>`, the only names a pointer may give an object (SPEC section 3). */
 export const OBJECT_NAME = /^[A-Za-z0-9_-]{32}\.[a-z0-9]+(\.[a-z0-9]+)*$/
 
+/** Every string in a pointer document that looks like an object name must be one
+ *  (`qtlstore.object_names`): a binary extension SPEC section 3 lists (qbv qbe qbg qbt qbh qbr qbx
+ *  qbo, qgi qgl, arrow.zst) on a string that is not a digest name is a corrupt or hand-edited
+ *  document. `.json` is not in the list, since provenance fields name source files
+ *  (`dof_source: ingestion.json`); the one JSON object a document names, its collection, is
+ *  checked by field. */
+export function checkNames(doc: unknown, where: string): void {
+  const walk = (x: unknown) => {
+    if (typeof x === 'string') { if (/\.(qb[vegthrxo]|qg[il]|arrow\.zst)$/.test(x) && !OBJECT_NAME.test(x)) throw new PackError(`${where}: bad object name ${x}`) }
+    else if (Array.isArray(x)) x.forEach(walk)
+    else if (x && typeof x === 'object') Object.values(x).forEach(walk)
+  }
+  walk(doc)
+  const c = (doc as { collection?: unknown } | null)?.collection
+  if (c !== undefined && !(typeof c === 'string' && OBJECT_NAME.test(c) && c.endsWith('.json'))) throw new PackError(`${where}: bad collection name ${String(c)}`)
+}
+
 if (new Uint8Array(new Uint16Array([1]).buffer)[0] !== 1) throw new PackError('qtlb files are little-endian; this platform is not')
 
+// The three codes of the triple (SPEC section 13), the same in every result kind.
 const NLP_NULL = 65535, NLP_ZERO = 65534
 export const NLP_MAXQ = 65533
-const SE_NULL = 0xffff, SE_SIGN = 0x8000, SE_QMASK = 0x7fff, SE_MAXQ = 32766
+export const BETA_NULL = -32768, BETA_MAXQ = 32766
+const SE_NULL = 0xffff, SE_MAXQ = 65534
 const AF_NULL = 65535
 export const AF_MAXQ = 65534, COUNT_NULL = 65535
 const SNP_REF = ['', 'A', 'A', 'A', 'C', 'C', 'C', 'G', 'G', 'G', 'T', 'T', 'T']
 const SNP_ALT = ['', 'C', 'G', 'T', 'A', 'G', 'T', 'A', 'C', 'T', 'A', 'C', 'G']
 const SNP_PAIRS = new Set(SNP_REF.slice(1).map((a, i) => `${a}\t${SNP_ALT[i + 1]}`))
 const MAGIC_FILE = 0x424c5451      // "QTLB" read as a little-endian u32
-const MAGIC_BLOCK = 0x30424751     // "QGB0"
+const MAGIC_BLOCK = 0x32424751     // "QGB2"
+/** The results block header (SPEC section 8); the three code columns follow it. */
+export const BLOCK_HEADER_LEN = 72
+const CS_RECORD_LEN = 12
 const MAGIC_ZSTD = 0xfd2fb528
 const MAGIC_VIDX = 0x31585651      // "QVX1"
 const NO_VAR_START = 0xffffffff
@@ -127,11 +151,11 @@ export function decodeLookupDir(bytes: Uint8Array, identity: string, what = 'gen
   return { nBuckets: n, off }
 }
 
-// ---- the 64-byte v1 file header (SPEC section 4) ------------------------------------------------
+// ---- the 64-byte file header (SPEC section 4) --------------------------------------------------
 
 export interface FileHeader { kind: number; chrom: string; count: number; pageSize: number; nCis: number; seqDigest: string }
 
-/** `qtlstore.parse_file_header`: magic, version 1, header length 64, reserved bytes 60-63 zero,
+/** `qtlstore.parse_file_header`: magic, version 2, header length 64, reserved bytes 60-63 zero,
  *  chromosome non-empty ASCII without an inner NUL, seq_digest a 32-character digest. */
 export function parseFileHeader(bytes: Uint8Array, what = 'file header'): FileHeader {
   const bad = (rule: string) => new PackError(`${what}: ${rule}`)
@@ -452,18 +476,71 @@ export interface Details {
 
 export interface ResultBlock {
   nRows: number; varStart: number | null; posFirst: number; posLast: number
-  nlpMax: number; lseMin: number; lseMax: number
+  nlpMax: number; betaMax: number; lseMin: number; lseMax: number
   details: Details
-  nlpCode: Uint16Array; seCode: Uint16Array
+  nlpCode: Uint16Array; betaCode: Int16Array; seCode: Uint16Array
   nlp: Float64Array            // -log10 p; NaN null, Infinity for p = 0
   pval: Float64Array           // NaN null, 0 for p = 0
+  /** the stored effect, ALT-relative (SPEC section 13); NaN null. Nothing is rebuilt from a dof. */
+  beta: Float64Array
   se: Float64Array             // exp(lse_min + q * step); NaN null
-  negative: Uint8Array         // the SE code's sign bit (0 on null rows)
-  /** sign * se * t(p, dof); NaN where p is null or 0, the SE code is null, or the results set has
-   *  no dof (SPEC section 8: `dof: null` means no slope, and no stand-in dof is ever used) */
-  slope: Float64Array
   /** credible-set records, one per membership, sorted by (row, cs_id) */
   csRow: Uint32Array; csPip: Float32Array; csId: Uint8Array
+}
+
+/** The three scale rules every scope obeys (`scan_codes` checks the same): the largest finite code
+ *  sits at the top of its ruler, or every code is 0 when the scale is 0. */
+function checkScales(what: string, nlpCode: Uint16Array, betaCode: Int16Array, seCode: Uint16Array,
+  nlpMax: number, betaMax: number, lseMin: number, lseMax: number): void {
+  const bad = (rule: string) => new PackError(`${what}: ${rule}`)
+  if (!(Number.isFinite(nlpMax) && nlpMax >= 0 && Number.isFinite(betaMax) && betaMax >= 0 &&
+        Number.isFinite(lseMin) && Number.isFinite(lseMax) && lseMin <= lseMax))
+    throw bad(`scales nlp_max ${nlpMax}, beta_max ${betaMax}, lse_min ${lseMin}, lse_max ${lseMax} are not valid`)
+  let nlpTop = -1, betaTop = -1, seLo = Infinity, seHi = -1
+  for (let i = 0; i < nlpCode.length; i++) {
+    const q = nlpCode[i], b = betaCode[i], s = seCode[i]
+    if (q <= NLP_MAXQ && q > nlpTop) nlpTop = q
+    if (b !== BETA_NULL && Math.abs(b) > betaTop) betaTop = Math.abs(b)
+    if (s !== SE_NULL) { if (s < seLo) seLo = s; if (s > seHi) seHi = s }
+  }
+  if (nlpMax > 0 ? nlpTop !== NLP_MAXQ : nlpTop > 0) throw bad('-log10 p codes break the scale rule')
+  if (betaMax > 0 ? betaTop !== BETA_MAXQ : betaTop > 0) throw bad('beta codes break the scale rule')
+  if (seHi < 0 ? lseMin !== 0 || lseMax !== 0 : lseMin === lseMax ? seHi !== 0 : seLo !== 0 || seHi !== SE_MAXQ)
+    throw bad('log(SE) codes break the scale rule')
+}
+
+/** The triple's values from its codes: NaN for a null code, p = 0 and -log10 p = Infinity for an
+ *  underflowed one. */
+function decodeTriple(nlpCode: Uint16Array, betaCode: Int16Array, seCode: Uint16Array,
+  nlpMax: number, betaMax: number, lseMin: number, lseMax: number) {
+  const n = nlpCode.length
+  const nlp = new Float64Array(n), pval = new Float64Array(n), beta = new Float64Array(n), se = new Float64Array(n)
+  const nlpStep = nlpMax / NLP_MAXQ, betaStep = betaMax / BETA_MAXQ, seStep = (lseMax - lseMin) / SE_MAXQ
+  for (let i = 0; i < n; i++) {
+    const q = nlpCode[i], b = betaCode[i], s = seCode[i]
+    if (q === NLP_NULL) { nlp[i] = NaN; pval[i] = NaN }
+    else if (q === NLP_ZERO) { nlp[i] = Infinity; pval[i] = 0 }
+    else { nlp[i] = q * nlpStep; pval[i] = Math.pow(10, -nlp[i]) }
+    beta[i] = b === BETA_NULL ? NaN : b * betaStep
+    se[i] = s === SE_NULL ? NaN : Math.exp(lseMin + s * seStep)
+  }
+  return { nlp, pval, beta, se }
+}
+
+/** The credible-set records of one scope: `(u32 row, f32 pip, u8 cs_id, 3 zero bytes)`, strictly
+ *  ascending by (row, cs_id), rows below `n`. */
+function decodeCs(b: Uint8Array, at: number, k: number, n: number, bad: (rule: string) => PackError) {
+  const dv = view(b)
+  const csRow = new Uint32Array(k), csPip = new Float32Array(k), csId = new Uint8Array(k)
+  for (let j = 0, o = at; j < k; j++, o += CS_RECORD_LEN) {
+    csRow[j] = dv.getUint32(o, true); csPip[j] = dv.getFloat32(o + 4, true); csId[j] = b[o + 8]
+    if (b[o + 9] || b[o + 10] || b[o + 11]) throw bad('credible-set padding is not zero')
+    if (csRow[j] >= n) throw bad(`credible-set row ${csRow[j]} is not below n_rows ${n}`)
+    if (j > 0 && (csRow[j] < csRow[j - 1] || (csRow[j] === csRow[j - 1] && csId[j] <= csId[j - 1])))
+      throw bad('credible-set (row, cs_id) pairs are not strictly ascending')
+    if (!(csPip[j] >= 0 && csPip[j] <= 1) || csId[j] > 127) throw bad('credible-set pip outside [0, 1] or cs_id above 127')
+  }
+  return { csRow, csPip, csId }
 }
 
 /** A block's details frame, one zstd frame of JSON with `"v": 1`. */
@@ -478,29 +555,33 @@ export function decodeDetails(frame: Uint8Array, expectLen: number, what = 'bloc
   return parsed as Details
 }
 
-/** `packfmt_v1.decode_gene_block` with `details_version` 1, then the SPEC section 11 values with the
- *  results set's `dof`; `dof` null leaves every slope NaN. */
-export function decodeResultBlock(bytes: Uint8Array, dof: number | null, expect: BlockExpect, what = 'result block'): ResultBlock {
+/** `packfmt_v2.decode_gene_block` with `details_version` 1: the 72-byte header, the three columnar
+ *  code arrays (`nlp`, then `beta`, then `se`, SPEC section 8), the credible-set records, the details
+ *  frame. Every value is decoded from its own code; no dof is involved. */
+export function decodeResultBlock(bytes: Uint8Array, expect: BlockExpect, what = 'result block'): ResultBlock {
   const bad = (rule: string) => new PackError(`${what}: ${rule}`)
   const b = aligned(bytes)
-  if (b.length < 64) throw bad('shorter than the 64-byte block header')
+  if (b.length < BLOCK_HEADER_LEN) throw bad(`shorter than the ${BLOCK_HEADER_LEN}-byte block header`)
   const dv = view(b)
-  if (dv.getUint32(0, true) !== MAGIC_BLOCK) throw bad('magic is not QGB0')
+  if (dv.getUint32(0, true) !== MAGIC_BLOCK) throw bad('magic is not QGB2')
   const blkLen = dv.getUint32(4, true), n = dv.getUint32(8, true), varStart = dv.getUint32(12, true)
-  const anchor = dv.getInt32(16, true), posFirst = dv.getUint32(20, true), posLast = dv.getUint32(24, true)
+  const flags = dv.getUint32(16, true), posFirst = dv.getUint32(20, true), posLast = dv.getUint32(24, true)
   const nCs = dv.getUint32(28, true)
   const nlpMax = dv.getFloat64(32, true), lseMin = dv.getFloat64(40, true), lseMax = dv.getFloat64(48, true)
-  const dz = dv.getUint32(56, true), dl = dv.getUint32(60, true)
+  const betaMax = dv.getFloat64(56, true)
+  const dz = dv.getUint32(64, true), dl = dv.getUint32(68, true)
   if (blkLen !== b.length || (expect.blk_len !== null && blkLen !== expect.blk_len))
     throw bad(`length field ${blkLen} != range ${b.length} / expected blk_len ${expect.blk_len}`)
-  const body = 64 + 4 * n + 12 * nCs + dz
-  if (Math.ceil(body / 4) * 4 !== blkLen) throw bad(`64 + 4 n_rows + 12 n_cs + details_zlen = ${body}, padded to 4, != block length ${blkLen}`)
+  const body = BLOCK_HEADER_LEN + 6 * n + CS_RECORD_LEN * nCs + dz
+  if (Math.ceil(body / 4) * 4 !== blkLen) throw bad(`72 + 6 n_rows + 12 n_cs + details_zlen = ${body}, padded to 4, != block length ${blkLen}`)
   for (let i = body; i < blkLen; i++) if (b[i]) throw bad('padding is not zero')
-  if (!dz) throw bad('a v1 block needs a details frame (details_zlen above 0)')
-  if (anchor !== 0) throw bad(`anchor ${anchor}: v1 blocks store 0 (the TSS comes from the annotation)`)
+  if (!dz) throw bad('a block needs a details frame (details_zlen above 0)')
+  // a set flag would mean a layout this reader does not know (a widened beta code, SPEC section
+  // 13); ignoring it would decode plausible wrong numbers, so it is a refusal
+  if (flags !== 0) throw bad(`flags ${flags}: this reader knows no block flags`)
   if (expect.n_var !== undefined && n !== (expect.n_var ?? 0)) throw bad(`n_rows ${n} != search index n_var ${expect.n_var}`)
   if (n === 0) {
-    if (varStart !== NO_VAR_START || posFirst || posLast || nCs || nlpMax !== 0 || lseMin !== 0 || lseMax !== 0)
+    if (varStart !== NO_VAR_START || posFirst || posLast || nCs || nlpMax !== 0 || betaMax !== 0 || lseMin !== 0 || lseMax !== 0)
       throw bad('a block with no rows needs var_start 0xFFFFFFFF and zero positions, credible sets, and scales')
     if (expect.var_start != null) throw bad(`n_rows 0 but search index var_start ${expect.var_start}`)
   } else {
@@ -508,57 +589,16 @@ export function decodeResultBlock(bytes: Uint8Array, dof: number | null, expect:
     if (varStart + n - 1 >= NO_VAR_START) throw bad('var_start + n_rows - 1 reaches 0xFFFFFFFF')
     if (!(posFirst >= 1 && posFirst <= posLast)) throw bad(`pos_first ${posFirst}, pos_last ${posLast} out of order`)
   }
-  if (!(Number.isFinite(nlpMax) && nlpMax >= 0 && Number.isFinite(lseMin) && Number.isFinite(lseMax) && lseMin <= lseMax))
-    throw bad(`scales nlp_max ${nlpMax}, lse_min ${lseMin}, lse_max ${lseMax} are not valid`)
-
-  const codes = new Uint16Array(b.buffer, b.byteOffset + 64, 2 * n)
-  const nlpCode = new Uint16Array(n), seCode = new Uint16Array(n)
-  let maxFinite = -1, lqMin = Infinity, lqMax = -1
-  for (let i = 0; i < n; i++) {
-    const q = (nlpCode[i] = codes[2 * i]), s = (seCode[i] = codes[2 * i + 1])
-    if (q <= NLP_MAXQ && q > maxFinite) maxFinite = q
-    if (s !== SE_NULL) {
-      const lq = s & SE_QMASK
-      if (lq === SE_QMASK) throw bad('SE code 0x7FFF is invalid')
-      if (lq < lqMin) lqMin = lq
-      if (lq > lqMax) lqMax = lq
-    }
-  }
-  if (nlpMax > 0 ? maxFinite !== NLP_MAXQ : maxFinite > 0) throw bad('-log10 p codes break the scale rule')
-  if (lqMax < 0 ? lseMin !== 0 || lseMax !== 0 : lseMin === lseMax ? lqMax !== 0 : lqMin !== 0 || lqMax !== SE_MAXQ)
-    throw bad('log(SE) codes break the scale rule')
-
-  const csRow = new Uint32Array(nCs), csPip = new Float32Array(nCs), csId = new Uint8Array(nCs)
-  for (let k = 0, o = 64 + 4 * n; k < nCs; k++, o += 12) {
-    csRow[k] = dv.getUint32(o, true); csPip[k] = dv.getFloat32(o + 4, true); csId[k] = b[o + 8]
-    if (b[o + 9] || b[o + 10] || b[o + 11]) throw bad('credible-set padding is not zero')
-    if (csRow[k] >= n) throw bad(`credible-set row ${csRow[k]} is not below n_rows ${n}`)
-    if (k > 0 && (csRow[k] < csRow[k - 1] || (csRow[k] === csRow[k - 1] && csId[k] <= csId[k - 1])))
-      throw bad('credible-set (row, cs_id) pairs are not strictly ascending')
-    if (!(csPip[k] >= 0 && csPip[k] <= 1) || csId[k] > 127) throw bad('credible-set pip outside [0, 1] or cs_id above 127')
-  }
-
-  const details = decodeDetails(b.subarray(64 + 4 * n + 12 * nCs, body), dl, what)
-
-  const nlp = new Float64Array(n), pval = new Float64Array(n), se = new Float64Array(n), slope = new Float64Array(n)
-  const negative = new Uint8Array(n)
-  const nlpStep = nlpMax / NLP_MAXQ, seStep = (lseMax - lseMin) / SE_MAXQ
-  const tByCode = new Map<number, number>()
-  for (let i = 0; i < n; i++) {
-    const q = nlpCode[i], s = seCode[i]
-    if (q === NLP_NULL) { nlp[i] = NaN; pval[i] = NaN }
-    else if (q === NLP_ZERO) { nlp[i] = Infinity; pval[i] = 0 }
-    else { nlp[i] = q * nlpStep; pval[i] = Math.pow(10, -nlp[i]) }
-    if (s === SE_NULL) { se[i] = NaN; slope[i] = NaN; continue }
-    se[i] = Math.exp(lseMin + (s & SE_QMASK) * seStep)
-    negative[i] = (s & SE_SIGN) ? 1 : 0
-    if (dof === null || q >= NLP_ZERO) { slope[i] = NaN; continue }
-    let t = tByCode.get(q)
-    if (t === undefined) { t = tFromNlp(nlp[i], dof); tByCode.set(q, t) }
-    slope[i] = (negative[i] ? -1 : 1) * se[i] * t
-  }
-  return { nRows: n, varStart: n ? varStart : null, posFirst, posLast, nlpMax, lseMin, lseMax,
-    details, nlpCode, seCode, nlp, pval, se, negative, slope, csRow, csPip, csId }
+  const at = (o: number) => b.byteOffset + o
+  const nlpCode = new Uint16Array(b.buffer, at(BLOCK_HEADER_LEN), n).slice()
+  const betaCode = new Int16Array(b.buffer, at(BLOCK_HEADER_LEN + 2 * n), n).slice()
+  const seCode = new Uint16Array(b.buffer, at(BLOCK_HEADER_LEN + 4 * n), n).slice()
+  checkScales(what, nlpCode, betaCode, seCode, nlpMax, betaMax, lseMin, lseMax)
+  const cs = decodeCs(b, BLOCK_HEADER_LEN + 6 * n, nCs, n, bad)
+  const details = decodeDetails(b.subarray(BLOCK_HEADER_LEN + 6 * n + CS_RECORD_LEN * nCs, body), dl, what)
+  const v = decodeTriple(nlpCode, betaCode, seCode, nlpMax, betaMax, lseMin, lseMax)
+  return { nRows: n, varStart: n ? varStart : null, posFirst, posLast, nlpMax, betaMax, lseMin, lseMax,
+    details, nlpCode, betaCode, seCode, ...v, ...cs }
 }
 
 /** Every credible-set membership of a block, for the credible-set table (a row in two sets appears twice). */
@@ -574,7 +614,7 @@ export interface ReaderColumns {
   n: number
   position: Int32Array; a1: string[]; a2: string[]; rsNumber: Uint32Array; tssDistance: Int32Array
   af: Float32Array; maSamples: Int16Array; maCount: Int16Array
-  pval: Float64Array; slope: Float32Array; se: Float32Array; pip: Float32Array; csId: Int8Array
+  pval: Float64Array; beta: Float32Array; se: Float32Array; pip: Float32Array; csId: Int8Array
 }
 
 export function readerColumns(block: ResultBlock, run: VariantRun, tss: number): ReaderColumns {
@@ -582,7 +622,7 @@ export function readerColumns(block: ResultBlock, run: VariantRun, tss: number):
   if (run.n !== n || run.varStart !== block.varStart) throw new PackError(`reader: variant run ${run.varStart}+${run.n} does not match block ${block.varStart}+${n}`)
   const c: ReaderColumns = { n, position: new Int32Array(n), a1: run.alt, a2: run.ref, rsNumber: run.rsNumber, tssDistance: new Int32Array(n),
     af: new Float32Array(n), maSamples: new Int16Array(n), maCount: new Int16Array(n), pval: block.pval,
-    slope: Float32Array.from(block.slope), se: Float32Array.from(block.se), pip: new Float32Array(n).fill(NaN), csId: new Int8Array(n).fill(-1) }
+    beta: Float32Array.from(block.beta), se: Float32Array.from(block.se), pip: new Float32Array(n).fill(NaN), csId: new Int8Array(n).fill(-1) }
   for (let i = 0; i < n; i++) {
     const pos = run.position[i], d = pos - tss
     if (pos > 0x7fffffff || d > 0x7fffffff || d < -0x80000000) throw new PackError('reader: position or tss_distance does not fit INTEGER')
@@ -602,41 +642,39 @@ export function readerColumns(block: ResultBlock, run: VariantRun, tss: number):
 
 /** The block header fields a span walk needs (the cis scan reads block headers only). */
 export function blockHeader(span: Uint8Array, at: number, what = 'span'): { blkLen: number; nRows: number; varStart: number } {
-  if (at + 64 > span.length) throw new PackError(`${what}: a block header at byte ${at} runs past the span`)
-  const dv = new DataView(span.buffer, span.byteOffset + at, 64)
-  if (dv.getUint32(0, true) !== MAGIC_BLOCK) throw new PackError(`${what}: the block at byte ${at} does not start with QGB0`)
+  if (at + BLOCK_HEADER_LEN > span.length) throw new PackError(`${what}: a block header at byte ${at} runs past the span`)
+  const dv = new DataView(span.buffer, span.byteOffset + at, BLOCK_HEADER_LEN)
+  if (dv.getUint32(0, true) !== MAGIC_BLOCK) throw new PackError(`${what}: the block at byte ${at} does not start with QGB2`)
   return { blkLen: dv.getUint32(4, true), nRows: dv.getUint32(8, true), varStart: dv.getUint32(12, true) }
 }
 
-/** One block read through its header, the one raw pair of `row`, and that row's best credible-set
- *  record; nothing is decompressed. `dof` null gives a NaN slope. */
-export function scanBlockRow(block: Uint8Array, row: number, dof: number | null, what = 'span block'):
-  { pval: number; se: number; slope: number; pip: number | null; csId: number | null } {
+/** One block read through its header, the three codes of `row` (one from each column), and that
+ *  row's best credible-set record; nothing is decompressed. */
+export function scanBlockRow(block: Uint8Array, row: number, what = 'span block'):
+  { pval: number; beta: number; se: number; pip: number | null; csId: number | null } {
   const bad = (rule: string) => new PackError(`${what}: ${rule}`)
   const b = aligned(block)
-  if (b.length < 64) throw bad('shorter than the 64-byte block header')
+  if (b.length < BLOCK_HEADER_LEN) throw bad(`shorter than the ${BLOCK_HEADER_LEN}-byte block header`)
   const dv = view(b)
-  if (dv.getUint32(0, true) !== MAGIC_BLOCK) throw bad('magic is not QGB0')
+  if (dv.getUint32(0, true) !== MAGIC_BLOCK) throw bad('magic is not QGB2')
   const blkLen = dv.getUint32(4, true), n = dv.getUint32(8, true), nCs = dv.getUint32(28, true)
   const nlpMax = dv.getFloat64(32, true), lseMin = dv.getFloat64(40, true), lseMax = dv.getFloat64(48, true)
+  const betaMax = dv.getFloat64(56, true)
   if (blkLen !== b.length) throw bad(`length field ${blkLen} != slice ${b.length}`)
   if (!(row >= 0 && row < n)) throw bad(`row ${row} is not below n_rows ${n}`)
-  if (!(Number.isFinite(nlpMax) && nlpMax >= 0 && Number.isFinite(lseMin) && Number.isFinite(lseMax) && lseMin <= lseMax))
-    throw bad(`scales nlp_max ${nlpMax}, lse_min ${lseMin}, lse_max ${lseMax} are not valid`)
-  if (64 + 4 * n + 12 * nCs > blkLen) throw bad('rows and credible sets run past the block')
+  if (!(Number.isFinite(nlpMax) && nlpMax >= 0 && Number.isFinite(betaMax) && betaMax >= 0 &&
+        Number.isFinite(lseMin) && Number.isFinite(lseMax) && lseMin <= lseMax))
+    throw bad(`scales nlp_max ${nlpMax}, beta_max ${betaMax}, lse_min ${lseMin}, lse_max ${lseMax} are not valid`)
+  if (BLOCK_HEADER_LEN + 6 * n + CS_RECORD_LEN * nCs > blkLen) throw bad('rows and credible sets run past the block')
 
-  const q = dv.getUint16(64 + 4 * row, true), s = dv.getUint16(64 + 4 * row + 2, true)
+  const q = dv.getUint16(BLOCK_HEADER_LEN + 2 * row, true), bc = dv.getInt16(BLOCK_HEADER_LEN + 2 * n + 2 * row, true)
+  const s = dv.getUint16(BLOCK_HEADER_LEN + 4 * n + 2 * row, true)
   const nlp = q === NLP_NULL ? NaN : q === NLP_ZERO ? Infinity : q * (nlpMax / NLP_MAXQ)
   const pval = q === NLP_NULL ? NaN : q === NLP_ZERO ? 0 : Math.pow(10, -nlp)
-  let se = NaN, slope = NaN
-  if (s !== SE_NULL) {
-    const lq = s & SE_QMASK
-    if (lq === SE_QMASK) throw bad('SE code 0x7FFF is invalid')
-    se = Math.exp(lseMin + lq * ((lseMax - lseMin) / SE_MAXQ))
-    if (dof !== null && q < NLP_ZERO) slope = ((s & SE_SIGN) ? -1 : 1) * se * tFromNlp(nlp, dof)
-  }
+  const beta = bc === BETA_NULL ? NaN : bc * (betaMax / BETA_MAXQ)
+  const se = s === SE_NULL ? NaN : Math.exp(lseMin + s * ((lseMax - lseMin) / SE_MAXQ))
   let pip: number | null = null, csId: number | null = null
-  for (let k = 0, o = 64 + 4 * n; k < nCs; k++, o += 12) {
+  for (let k = 0, o = BLOCK_HEADER_LEN + 6 * n; k < nCs; k++, o += CS_RECORD_LEN) {
     const r = dv.getUint32(o, true)
     if (r < row) continue
     if (r > row) break
@@ -644,7 +682,7 @@ export function scanBlockRow(block: Uint8Array, row: number, dof: number | null,
     if (!(v >= 0 && v <= 1) || id > 127) throw bad('credible-set pip outside [0, 1] or cs_id above 127')
     if (pip === null || v > pip) { pip = v; csId = id }
   }
-  return { pval, se, slope, pip, csId }
+  return { pval, beta, se, pip, csId }
 }
 
 // ---- hits (SPEC section 8, kind 7) -----------------------------------------------------------------
@@ -716,58 +754,71 @@ export function hitsOf(f: HitsFrame, vidx: number): [number, number] {
 
 // ---- trans frames (SPEC section 9, kind 6) ------------------------------------------------------
 
-const MAGIC_TRANS = 0x32545451     // "QTT2"
-export const BETA_MAXQ = 32767
+const MAGIC_TRANS = 0x33545451     // "QTT3"
+const TRANS_HEADER_LEN = 48, TRANS_ROW_BYTES = 18
 
-/** One phenotype's trans rows (`packfmt_v1.decode_trans_frame`), sorted by (ordinal, pos, ref, alt).
- *  No vidx: links use the rsID or chr:pos. */
+/** One phenotype's trans rows (`packfmt_v2.decode_trans_frame`), sorted by (ordinal, pos, ref, alt).
+ *  No vidx: links use the rsID or chr:pos. The SE is stored, like beta and p. */
 export interface TransFrame {
-  n: number; nlpMax: number; betaMax: number
+  n: number; nlpMax: number; betaMax: number; lseMin: number; lseMax: number
   ordinal: Uint8Array; position: Uint32Array; rsNumber: Uint32Array
   afCode: Uint16Array; af: Float64Array            // ALT, NaN null
   nlpCode: Uint16Array; nlp: Float64Array; pval: Float64Array
   betaCode: Int16Array; beta: Float64Array
+  seCode: Uint16Array; se: Float64Array
+  /** credible-set records (SPEC section 9), empty for every source in hand */
+  csRow: Uint32Array; csPip: Float32Array; csId: Uint8Array
   ref: string[]; alt: string[]
 }
 
 export function decodeTransFrame(bytes: Uint8Array, what = 'trans frame'): TransFrame {
   const bad = (rule: string) => new PackError(`${what}: ${rule}`)
   const p = aligned(unframe(aligned(bytes), null, what))
-  if (p.length < 32) throw bad('shorter than its 32-byte header')
+  if (p.length < TRANS_HEADER_LEN) throw bad(`shorter than its ${TRANS_HEADER_LEN}-byte header`)
   const dv = view(p)
-  if (dv.getUint32(0, true) !== MAGIC_TRANS) throw bad('magic is not QTT2')
+  if (dv.getUint32(0, true) !== MAGIC_TRANS) throw bad('magic is not QTT3')
   const n = dv.getUint32(4, true), nlpMax = dv.getFloat64(8, true), betaMax = dv.getFloat64(16, true)
-  const heapLen = dv.getUint32(24, true)
-  if (dv.getUint32(28, true) || n < 1) throw bad('reserved field is not zero, or no rows')
-  if (p.length !== 32 + 16 * n + heapLen) throw bad(`payload ${p.length} != 32 + 16n + heap_len`)
-  if (!(Number.isFinite(nlpMax) && nlpMax >= 0 && Number.isFinite(betaMax) && betaMax >= 0)) throw bad('bad scales')
-  // every column starts at a multiple of 2 after the 32-byte header, and the u32 ones at a multiple of 4
+  const lseMin = dv.getFloat64(24, true), lseMax = dv.getFloat64(32, true)
+  const heapLen = dv.getUint32(40, true), nCs = dv.getUint32(44, true)
+  if (n < 1) throw bad('no rows')
+  if (p.length !== TRANS_HEADER_LEN + TRANS_ROW_BYTES * n + CS_RECORD_LEN * nCs + heapLen)
+    throw bad(`payload ${p.length} != 48 + 18n + 12k + heap_len`)
+  // every column starts at a multiple of 2 after the 48-byte header, and the u32 ones at a multiple of 4
   const at = (o: number) => p.byteOffset + o
-  const delta = new Uint32Array(p.buffer, at(32), n), rsNumber = new Uint32Array(p.buffer, at(32 + 4 * n), n)
-  const afCode = new Uint16Array(p.buffer, at(32 + 8 * n), n), nlpCode = new Uint16Array(p.buffer, at(32 + 10 * n), n)
-  const betaCode = new Int16Array(p.buffer, at(32 + 12 * n), n)
-  const ordinal = p.subarray(32 + 14 * n, 32 + 15 * n), codes = p.subarray(32 + 15 * n, 32 + 16 * n)
-  const position = new Uint32Array(n), af = new Float64Array(n), nlp = new Float64Array(n), pval = new Float64Array(n), beta = new Float64Array(n)
-  const nlpStep = nlpMax / NLP_MAXQ, betaStep = betaMax / BETA_MAXQ
+  const delta = new Uint32Array(p.buffer, at(48), n), rsNumber = new Uint32Array(p.buffer, at(48 + 4 * n), n)
+  const afCode = new Uint16Array(p.buffer, at(48 + 8 * n), n), nlpCode = new Uint16Array(p.buffer, at(48 + 10 * n), n)
+  const betaCode = new Int16Array(p.buffer, at(48 + 12 * n), n), seCode = new Uint16Array(p.buffer, at(48 + 14 * n), n)
+  const ordinal = p.subarray(48 + 16 * n, 48 + 17 * n), codes = p.subarray(48 + 17 * n, 48 + 18 * n)
+  const position = new Uint32Array(n), af = new Float64Array(n)
   let pos = 0
   for (let i = 0; i < n; i++) {
     if (ordinal[i] < 1 || (i > 0 && ordinal[i] < ordinal[i - 1])) throw bad(`row ${i}: chromosome ordinals not >= 1 and non-decreasing`)
-    if (codes[i] > 12 || betaCode[i] === -32768 || nlpCode[i] === NLP_NULL) throw bad(`row ${i}: reserved allele, beta or -log10 p code`)
+    if (codes[i] > 12 || betaCode[i] === BETA_NULL || nlpCode[i] === NLP_NULL) throw bad(`row ${i}: reserved allele, beta or -log10 p code`)
     pos = i === 0 || ordinal[i] !== ordinal[i - 1] ? delta[i] : pos + delta[i]
     if (pos > 0xffffffff) throw bad(`row ${i}: position above 2^32 - 1`)
     position[i] = pos
     af[i] = afCode[i] === AF_NULL ? NaN : afCode[i] / AF_MAXQ
-    if (nlpCode[i] === NLP_ZERO) { nlp[i] = Infinity; pval[i] = 0 }
-    else { nlp[i] = nlpCode[i] * nlpStep; pval[i] = Math.pow(10, -nlp[i]) }
-    beta[i] = betaCode[i] * betaStep
   }
-  const { ref, alt } = decodeAlleles(codes, p.subarray(32 + 16 * n), bad)
-  return { n, nlpMax, betaMax, ordinal, position, rsNumber, afCode, af, nlpCode, nlp, pval, betaCode, beta, ref, alt }
+  checkScales(what, nlpCode, betaCode, seCode, nlpMax, betaMax, lseMin, lseMax)
+  const cs = decodeCs(p, 48 + 18 * n, nCs, n, bad)
+  const v = decodeTriple(nlpCode, betaCode, seCode, nlpMax, betaMax, lseMin, lseMax)
+  const { ref, alt } = decodeAlleles(codes, p.subarray(48 + 18 * n + CS_RECORD_LEN * nCs), bad)
+  return { n, nlpMax, betaMax, lseMin, lseMax, ordinal, position, rsNumber, afCode, af, nlpCode, betaCode, seCode, ...v, ...cs, ref, alt }
 }
 
-/** A trans row's SE and r2 from its -log10 p and beta: se = |beta| / t(p, dof), r2 = t^2 / (t^2 + dof);
- *  both NaN without a dof. */
-export function transSe(nlp: number, beta: number, dof: number | null, tCache?: Map<number, number>): { se: number; r2: number } {
+/** A trans row's r² from its beta and SE with the phenotype type's dof: t = beta / se,
+ *  r² = t² / (t² + dof); NaN without a dof or without an SE. `dof` is provenance in this format,
+ *  and this is its one use. */
+export function transR2(beta: number, se: number, dof: number | null): number {
+  if (dof === null || !(se > 0) || Number.isNaN(beta)) return NaN
+  const t2 = (beta / se) ** 2
+  return t2 / (t2 + dof)
+}
+
+/** The variant page's trans rows come from hits records, which carry -log10 p and beta but no SE
+ *  (SPEC section 8); the SE and r² are rebuilt through the inverse t with the phenotype type's dof,
+ *  the one place this format still derives a statistic. NaN without a dof. */
+export function transSeFromHit(nlp: number, beta: number, dof: number | null, tCache?: Map<number, number>): { se: number; r2: number } {
   if (dof === null || Number.isNaN(nlp)) return { se: NaN, r2: NaN }
   let t = tCache?.get(nlp)
   if (t === undefined) { t = tFromNlp(nlp, dof); tCache?.set(nlp, t) }
@@ -776,9 +827,7 @@ export function transSe(nlp: number, beta: number, dof: number | null, tCache?: 
 
 // ---- GWAS (SPEC section 10, kinds 4 and 5) ---------------------------------------------------------
 
-const GWAS_SCALE = 10000
-// the double nearest each power of ten, as the reader divides by it (p_exp is -128 to -3)
-const POW10 = Array.from({ length: 129 }, (_, k) => Number(`1e${k}`))
+const GWAS_HEADER_LEN = 48, GWAS_ROW_BYTES = 18
 
 /** The GWAS index (`gwas.decode_index`): the n table, and per chromosome each block's first
  *  position and end offset in that chromosome's `.qbg`. */
@@ -842,15 +891,19 @@ export function gwasRange(index: GwasIndex, chr: string, lo: number, hi: number)
 }
 
 /** GWAS rows with lo <= position <= hi, in file order. `ref`/`alt` oriented to the reference;
- *  `beta` and `af` describe ALT. */
+ *  `beta` and `af` describe ALT. The values are the section 13 triple decoded from each block's
+ *  scales; `nlp` is kept beside `p` because an underflowed p (code 65534) is 0 and Infinity. */
 export interface GwasColumns {
   rows: number
   position: Int32Array; ref: string[]; alt: string[]
-  beta: Float64Array; se: Float64Array; af: Float64Array; p: Float64Array
+  beta: Float64Array; se: Float64Array; af: Float64Array; p: Float64Array; nlp: Float64Array
   rsNumber: Uint32Array; n: Int32Array
+  /** credible-set records of the window, `csRow` indexing the returned rows; empty for every
+   *  source in hand (SPEC section 10) */
+  csRow: Int32Array; csPip: Float32Array; csId: Uint8Array
 }
 
-/** Decode the blocks of one GWAS range (`packfmt_v1.decode_gwas_block` per block) and keep the rows
+/** Decode the blocks of one GWAS range (`packfmt_v2.decode_gwas_block` per block) and keep the rows
  *  in the window. */
 export function decodeGwasRange(bytes: Uint8Array, index: GwasIndex, chr: string, range: GwasRange, lo: number, hi: number,
   what = `GWAS ${chr}`): GwasColumns {
@@ -862,19 +915,23 @@ export function decodeGwasRange(bytes: Uint8Array, index: GwasIndex, chr: string
   const start = s === 0 ? HEADER_LEN : c.endOffset[s - 1]
   if (range.off !== start || range.len !== c.endOffset[e] - start || bytes.length !== range.len) throw bad('the range does not match its blocks')
   const nv = index.nValues
-  const blocks: { n: number; p: Uint8Array; pos: Uint32Array; a: { ref: string[]; alt: string[] } }[] = []
+  interface Block { n: number; pos: Uint32Array; v: ReturnType<typeof decodeTriple>; af: Uint16Array; rs: Uint32Array
+    nCode: Uint8Array; a: { ref: string[]; alt: string[] }; cs: ReturnType<typeof decodeCs> }
+  const blocks: Block[] = []
   let keep = 0
   for (let k = s; k <= e; k++) {
     const kbad = (rule: string) => bad(`block ${k}: ${rule}`)
     const from = (k === 0 ? HEADER_LEN : c.endOffset[k - 1]) - range.off, to = c.endOffset[k] - range.off
     const p = aligned(unframe(bytes.subarray(from, to), null, `${what} block ${k}`))
-    if (p.length < 8) throw kbad('payload is shorter than its 8-byte header')
+    if (p.length < GWAS_HEADER_LEN) throw kbad(`payload is shorter than its ${GWAS_HEADER_LEN}-byte header`)
     const dv = view(p)
-    const n = dv.getUint32(0, true), heapLen = dv.getUint32(4, true)
+    const n = dv.getUint32(0, true), heapLen = dv.getUint32(4, true), nCs = dv.getUint32(8, true)
+    const nlpMax = dv.getFloat64(16, true), betaMax = dv.getFloat64(24, true), lseMin = dv.getFloat64(32, true), lseMax = dv.getFloat64(40, true)
     if (n < 1) throw kbad('no rows')
-    if (p.length !== 8 + 21 * n + heapLen) throw kbad(`payload ${p.length} != 8 + 21n + heap_len`)
+    if (dv.getUint32(12, true)) throw kbad('reserved field is not zero')
+    if (p.length !== GWAS_HEADER_LEN + GWAS_ROW_BYTES * n + CS_RECORD_LEN * nCs + heapLen) throw kbad(`payload ${p.length} != 48 + 18n + 12k + heap_len`)
     const at = (o: number) => p.byteOffset + o
-    const deltas = new Uint32Array(p.buffer, at(8), n)
+    const deltas = new Uint32Array(p.buffer, at(48), n)
     const pos = new Uint32Array(n)
     let acc = 0
     for (let i = 0; i < n; i++) {
@@ -884,49 +941,54 @@ export function decodeGwasRange(bytes: Uint8Array, index: GwasIndex, chr: string
     }
     if (pos[0] < 1 || acc > 0x7fffffff) throw kbad('positions below 1 or beyond INTEGER')
     if (pos[0] !== c.firstPosition[k]) throw kbad(`first position ${pos[0]} != index ${c.firstPosition[k]}`)
-    const af = new Uint16Array(p.buffer, at(8 + 14 * n), n), mant = new Uint16Array(p.buffer, at(8 + 16 * n), n)
-    const exp = new Int8Array(p.buffer, at(8 + 18 * n), n), nCode = p.subarray(8 + 19 * n, 8 + 20 * n)
+    const rs = new Uint32Array(p.buffer, at(48 + 4 * n), n), af = new Uint16Array(p.buffer, at(48 + 8 * n), n)
+    const nlpCode = new Uint16Array(p.buffer, at(48 + 10 * n), n), betaCode = new Int16Array(p.buffer, at(48 + 12 * n), n)
+    const seCode = new Uint16Array(p.buffer, at(48 + 14 * n), n), nCode = p.subarray(48 + 16 * n, 48 + 17 * n)
     for (let i = 0; i < n; i++) {
-      if (af[i] > GWAS_SCALE) throw kbad(`af code ${af[i]} above 10000 at row ${i}`)
-      if (mant[i] < 1000 || mant[i] > 9999) throw kbad(`p mantissa ${mant[i]} outside 1000..9999 at row ${i}`)
-      if (exp[i] > -3 || (exp[i] === -3 && mant[i] !== 1000)) throw kbad(`p above 1 at row ${i}`)
       if (nCode[i] >= nv.length) throw kbad(`n code ${nCode[i]} beyond the n table at row ${i}`)
+      if (nlpCode[i] === NLP_NULL || betaCode[i] === BETA_NULL) throw kbad(`row ${i}: reserved -log10 p or beta code`)
     }
-    const a = decodeAlleles(p.subarray(8 + 20 * n, 8 + 21 * n), p.subarray(8 + 21 * n), kbad)
-    blocks.push({ n, p, pos, a })
+    checkScales(`${what} block ${k}`, nlpCode, betaCode, seCode, nlpMax, betaMax, lseMin, lseMax)
+    const cs = decodeCs(p, 48 + 18 * n, nCs, n, kbad)
+    const a = decodeAlleles(p.subarray(48 + 17 * n, 48 + 18 * n), p.subarray(48 + 18 * n + CS_RECORD_LEN * nCs), kbad)
+    blocks.push({ n, pos, v: decodeTriple(nlpCode, betaCode, seCode, nlpMax, betaMax, lseMin, lseMax), af, rs, nCode, a, cs })
   }
   const out: GwasColumns = { rows: keep, position: new Int32Array(keep), ref: new Array(keep), alt: new Array(keep),
-    beta: new Float64Array(keep), se: new Float64Array(keep), af: new Float64Array(keep), p: new Float64Array(keep),
-    rsNumber: new Uint32Array(keep), n: new Int32Array(keep) }
+    beta: new Float64Array(keep), se: new Float64Array(keep), af: new Float64Array(keep), p: new Float64Array(keep), nlp: new Float64Array(keep),
+    rsNumber: new Uint32Array(keep), n: new Int32Array(keep), csRow: new Int32Array(0), csPip: new Float32Array(0), csId: new Uint8Array(0) }
+  const csRow: number[] = [], csPip: number[] = [], csId: number[] = []
   let j = 0
-  for (const { n, p, pos, a } of blocks) {
-    const at = (o: number) => p.byteOffset + o
-    const beta = new Int32Array(p.buffer, at(8 + 4 * n), n), rs = new Uint32Array(p.buffer, at(8 + 8 * n), n)
-    const se = new Uint16Array(p.buffer, at(8 + 12 * n), n), af = new Uint16Array(p.buffer, at(8 + 14 * n), n)
-    const mant = new Uint16Array(p.buffer, at(8 + 16 * n), n), exp = new Int8Array(p.buffer, at(8 + 18 * n), n)
+  for (const { n, pos, v, af, rs, nCode, a, cs } of blocks) {
+    const rowOut = new Int32Array(n).fill(-1)
     for (let i = 0; i < n; i++) {
       if (pos[i] < lo || pos[i] > hi) continue
+      rowOut[i] = j
       out.position[j] = pos[i]; out.ref[j] = a.ref[i]; out.alt[j] = a.alt[i]
-      out.beta[j] = beta[i] / GWAS_SCALE; out.se[j] = se[i] / GWAS_SCALE; out.af[j] = af[i] / GWAS_SCALE
-      out.p[j] = mant[i] / POW10[-exp[i]]
+      out.beta[j] = v.beta[i]; out.se[j] = v.se[i]; out.af[j] = af[i] === AF_NULL ? NaN : af[i] / AF_MAXQ
+      out.p[j] = v.pval[i]; out.nlp[j] = v.nlp[i]
       out.rsNumber[j] = rs[i]
-      out.n[j] = nv[p[8 + 19 * n + i]]
+      out.n[j] = nv[nCode[i]]
       j++
     }
+    for (let k = 0; k < cs.csRow.length; k++) {
+      const r = rowOut[cs.csRow[k]]
+      if (r >= 0) { csRow.push(r); csPip.push(cs.csPip[k]); csId.push(cs.csId[k]) }
+    }
   }
+  out.csRow = Int32Array.from(csRow); out.csPip = Float32Array.from(csPip); out.csId = Uint8Array.from(csId)
   return out
 }
 
 // ---- GWAS bin summary (SPEC section 10, "Bin summary") -------------------------------------------
 
-/** One bin of the GWAS bin summary: v0's gwas_dcm_bins.json row. */
+/** One bin of the GWAS bin summary: the strongest row of a window, its beta for its alt allele. */
 export interface GwasBin {
   chr: string; bin_start: number; bin_end: number; min_p: number; lead_position: number; lead_rsid: string | null
-  lead_beta: number; lead_ea: string; n_gws: number; n_variants: number
+  lead_beta: number; lead_alt: string; n_gws: number; n_variants: number
 }
 /** `gwas.BINS_SCHEMA`: column names and Arrow types, in order. */
 export const GWAS_BINS_SCHEMA: [keyof GwasBin, string][] = [['chr', 'Utf8'], ['bin_start', 'Uint32'], ['bin_end', 'Uint32'],
-  ['min_p', 'Float64'], ['lead_position', 'Uint32'], ['lead_rsid', 'Utf8'], ['lead_beta', 'Float64'], ['lead_ea', 'Utf8'],
+  ['min_p', 'Float64'], ['lead_position', 'Uint32'], ['lead_rsid', 'Utf8'], ['lead_beta', 'Float64'], ['lead_alt', 'Utf8'],
   ['n_gws', 'Uint32'], ['n_variants', 'Uint32']]
 
 /** The bin summary object (one zstd frame around an Arrow IPC stream) as rows, after checking its

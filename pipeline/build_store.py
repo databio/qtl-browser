@@ -1,6 +1,6 @@
 """Build a whole qtlb store in one command: annotation, variant catalog, experiment, `store.json`.
 
-    uv run python -m pipeline.build_store --store data/derived/store-genome-v2 --version 2
+    uv run python -m pipeline.build_store --store data/derived/store-topchef-v2 --version 2
     QTLB_CHROMS=chr21,chr22 uv run python -m pipeline.build_store --store data/derived/store-local-v2 --version 2
     uv run python -m pipeline.build_store --store data/derived/store-genome-v1 --version 1 --validate
 
@@ -75,6 +75,10 @@ def build(store_root: Path, version: int, *, name: str = "topchef", annot_id: st
         for eid, d in sorted(exps.items())}
     out["collection"] = next(iter({d["collection"] for d in exps.values()}), None)
     out["minutes"] = round((time.time() - t0) / 60, 1)
+
+    # the coloc lists config.yaml declares for pairs now in the store (SPEC section 20)
+    from . import coloc
+    out["colocs"] = {d["id"]: d["n"] for d in coloc.add_configured(st, cfg, log=log)}
 
     st.write_store(name, _refget_urls(cfg), version)
     out["bytes"] = sum(p.stat().st_size for p in (store_root / "immutable").glob("*") if p.is_file())

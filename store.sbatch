@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=qtlb_store
-#SBATCH --output=/home/ns5bc/scratch/qtlb_store_%j.log
+#SBATCH --output=/scratch/%u/qtlb_store_%j.log
 #SBATCH --partition=standard
 #SBATCH --account=shefflab
 #SBATCH --time=1:00:00
@@ -17,14 +17,16 @@
 # adapter recorded (ingestion.json `source.gene_annotation`: gencode_v39 for the eQTL Catalogue), else
 # gencode_v34. ANNOTATION_GTFS maps each annotation id to its GTF; each one a cohort uses is built once.
 # QTLB_CHROMS=all builds every chromosome; give it more room: `sbatch --time=6:00:00 --mem=64G`.
-# Every phase logs `phase <name>: <s> s wall, <KB> KB peak RSS` (/usr/bin/time).
+# Every phase logs `phase <name>: <s> s wall, <KB> KB peak RSS` (/usr/bin/time). Runs from the
+# checkout QTLB_REPO (default /scratch/$USER/qtl-browser); the log goes to /scratch/<user>/.
+#   QTLB_STORE=/scratch/$USER/qtl-browser/store EXPERIMENTS="topchef:<tree>/_tables/topchef" sbatch store.sbatch
 set -uo pipefail
 export PYTHONUNBUFFERED=1
 export QTLB_CHROMS="${QTLB_CHROMS:-chr21,chr22}"
 [ "$QTLB_CHROMS" = all ] && unset QTLB_CHROMS
-STORE="${QTLB_STORE:-/scratch/ns5bc/qtl-browser/store-smoke}"
-EXPERIMENTS="${EXPERIMENTS:-topchef:/scratch/ns5bc/qtl-browser/derived/_tables/topchef}"
-cd /home/ns5bc/scratch/qtl-browser-live
+STORE="${QTLB_STORE:?set QTLB_STORE to the store directory to write}"
+EXPERIMENTS="${EXPERIMENTS:?set EXPERIMENTS to id:tables_dir[:annotation] ...}"
+cd "${QTLB_REPO:-/scratch/$USER/qtl-browser}"
 echo "host $(hostname) chroms ${QTLB_CHROMS:-all} store $STORE experiments $EXPERIMENTS started $(date -Is)"
 mkdir -p "$STORE"
 ANNOTATION_GTFS="${ANNOTATION_GTFS:-gencode_v34:data/raw/gencode_v34/gencode.v34.annotation.gtf.gz gencode_v39:/project/shefflab/brickyard/datasets_downloaded/annotations/gencode.v39.annotation.gtf.gz}"
@@ -60,6 +62,8 @@ set +e
 # OVERLAP= (empty) skips it; OVERLAP=<id> names it.
 OVERLAP="${OVERLAP-grch38}"
 [ -n "$OVERLAP" ] && T overlap uv run python -m pipeline.overlap build --store "$STORE" --id "$OVERLAP"
+# the coloc lists config.yaml declares for pairs now in the store (SPEC section 20)
+T colocs uv run python -m pipeline.coloc add --store "$STORE" | grep -c '"id"'
 
 T validate uv run python - "$STORE" <<'EOF'
 import sys

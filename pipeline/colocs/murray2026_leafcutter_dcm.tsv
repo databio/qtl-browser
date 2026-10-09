@@ -1,0 +1,8 @@
+# Genes whose sQTL colocalized with the Jurgens et al. 2024 DCM GWAS at PP.H4 >= 0.8 (17 introns in these
+# 4 genes), as listed by the authors of Murray et al. 2026 (Supplemental Table 2 of the preprint; its body
+# is not in the public PDF). Gene level: which introns is not in the list.
+symbol
+CAMK2D
+LMF1
+SYNPO2L
+TKT

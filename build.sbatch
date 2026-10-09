@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=qtlb_build
-#SBATCH --output=/home/ns5bc/scratch/qtlb_build_%j.log
+#SBATCH --output=/scratch/%u/qtlb_build_%j.log
 #SBATCH --partition=standard
 #SBATCH --account=shefflab
 #SBATCH --time=12:00:00
@@ -18,12 +18,13 @@
 # QTLB_CHROMS and QTLB_DERIVED pass through for a subset build into its own tree; never point a
 # subset build at the frozen v0 derived tree.
 #
-# This runs in the yoke sync target, not in a git checkout. See yoke.toml for why those are never
-# the same directory.
+# Runs from the checkout QTLB_REPO (default /scratch/$USER/qtl-browser); with yoke that is the sync
+# target, not a git checkout (see yoke.toml for why those are never the same directory). The log
+# goes to /scratch/<user>/.
 
 set -euo pipefail
 
-cd /home/ns5bc/scratch/qtl-browser-live
+cd "${QTLB_REPO:-/scratch/$USER/qtl-browser}"
 
 echo "host $(hostname) chroms ${QTLB_CHROMS:-all} derived ${QTLB_DERIVED:-data/derived} started $(date -Is)"
 uv run python -m pipeline build "$@"

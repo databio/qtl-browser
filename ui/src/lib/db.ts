@@ -9,6 +9,7 @@
  * first data requests, and nothing starts it on Home, the gene list or a region.
  */
 import * as duckdb from '@duckdb/duckdb-wasm'
+import { delay, FAULT } from './faults'
 
 export type Row = Record<string, unknown>
 
@@ -22,6 +23,7 @@ export function onDBFailure(cb: (e: Error) => void): () => void {
 }
 
 async function boot() {
+  if (import.meta.env.DEV && FAULT === 'db') { await delay(800); throw new Error('fault: the DuckDB-WASM bundle could not be loaded from jsDelivr') }
   // wasm and worker from jsDelivr (the 36 MB module is over the Workers asset limit). The
   // worker script is cross-origin, so it is loaded through a same-origin blob shim.
   const bundle = await duckdb.selectBundle(duckdb.getJsDelivrBundles())

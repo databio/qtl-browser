@@ -5,6 +5,7 @@ import { Segmented } from '@/components/segmented'
 import { SortableTh, type SortState } from '@/components/sortable-th'
 import { Pager } from '@/components/pager'
 import { Empty, TableSkeleton } from '@/components/states'
+import { ErrorPage } from '@/components/error-page'
 import { fmtInt } from '@/lib/format'
 import { useSignificance } from '@/contexts/store-context'
 import { allHits } from '@/lib/gene-index'
@@ -28,7 +29,8 @@ export default function Genes() {
   const [pageSize, setPageSize] = useState(25)
   const rowLink = useRowLink()
 
-  useEffect(() => { allHits().then(setAll).catch(e => console.error(e)) }, [])
+  const [error, setError] = useState<unknown>(null)
+  useEffect(() => { allHits().then(setAll).catch(e => { console.error(e); setError(e) }) }, [])
   useEffect(() => setOffset(0), [filter, needle, sort])
 
   const shown = useMemo(() => {
@@ -45,6 +47,7 @@ export default function Genes() {
   }, [all, filter, needle, sort])
 
   const page = shown.slice(offset, offset + pageSize)
+  if (error) return <Page><ErrorPage title="The gene list could not be loaded." error={error} /></Page>
   return (
     <Page>
       <PageHeader title="Genes" meta={all ? fmtInt(shown.length) : undefined}

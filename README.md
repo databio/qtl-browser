@@ -43,8 +43,8 @@ are, in about ten minutes genome-wide:
    `check`; see Deploy below.
 
 `pipeline/README.md` has the exact commands and variables. The current whole-genome store is
-`data/derived/store-genome-v2`, built locally; the bucket serves the version 1 store until the
-version 2 release.
+`data/derived/store-release-v2` (TOPCHeF, the DCM GWAS, GTEx v8 heart LV and the coloc lists),
+built locally; the bucket serves the version 1 store until the version 2 release.
 
 Local setup:
 

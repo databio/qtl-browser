@@ -1,10 +1,11 @@
 """The DCM GWAS adapter: Jurgens et al. 2024 (biobanks-only meta-analysis) -> the contract `gwas` table.
 
-Writes `gwas.parquet`, `gwas.json` and `gwas_bins.parquet` into an experiment's tables directory (default the TOPCHeF one,
+Writes `gwas.parquet` and `gwas.json` into an experiment's tables directory (default the TOPCHeF one,
 `_tables/topchef/`: the experiment the GWAS is shown next to, CONTRACT.md "gwas"). The browser uses
-it for the gene page's GWAS panel and LocusCompare.
+it for the gene page's GWAS panel and LocusCompare; the landing track's bin summary is computed from
+these rows by `gwas.build`, as for every GWAS.
 
-    uv run python -m pipeline.adapters.dcm_gwas [--tables DIR] [--bins-only]
+    uv run python -m pipeline.adapters.dcm_gwas [--tables DIR]
 
 Rows are every source row with a GRCh38 position (`CHRBP_B38`) and p > 0, as the v0 GWAS pack took
 them. Orientation is the store's one rule (`qtlstore.orient_to_ref`): the reference is read at every
@@ -12,10 +13,6 @@ row from the refgetstore; where the source's effect allele `EA` is the reference
 swap, `beta` negates and `af` becomes `1 - EAFREQ`; where it is the other allele nothing changes; where
 the reference reads neither, the row is dropped and counted by class. Negation and `1 - x` are exact
 at the source's 4 decimals, so the GWAS object stays lossless.
-
-`gwas_bins.parquet` is the landing track's summary: per `gwas_bin_bp` window (5 Mb) the strongest p, its
-row, and the row counts, over the **source** rows (v0's `gwas_bins` step, unchanged), so it matches v0's
-`gwas_dcm_bins.json` bin for bin. `--bins-only` writes just that table (one pass over the TSV).
 """
 from __future__ import annotations
 
@@ -27,7 +24,6 @@ from pathlib import Path
 
 import numpy as np
 import pyarrow as pa
-import pyarrow.parquet as pq
 
 from .. import qtlstore as qs
 from ..common import CHROMS, Config, connect, log, write_parquet
@@ -129,50 +125,13 @@ def run(cfg: Config, out: Path) -> dict:
     return meta
 
 
-BINS_SQL = """
-    WITH v AS (
-        SELECT 'chr' || split_part(CHRBP_B38, ':', 1) AS chr, split_part(CHRBP_B38, ':', 2)::BIGINT AS position,
-               P AS p, rsID AS rsid, EA, BETA AS beta
-        FROM read_csv('{src}', delim='\\t', header=true, columns={columns})
-        WHERE {where}
-    )
-    SELECT chr, (position // {bin_bp}) * {bin_bp} AS bin_start, (position // {bin_bp}) * {bin_bp} + {bin_bp} AS bin_end,
-           min(p) AS min_p, arg_min(position, p) AS lead_position, arg_min(rsid, p) AS lead_rsid,
-           arg_min(beta, p) AS lead_beta, arg_min(EA, p) AS lead_ea,
-           count(*) FILTER (WHERE p < 5e-8)::INTEGER AS n_gws, count(*)::INTEGER AS n_variants
-    FROM v GROUP BY 1, 2, 3 ORDER BY 1, 2
-"""
-
-
-def bins(cfg: Config, out: Path, con=None) -> int:
-    """`gwas_bins.parquet`: v0's landing-track summary, from the source rows as given.
-
-    Source rows, not the oriented table: v0 binned every row with a GRCh38 position and p > 0, the 9,346
-    rows the reference does not read included, with the lead's `EA` and its beta as published. Values
-    unrounded here; the builder (`gwas.build`) rounds them as v0 did. Returns the number of bins."""
-    src = cfg.raw / cfg["dcm_gwas"]
-    con = con or connect(cfg, memory_limit=cfg["duckdb_memory_limit"], threads=cfg["duckdb_threads"])
-    t = con.execute(BINS_SQL.format(src=src, columns=COLUMNS, where=SOURCE_FILTER,
-                                    bin_bp=int(cfg["gwas_bin_bp"]))).fetch_arrow_table()
-    out.mkdir(parents=True, exist_ok=True)
-    tmp = out / "gwas_bins.parquet.tmp"
-    pq.write_table(t, tmp)
-    os.replace(tmp, out / "gwas_bins.parquet")
-    log(f"dcm_gwas: {t.num_rows} bins of {int(cfg['gwas_bin_bp']) // 1_000_000} Mb -> {out / 'gwas_bins.parquet'}")
-    return t.num_rows
-
-
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--tables", type=Path, help="experiment tables dir (default: the TOPCHeF one)")
-    ap.add_argument("--bins-only", action="store_true", help="write only gwas_bins.parquet")
     a = ap.parse_args(argv)
     cfg = Config()
     from .topchef import tables
-    out = a.tables or tables(cfg)
-    if not a.bins_only:
-        run(cfg, out)
-    bins(cfg, out)
+    run(cfg, a.tables or tables(cfg))
     return 0
 
 

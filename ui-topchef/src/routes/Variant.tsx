@@ -7,6 +7,8 @@ import { KvTable } from '@/components/kv-table'
 import { SectionPanel } from '@/components/section-panel'
 import RoundingNote from '@/components/rounding-note'
 import { DetailSkeleton, Empty, TableSkeleton, Unavailable } from '@/components/states'
+import { ErrorPage } from '@/components/error-page'
+import { toastError } from '@/lib/toast'
 import TransTable from '@/components/TransTable'
 import { CopyButton } from '@/components/copy-button'
 import { dbsnp, ucsc } from '@/lib/links'
@@ -14,7 +16,7 @@ import { fmtBp, fmtBytes, fmtInt, fmtNum, fmtP, fmtPhenotype, fmtBetaSE } from '
 import { planScan, runScan, type CisHit, type ScanPlan } from '@/lib/cis-scan'
 import type { VariantRecord } from '@/lib/store-decode'
 import { csValues, hitPhenotypes, leadValues, loadHits, lookupRsid, nominalsAt, variantAt, variantAtPosition,
-  type HitPhenotype, type Hits } from '@/lib/variant'
+  type HitPhenotype, type Hits, type HitSet } from '@/lib/variant'
 import { SQTL_TYPE } from '@/lib/store'
 import { variantTransTable } from '@/lib/trans'
 import { dropTable } from '@/lib/db'
@@ -53,14 +55,17 @@ async function resolve(id: string): Promise<{ v: VariantRecord; hits: Hits } | n
 export default function Variant() {
   const { id = '' } = useParams()
   const [found, setFound] = useState<{ v: VariantRecord; hits: Hits } | null | undefined>(undefined)
+  // the lookup itself failed (not "no such variant"): the page cannot say either way
+  const [error, setError] = useState<unknown>(null)
 
   useEffect(() => {
     let alive = true
-    setFound(undefined)
-    resolve(id).then(r => { if (alive) setFound(r) }, e => { console.error(e); if (alive) setFound(null) })
+    setFound(undefined); setError(null)
+    resolve(id).then(r => { if (alive) setFound(r) }, e => { console.error(e); if (alive) setError(e) })
     return () => { alive = false }
   }, [id])
 
+  if (error) return <Page><ErrorPage title={`${id} could not be looked up.`} error={error} /></Page>
   if (found === undefined) return <Page><DetailSkeleton kvRows={4} /></Page>
   return (
     <Page>
@@ -79,30 +84,38 @@ export default function Variant() {
 /** A phenotype named by a hits record's `ord`, with its gene. */
 interface GeneRow { gene_id: string; symbol: string | null }
 
-interface CsRow { row: number; gene: GeneRow; qtlType: 'e' | 's'; phenotypeId: string | null }
-/** A lead row also carries the variant's nominal beta and SE in that phenotype's block. */
+/** A record of one cis scan's hits: `set` is the scan it came from and `row` its index in that
+ *  scan's frame, since ordinals and records are per experiment (SPEC section 8). */
+interface CsRow { set: HitSet; row: number; gene: GeneRow; qtlType: 'e' | 's'; phenotypeId: string | null }
+/** A lead row also carries the variant's stored beta and SE in that phenotype's block. */
 interface LeadRow extends CsRow { beta: number | null; betaSe: number | null }
 
-/** The two list sections, built from the hits records, the phenotypes they name (their
- *  chromosome's search index part and genes), and the lead rows' blocks for their slopes, nearby
- *  blocks read together. */
+/** The two list sections, built from each cis scan's hits records, the phenotypes they name (that
+ *  scan's search index part for their chromosome, and the genes), and the lead rows' blocks for
+ *  their beta and SE, nearby blocks read together. */
 async function buildLists(v: VariantRecord, hits: Hits): Promise<{ leads: LeadRow[]; cs: CsRow[] }> {
-  const wanted = [...hits.leads, ...hits.cs]
-  if (!wanted.length) return { leads: [], cs: [] }
-  const byOrd = await hitPhenotypes(wanted.map(r => hits.frame.ord[r]))
-  const of = (r: number): CsRow & { p: HitPhenotype } => {
-    const p = byOrd.get(hits.frame.ord[r])
-    if (!p) throw new Error(`the search index has no phenotype with ord ${hits.frame.ord[r]}`)
-    const qtlType: 'e' | 's' = p.phenotype_type === SQTL_TYPE ? 's' : 'e'
-    return { row: r, p, gene: { gene_id: p.gene_id ?? p.phenotype_id, symbol: p.symbol }, qtlType, phenotypeId: qtlType === 's' ? p.phenotype_id : null }
+  const leadRows: (CsRow & { p: HitPhenotype })[] = [], cs: CsRow[] = []
+  for (const set of hits.sets) {
+    if (set.experiment.kind !== 'qtl_cis') continue
+    const wanted = [...set.leads, ...set.cs]
+    if (!wanted.length) continue
+    const byOrd = await hitPhenotypes(set, wanted.map(r => set.frame.ord[r]))
+    const of = (r: number): CsRow & { p: HitPhenotype } => {
+      const p = byOrd.get(set.frame.ord[r])
+      if (!p) throw new Error(`experiment ${set.experiment.id}: the search index has no phenotype with ord ${set.frame.ord[r]}`)
+      const qtlType: 'e' | 's' = p.phenotype_type === SQTL_TYPE ? 's' : 'e'
+      return { set, row: r, p, gene: { gene_id: p.gene_id ?? p.phenotype_id, symbol: p.symbol }, qtlType, phenotypeId: qtlType === 's' ? p.phenotype_id : null }
+    }
+    leadRows.push(...set.leads.map(of))
+    cs.push(...set.cs.map(of))
   }
-  const leadRows = hits.leads.map(of)
+  if (!leadRows.length && !cs.length) return { leads: [], cs: [] }
   const nominal = await nominalsAt(leadRows.map(x => x.p), v.vidx)
   const leads = leadRows.map(x => {
-    const n = nominal.get(x.p.ord)
+    const n = nominal.get(`${x.p.experiment}:${x.p.ord}`)
     return { ...x, beta: n?.beta ?? null, betaSe: n?.se ?? null }
   })
-  return { leads, cs: hits.cs.map(of) }
+  return { leads, cs }
 }
 
 function VariantBody({ v, hits }: { v: VariantRecord; hits: Hits }) {
@@ -110,6 +123,8 @@ function VariantBody({ v, hits }: { v: VariantRecord; hits: Hits }) {
   const signif = useSignificance()
   const rowLink = useRowLink()
   const [lists, setLists] = useState<{ leads: LeadRow[]; cs: CsRow[] } | null>(null)
+  // the lead and credible-set lists are the page: their failure is page-level
+  const [listsError, setListsError] = useState<unknown>(null)
   // the variant's trans rows as an in-memory table, built from its hits records and dropped when
   // the variant changes; the trans table pages off it like the gene page's does
   const [transTable, setTransTable] = useState<string | null>(null)
@@ -121,14 +136,14 @@ function VariantBody({ v, hits }: { v: VariantRecord; hits: Hits }) {
   useEffect(() => {
     let alive = true
     let table: string | null = null
-    setLists(null); setTransTable(null); setScan(null); setPlan(null); setAllIntrons(false)
+    setLists(null); setListsError(null); setTransTable(null); setScan(null); setPlan(null); setAllIntrons(false)
     // the trans table needs the query engine (a 7 MB download); it starts once the lists have their
     // data, so the lists do not share the connection with it
-    buildLists(v, hits).then(l => { if (alive) setLists(l) }, e => console.error(e))
-      .then(() => alive ? variantTransTable(v, hits) : null)
+    // a failed list is the page's error; the trans table is not attempted after it
+    buildLists(v, hits).then(l => { if (!alive) return null; setLists(l); return variantTransTable(v, hits) }, e => { if (alive) setListsError(e); return null })
       .then(t => { if (t == null) return; if (!alive) { dropTable(t); return } table = t; setTransTable(t) })
-      .catch(e => console.error(e))
-    if (v.inCis) planScan(v).then(p => { if (alive) setPlan(p) }, e => console.error(e))
+      .catch(e => { if (alive) toastError('The trans associations could not be loaded.', e) })
+    if (v.inCis) planScan(v).then(p => { if (alive) setPlan(p) }, e => { if (alive) toastError('The cis scan could not be planned.', e) })
     return () => { alive = false; if (table) dropTable(table) }
   }, [v, hits])
 
@@ -138,12 +153,13 @@ function VariantBody({ v, hits }: { v: VariantRecord; hits: Hits }) {
     try {
       setScan(await runScan(plan, v))
     } catch (e) {
-      console.error(e)
-      setScan({ e: [], s: [] })
+      toastError('The cis scan failed.', e)
+      setScan(null)
     }
   }
 
   const rsid = rsidOf(v)
+  if (listsError) return <ErrorPage title={`${rsid ?? `${v.chr}:${v.position}`}'s results could not be loaded.`} error={listsError} />
   // harness hooks (bench/README.md): the lists are "ready" once they have their data, or once the
   // outside-cis message stands in for them
   const listsReady = !v.inCis || lists !== null
@@ -184,9 +200,9 @@ function VariantBody({ v, hits }: { v: VariantRecord; hits: Hits }) {
                 <thead><tr><th>Type</th><th>Gene</th><th>Phenotype</th><th className="text-right">beta ± SE</th><th className="text-right">Perm p</th><th className="text-right">Status</th></tr></thead>
                 <tbody>
                   {lists.leads.map(l => {
-                    const val = leadValues(hits, l.row)
+                    const val = leadValues(l.set.frame, l.row)
                     return (
-                      <tr key={l.row} className={`${ROW_LINK} hover:bg-base-200`} {...rowLink(`/gene/${l.gene.gene_id}${l.qtlType === 's' ? '?tab=sqtl' : ''}`)}>
+                      <tr key={`${l.set.experiment.id}:${l.row}`} className={`${ROW_LINK} hover:bg-base-200`} {...rowLink(`/gene/${l.gene.gene_id}${l.qtlType === 's' ? '?tab=sqtl' : ''}`)}>
                         <td><span className={`badge badge-xs ${l.qtlType === 'e' ? 'badge-primary' : 'badge-secondary'}`}>{l.qtlType === 'e' ? 'eQTL' : 'sQTL'}</span></td>
                         <td className="font-medium"><span className={ROW_LINK_TEXT}>{l.gene.symbol ?? l.gene.gene_id}</span></td>
                         <td className="tabular-nums text-base-content/60">{l.phenotypeId ? fmtPhenotype(l.phenotypeId) : l.gene.gene_id}</td>
@@ -210,9 +226,9 @@ function VariantBody({ v, hits }: { v: VariantRecord; hits: Hits }) {
                 <thead><tr><th>Type</th><th>Gene</th><th>Phenotype</th><th>Set</th><th className="text-right">PIP</th></tr></thead>
                 <tbody>
                   {lists.cs.map(c => {
-                    const val = csValues(hits, c.row)
+                    const val = csValues(c.set.frame, c.row)
                     return (
-                      <tr key={c.row} className={`${ROW_LINK} hover:bg-base-200`} {...rowLink(`/gene/${c.gene.gene_id}${c.qtlType === 's' ? '?tab=sqtl' : ''}`)}>
+                      <tr key={`${c.set.experiment.id}:${c.row}`} className={`${ROW_LINK} hover:bg-base-200`} {...rowLink(`/gene/${c.gene.gene_id}${c.qtlType === 's' ? '?tab=sqtl' : ''}`)}>
                         <td><span className={`badge badge-xs ${c.qtlType === 'e' ? 'badge-primary' : 'badge-secondary'}`}>{c.qtlType === 'e' ? 'eQTL' : 'sQTL'}</span></td>
                         <td className="font-medium"><span className={ROW_LINK_TEXT}>{c.gene.symbol ?? c.gene.gene_id}</span></td>
                         <td className="tabular-nums text-base-content/60">{c.phenotypeId ? fmtPhenotype(c.phenotypeId) : c.gene.gene_id}</td>

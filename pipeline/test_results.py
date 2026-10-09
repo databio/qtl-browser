@@ -176,20 +176,6 @@ GWAS = [  # chr, pos, ref, alt, beta, se, af, pvalue, n, rs_number
     ("chr1", 3, "G", "A", 0.2, 0.05, 0.9, 0.5, 900, 3),
     ("chr2", 9, "T", "A", 0.0001, 0.0002, 0.0, 1.0, 1000, 5),
 ]
-# the adapter's bin table over the source rows (unrounded; the builder rounds as v0 did), 5 bp bins
-GWAS_BINS = [  # chr, bin_start, bin_end, min_p, lead_position, lead_rsid, lead_beta, lead_ea, n_gws, n_variants
-    ("chr2", 5, 10, 1.0, 9, "rs5", 0.0001, "A", 0, 1),
-    ("chr1", 0, 5, 1.23456e-9, 1, None, -0.50049, "C", 1, 4),     # 4: a source row the reference did not read
-]
-BINS_TYPES = [("chr", pa.string()), ("bin_start", pa.int64()), ("bin_end", pa.int64()), ("min_p", pa.float64()),
-              ("lead_position", pa.int64()), ("lead_rsid", pa.string()), ("lead_beta", pa.float64()),
-              ("lead_ea", pa.string()), ("n_gws", pa.int32()), ("n_variants", pa.int32())]
-
-
-def write_bins(t: Path, rows: list) -> None:
-    cols = list(zip(*rows))
-    pq.write_table(pa.table({k: pa.array(list(cols[j]), typ) for j, (k, typ) in enumerate(BINS_TYPES)}),
-                   t / "gwas_bins.parquet")
 
 
 def add_trans_and_gwas(t: Path) -> None:
@@ -210,7 +196,6 @@ def add_trans_and_gwas(t: Path) -> None:
          ("rs_number", pa.int64())])}), t / "gwas.parquet")
     (t / "gwas.json").write_text(json.dumps({"id": "test_gwas", "title": "a test GWAS",
                                              "orientation": {"as_is": 3, "swapped": 1, "dropped": 0}}))
-    write_bins(t, GWAS_BINS)
 
 
 def one(docs: dict, kind: str = "qtl_cis", ptype: str = "ge") -> dict:
@@ -605,49 +590,45 @@ def test_gwas_is_its_own_collection():
 
 
 def test_gwas_bins():
-    """The bin summary: v0's values and rounding, catalog table order, named from `gwas.bins`, checked by
-    validate; bad bins refused at build and caught by validate."""
+    """The bin summary, computed by the builder from the GWAS rows for every GWAS: the strongest p per
+    window with its row, catalog table order, rounding, ties to the first row in stored order, named
+    from `gwas.bins`, checked by validate."""
+    import pandas as pd
     from . import catalog, gwas
     with tempfile.TemporaryDirectory() as d:
         st, rg, docs = build_with_trans(Path(d))
-        doc = one(docs)
-        b = one(docs, "gwas")["bins"]
-        assert (b["bin_bp"], b["n_bins"]) == (5, 2) and b["file"].endswith(".arrow.zst")
-        assert b["file"] in qs.object_names(one(docs, "gwas"))
         gw = one(docs, "gwas")
+        b = gw["bins"]
+        assert (b["bin_bp"], b["n_bins"]) == (gwas.BIN_BP, 2) and b["file"].endswith(".arrow.zst")
+        assert b["file"] in qs.object_names(gw)
         t = gwas.read_bins(st, gw)
         assert t.schema == gwas.BINS_SCHEMA
-        # chr1 before chr2 (the variant catalog's order); p to 3 significant digits, beta to 3 decimals
+        # chr1 before chr2 (the variant catalog's order); p to 3 significant digits, beta to 3 decimals;
+        # the lead's rsID from the catalog's rs number (none for -1), its beta and allele alt-relative
         assert t.to_pylist() == [
-            {"chr": "chr1", "bin_start": 0, "bin_end": 5, "min_p": 1.23e-9, "lead_position": 1, "lead_rsid": None,
-             "lead_beta": -0.5, "lead_ea": "C", "n_gws": 1, "n_variants": 4},
-            {"chr": "chr2", "bin_start": 5, "bin_end": 10, "min_p": 1.0, "lead_position": 9, "lead_rsid": "rs5",
-             "lead_beta": 0.0, "lead_ea": "A", "n_gws": 0, "n_variants": 1}]
+            {"chr": "chr1", "bin_start": 0, "bin_end": gwas.BIN_BP, "min_p": 1.23e-9, "lead_position": 1,
+             "lead_rsid": None, "lead_beta": -0.5, "lead_alt": "C", "n_gws": 1, "n_variants": 3},
+            {"chr": "chr2", "bin_start": 0, "bin_end": gwas.BIN_BP, "min_p": 1.0, "lead_position": 9,
+             "lead_rsid": "rs5", "lead_beta": 0.0, "lead_alt": "A", "n_gws": 0, "n_variants": 1}]
         assert st.validate(refget=rg, sites=catalog.read_sites) == []
         t_dir = Path(d) / "tables"
         cdoc = st.load(qs.CATALOGS, "cat1")
-        # a subset build keeps the bins of its chromosomes only
+        # narrower windows split chr2's row into its own bin; a subset build bins its chromosomes only
+        five = gwas.read_bins(st, gwas.build(st, t_dir, cdoc, ["chr1", "chr2"], bin_bp=5)).to_pylist()
+        assert [(r["chr"], r["bin_start"], r["bin_end"]) for r in five] == [("chr1", 0, 5), ("chr2", 5, 10)]
         assert gwas.build(st, t_dir, cdoc, ["chr1"])["bins"]["n_bins"] == 1
-        # no bin table: no bin summary
-        (t_dir / "gwas_bins.parquet").unlink()
-        assert gwas.build(st, t_dir, cdoc, ["chr1", "chr2"])["bins"] is None
-        # the builder refuses a bin that is not aligned, a lead outside its bin, more hits than rows
-        for bad, rule in (({"bin_start": 1, "bin_end": 6}, "not [k * 5"), ({"lead_position": 12}, "outside the bin"),
-                          ({"n_gws": 2}, "n_gws 2, n_variants 1")):
-            row = dict(zip([k for k, _ in BINS_TYPES], GWAS_BINS[0]))
-            write_bins(t_dir, [GWAS_BINS[1], tuple({**row, **bad}.values())])
-            try:
-                gwas.build(st, t_dir, cdoc, ["chr1", "chr2"])
-                raise AssertionError(f"a bad bin was accepted ({bad})")
-            except ValueError as e:
-                assert rule in str(e), e
+        # a tie on the smallest p goes to the first row in stored order, whatever order the table holds
+        tie = pd.DataFrame({"chr": ["chr1"] * 3, "pos": [7, 3, 5], "ref": ["A"] * 3, "alt": ["G", "T", "C"],
+                            "beta": [0.1, 0.2, 0.3], "pvalue": [1e-9, 1e-9, 0.5], "rs_number": [7, 3, 5],
+                            "n": [10] * 3})
+        r = gwas.bin_rows(tie, cdoc, 10)
+        assert (r["lead_position"], r["lead_alt"], r["n_gws"], r["n_variants"]) == ([3], ["T"], [2], [3])
         # validate: the GWAS experiment naming a bin summary whose count, bins or chromosomes are wrong
         good = gw["bins"]
         for change, rule in (({"n_bins": 3}, "the pointer says 3"), ({"bin_bp": 10}, "not [k * 10")):
             st.write_pointer("experiments", gw["id"], {**gw, "bins": {**good, **change}})
             fails = st.validate(refget=rg, sites=catalog.read_sites)
             assert any("gwas bins" in f and rule in f for f in fails), fails
-        write_bins(t_dir, GWAS_BINS)
         only1 = gwas.build(st, t_dir, cdoc, ["chr1", "chr2"])
         st.write_pointer("experiments", gw["id"],
                          {**gw, **only1, "files": {"chr1": only1["files"]["chr1"]}, "id": gw["id"]})
@@ -673,6 +654,62 @@ def test_hits_paging():
     assert len(rs.decode_hits(buf)) == 5
     empty = rs.encode_hits("chr1", "A" * 32, pf.hit_records([], [], [], rs.HIT_LEAD), 0)
     assert len(empty) == 64 + 4 and len(rs.decode_hits(empty)) == 0
+
+
+def test_coloc_lists():
+    """A coloc list (SPEC section 20) from coloc results as commonly written: symbols, phenotypes and
+    gene ids resolved against the QTL experiment, a PP.H4 column filtered, membership stored; listed
+    in store.json, kept by gc, checked by validate, and refused when it names what the pair lacks."""
+    from . import catalog, coloc
+    with tempfile.TemporaryDirectory() as d:
+        d = Path(d)
+        st, rg, docs = build_with_trans(d)
+        ge, gw = one(docs)["id"], one(docs, "gwas")["id"]
+        (d / "a.tsv").write_text("# a comment line\nsymbol\tphenotype_id\tgene_id\nSYM1\t\t\n\tG2\t\n\t\tENSG1.4\n")
+        doc = coloc.add(st, "l1", {"qtl": ge, "gwas": gw, "file": str(d / "a.tsv"), "source": {"reported_by": "x"},
+                                   "threshold": "PP.H4 > 0.8"})
+        # SYM1 and ENSG1.4 are one gene-level row; G2 takes its gene from the index
+        assert coloc.load_rows(st, doc) == [{"gene_id": "ENSG1", "phenotype_id": None},
+                                            {"gene_id": "ENSG2", "phenotype_id": "G2"}]
+        assert doc["n"] == 2 and doc["object"].endswith(".json")
+        # a PP.H4 column needs a threshold, and filters by it (comma-separated by extension)
+        (d / "b.csv").write_text("gene_id,PP.H4.abf\nENSG1,0.95\nENSG2,0.4\n")
+        entry = {"qtl": ge, "gwas": gw, "file": str(d / "b.csv"), "source": {"computed_by": "y"}, "threshold": "PP.H4 >= 0.8"}
+        try:
+            coloc.add(st, "l2", entry)
+            raise AssertionError("a PP.H4 column without min_pp_h4 was accepted")
+        except ValueError as e:
+            assert "min_pp_h4" in str(e), e
+        assert coloc.load_rows(st, coloc.add(st, "l2", {**entry, "min_pp_h4": 0.8})) == [
+            {"gene_id": "ENSG1", "phenotype_id": None}]
+        # rows that do not resolve are refused, all of them named
+        for text, rule in (("symbol\nNOPE\n", "symbol NOPE names 0 genes"), ("phenotype_id\nG7\n", "phenotype G7 is not"),
+                           ("gene_id\nENSG9\n", "gene ENSG9 has no phenotype"), ("pvalue\n1\n", "no phenotype, gene or symbol")):
+            (d / "c.tsv").write_text(text)
+            try:
+                coloc.add(st, "l3", {**entry, "file": str(d / "c.tsv")})
+                raise AssertionError(f"{text!r} was accepted")
+            except ValueError as e:
+                assert rule in str(e), e
+        # a GWAS cannot be the QTL side
+        try:
+            coloc.add(st, "l3", {**entry, "qtl": gw, "min_pp_h4": 0.8})
+            raise AssertionError("a GWAS as the QTL side was accepted")
+        except ValueError as e:
+            assert "is a gwas" in str(e), e
+        st.write_store("t", [])
+        assert json.loads((st.root / "store.json").read_text())[qs.COLOCS] == ["l1", "l2"]
+        assert st.validate(refget=rg, sites=catalog.read_sites) == []
+        assert doc["object"] in qs.referenced(st)
+        # validate: a wrong count, a phenotype the experiment does not have, a pair of the wrong kinds
+        bad_rows = st.put(json.dumps([{"gene_id": "ENSG1", "phenotype_id": "G2"}]).encode(), "json")
+        for change, rule in (({"n": 5}, "the pointer says 5"), ({"object": bad_rows, "n": 1}, "not a phenotype of gene ENSG1"),
+                             ({"qtl": gw}, "is not a QTL experiment")):
+            st.write_pointer(qs.COLOCS, "l1", {**doc, **change})
+            fails = st.validate(refget=rg, sites=catalog.read_sites)
+            assert any(f.startswith("colocs/l1") and rule in f for f in fails), fails
+        st.write_pointer(qs.COLOCS, "l1", doc)
+        assert st.validate(refget=rg, sites=catalog.read_sites) == []
 
 
 def test_remove_experiment_and_gc():

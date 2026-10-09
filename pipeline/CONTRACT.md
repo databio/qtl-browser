@@ -4,7 +4,7 @@
 knows that source's file names, column spellings and allele convention and nothing else. Below it
 sit the **builders** (variant catalog, annotation, results, store), which know the qtlb format and nothing
 about where the numbers came from. This file defines the seam: the five Parquet tables an adapter
-must produce, the three it may produce (`trans`, `gwas`, `gwas_bins`), and the rules those tables obey.
+must produce, the two it may produce (`trans`, `gwas`), and the rules those tables obey.
 
 Adding a second experiment should mean writing one adapter. If it means touching a builder, either
 the contract is wrong or the adapter is cheating; fix whichever it is rather than special-casing
@@ -327,22 +327,8 @@ Rules:
 - `gwas.json`: `id`, `title`, `source` (file, cases, controls, source row counts), `orientation`
   (`as_is`, `swapped`, `dropped`, counts by reference class), `rows`.
 
-### `gwas_bins.parquet`
-
-The landing track's summary of the GWAS (SPEC.md section 10, "Bin summary"), optional next to
-`gwas.parquet`. One row per window of `bin_bp` (5 Mb, `gwas_bin_bp` in the config) that has source rows,
-from **the source rows as published**, not the oriented `gwas` rows: rows the reference does not read
-count, and the lead's allele and beta are the source's effect allele and its beta. The DCM GWAS adapter
-writes it with v0's `gwas_bins` query unchanged (`dcm_gwas.BINS_SQL`; `--bins-only` writes just this
-table), so it equals v0's `gwas_dcm_bins.json`.
-
-| column | type | meaning |
-|---|---|---|
-| `chr` | `string` | sequence name, in the variant catalog's chromosome list |
-| `bin_start`, `bin_end` | integer | `[k * bin_bp, (k + 1) * bin_bp)`; a position `pos` is in bin `pos // bin_bp` |
-| `min_p` | `double` | smallest p in the bin, unrounded (the builder rounds to 3 significant digits) |
-| `lead_position`, `lead_rsid`, `lead_beta`, `lead_ea` | | the row holding `min_p`: position, rsID text (null when none), beta (unrounded; the builder rounds to 3 decimals), effect allele |
-| `n_gws`, `n_variants` | integer | rows with p < 5e-8; rows in the bin |
+The landing track's bin summary (SPEC.md section 10) is not an adapter's job: the builder computes it
+from these rows for every GWAS.
 
 ## The ingestion report
 

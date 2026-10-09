@@ -5,6 +5,7 @@ import { dotOptions, dotScales, hoverInteractor, INK, PLOT_MARGIN_BOTTOM, PLOT_M
 import type { Selection } from '@uwdata/mosaic-core'
 import { clearPlotHover, onPlotPointerMove, useHoverOverlay, type HoverLookup } from '@/lib/plot-hover'
 import { Empty } from '@/components/states'
+import { toastError } from '@/lib/toast'
 
 /**
  * LocusCompare: QTL −log10 p against DCM GWAS −log10 p for every variant of the window
@@ -54,7 +55,7 @@ export default function LocusCompare({ table, dark, size = 320, yDomain, link, b
       ) as HTMLElement
       if (!alive) return
       el.replaceChildren(plot)
-    })().catch(e => console.error(e))
+    })().catch(e => toastError('The QTL-versus-GWAS panel could not be drawn.', e))
     return () => { alive = false; el.replaceChildren() }
   }, [table, dark, size, yDomain[0], yDomain[1], link, brush]) // eslint-disable-line react-hooks/exhaustive-deps
 

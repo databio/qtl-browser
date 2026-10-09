@@ -1417,9 +1417,9 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps({"search_index": doc["search_index"],
                           "parts": len(doc.get("search_index_parts") or {}), "counts": doc.get("counts")}))
         return 0
-    from .common import CHROMS
+    from .common import CHROMS, Config
     docs = build(qs.Store(args.store), args.id, args.tables, args.catalog, args.annotation, CHROMS,
-                 codec=qs.codec_for(args.version))
+                 codec=qs.codec_for(args.version), collections=Config().cfg.get("collections"))
     print(json.dumps({eid: {k: v for k, v in d.items() if k not in ("hits", "files", "search_index_parts")}
                       for eid, d in sorted(docs.items())}, indent=1))
     return 0

@@ -1,5 +1,6 @@
 import { Download } from 'lucide-react'
 import { exportPNG, exportSVG } from '@/lib/export-plot'
+import { toastError } from '@/lib/toast'
 
 /** Small dropdown offering PNG and SVG exports of one or more plot containers. */
 export default function ExportMenu({ targets, background, disabled = false }: {
@@ -19,7 +20,7 @@ export default function ExportMenu({ targets, background, disabled = false }: {
     const el = t.el()
     if (!el) return
     if (fmt === 'svg') exportSVG(el, t.name, background)
-    else exportPNG(el, t.name, background).catch(e => console.error(e))
+    else exportPNG(el, t.name, background).catch(e => toastError('The PNG export failed.', e))
     ;(document.activeElement as HTMLElement | null)?.blur()   // close the focus-driven dropdown
   }
   return (

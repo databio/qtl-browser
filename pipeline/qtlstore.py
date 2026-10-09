@@ -200,7 +200,8 @@ def orient_to_ref(ref_base, effect_allele, other_allele, beta, af) -> dict:
 # ---- store ------------------------------------------------------------------------------------
 CATALOGS = "variant_catalogs"            # pointer level of variant catalogs (store.json key too)
 OVERLAPS = "overlaps"                    # pointer level of catalog overlap indexes (derived)
-POINTER_DIRS = (CATALOGS, "annotations", "experiments", OVERLAPS)
+COLOCS = "colocs"                        # pointer level of coloc lists (optional, one per declared pair)
+POINTER_DIRS = (CATALOGS, "annotations", "experiments", OVERLAPS, COLOCS)
 
 # ---- experiment kind, and collections ----------------------------------------------------------
 # `plans/2026-10-07-experiment-model.md`. One experiment is one scan: a cis QTL scan, a trans QTL
@@ -399,6 +400,9 @@ class Store:
                 fails += annotation.check_split(self, doc)
             if lvl == OVERLAPS:
                 fails += self._check_overlap(pid, doc, docs)
+            if lvl == COLOCS:
+                from . import coloc            # late, as for overlap
+                fails += coloc.check(self, pid, doc, docs)
             if lvl != "experiments":
                 continue
             cat = docs.get((CATALOGS, doc["catalog"]))

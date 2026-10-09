@@ -26,35 +26,38 @@ npm run bench -- --target preview --label pair --scenario pair --pages MYOZ1-eqt
 Playwright is pinned in `ui/package.json`, which pins the Chromium build. After `npm install`, run
 `npx playwright install chromium` once (the browser goes to `~/.cache/ms-playwright`).
 
-## Local v1 store
+## Local store
 
-The app reads the qtlb v1 qtlstore (SPEC.md at the repo root). `vite dev` and `vite preview` serve
-`QTL_DATA_DIR` (default `../data/store`, gitignored) at `/data`, so a store copied from Rivanna
-runs locally:
+The app reads a version 2 qtlstore (SPEC.md at the repo root). `vite dev` and `vite preview` serve
+`QTL_DATA_DIR` (default `../data/store`, gitignored) at `/data`, so a store built locally runs
+without the bucket. The genome-wide release build, `data/derived/store-release-v2` (TOPCHeF, the DCM
+GWAS, GTEx v8 heart LV and the coloc lists), is the one the smoke suites' numbers come from
+(chr21/chr22 builds give different trans and summary counts):
 
 ```bash
-scp -r riva:/scratch/ns5bc/qtl-browser/store-c2122-v1f /tmp/qtlstore-c2122-v1f   # chr21/chr22, two experiments, trans + GWAS + GWAS bins
 cd ui && VITE_DATA_BASE= npm run build
-QTL_DATA_DIR=/tmp/qtlstore-c2122-v1f npm run preview      # or: QTL_DATA_DIR=... VITE_DATA_BASE= npm run dev
-node bench/smoke_gene_page.mjs && node bench/smoke_variant_page.mjs && SMOKE_REF=/tmp/ref.json node bench/smoke_trans_tab.mjs
-npm run bench -- --target preview --label v1 --runs 1 --self-check-page v1-PDXK-eqtl \
-  --pages v1-PDXK-eqtl,v1-MICAL3-sqtl,v1-GUSBP11-sqtl,v1-SMARCB1-trans,v1-variant-rs34599497,v1-variant-rs4819361-trans,v1-variant-rs34599497-scan
+QTL_DATA_DIR=../data/derived/store-release-v2 npm run preview      # or: QTL_DATA_DIR=... VITE_DATA_BASE= npm run dev
+node bench/smoke_gene_page.mjs && node bench/smoke_variant_page.mjs && SMOKE_REF=/tmp/ref-v2.json node bench/smoke_trans_tab.mjs
+npm run bench -- --target preview --label v2 --runs 1 --self-check-page v2-PDXK-eqtl \
+  --pages v2-PDXK-eqtl,v2-MICAL3-sqtl,v2-GUSBP11-sqtl,v2-SMARCB1-trans,v2-variant-rs34599497,v2-variant-rs4819361-trans,v2-variant-rs34599497-scan
 ```
 
-The app needs the per-chromosome objects (SPEC.md sections 6 and 8); a store built before them
-(`store-c2122-v1e` and older) gets them with `add-split` (pipeline/README.md) and otherwise fails
-with "the store predates this build". `VITE_EXPERIMENT` picks the experiment (default `topchef`). The smoke suites use chr21/chr22 genes
-(PDXK, MICAL3, GUSBP11, SMARCB1) and variants (rs34599497, rs4819361, rs457868). The harness reads `store.json` where
-it read `manifest.json`, and counts v1 objects by extension (`results`, `variants`, `hits`,
-`rsid_index`, `variant_index`, `arrow_object`, and `.qbt`/`.qbg`/`.qgi` under `trans_pack`, `gwas_pack`,
-`gwas_index`); the v0 kind names stay for old results. The trans smoke suite compares exported rows
-with `results.read_trans` when `SMOKE_REF` names the reference JSON below.
+`VITE_COLLECTION_OF` names the experiment whose collection the app opens (default `topchef_ge_cis`)
+and `VITE_GWAS` the GWAS experiment (default `dcm_jurgens2024_biobanks`). The smoke suites use
+chr21/chr22 genes (PDXK, MICAL3, GUSBP11, SMARCB1) and variants (rs34599497, rs4819361, rs457868);
+each suite reads the store's per-scan experiment documents to name the objects it counts requests
+against. The harness reads `store.json` where it read `manifest.json`, and counts objects by
+extension (`results`, `variants`, `hits`, `rsid_index`, `variant_index`, `arrow_object`, and
+`.qbt`/`.qbg`/`.qgi` under `trans_pack`, `gwas_pack`, `gwas_index`); the v0 kind names stay for old
+results. The trans smoke suite compares exported rows with `results.read_trans` when `SMOKE_REF`
+names the reference JSON below (its `--smoke-genes` and `--smoke-variants` defaults are the suite's).
 
-The decoder round trip against the Python reference decoders:
+The decoder round trip against the Python reference decoders, about half a minute each way on the
+genome-wide store:
 
 ```bash
-uv run python ui/scripts/store_reference.py /tmp/qtlstore-c2122-v1f /tmp/ref.json   # from the repo root
-cd ui && npm run store-check -- /tmp/qtlstore-c2122-v1f /tmp/ref.json
+uv run python ui/scripts/store_reference.py data/derived/store-release-v2 /tmp/ref-v2.json   # from the repo root
+cd ui && npm run store-check -- ../data/derived/store-release-v2 /tmp/ref-v2.json
 ```
 
 ## Pages

@@ -50,11 +50,11 @@ export interface GenePack {
 // ---- the GWAS window --------------------------------------------------------------------------
 
 let gwasIndex: Promise<GwasIndex | null> | null = null
-/** The experiment's GWAS index: one whole-object read per session, null without a GWAS. */
+/** The GWAS experiment's index: one whole-object read per session, null without a GWAS. */
 export function loadGwasIndex(): Promise<GwasIndex | null> {
   if (!gwasIndex) {
     const p = getStore().then(async s => {
-      const g = s.experiment.gwas
+      const g = s.gwas
       if (!g) return null
       const idx = decodeGwasIndex(await fetchObject(g.index), s.catalog.collection_digest, g.index)
       if (idx.blockRows !== g.block_rows || idx.nValues.join() !== g.n_values.join())
@@ -108,7 +108,7 @@ function leadRow(block: ResultBlock | null, range: VariantRange | null) {
   for (let i = 0; i < run.n; i++) {
     if (run.position[i] !== lead.pos || run.ref[i] !== lead.ref || run.alt[i] !== lead.alt) continue
     const nan = (x: number) => (Number.isNaN(x) ? null : x)
-    return { pval: nan(block.pval[i]), beta: nan(block.slope[i]), se: nan(block.se[i]), af: nan(run.af[i]),
+    return { pval: nan(block.pval[i]), beta: nan(block.beta[i]), se: nan(block.se[i]), af: nan(run.af[i]),
       rsid: run.rsNumber[i] ? `rs${run.rsNumber[i]}` : null }
   }
   return null
@@ -116,9 +116,9 @@ function leadRow(block: ResultBlock | null, range: VariantRange | null) {
 
 /** The genes row the gene page prints: the annotation's fields, the eQTL block's details (group
  *  lead, credible sets), the search index's tested significance value and the lead's own nominal
- *  row. v1 stores no q-value: the
- *  Zenodo release publishes none either, and the one the v0 site showed was this repo's own
- *  Benjamini-Hochberg over `pval_beta` (pipeline/steps_tables.py), which the contract drops. */
+ *  row. The store holds no q-value: the Zenodo release publishes none either, and the one the v0
+ *  site showed was this repo's own Benjamini-Hochberg over `pval_beta` (pipeline/steps_tables.py),
+ *  which the contract drops. */
 function geneRow(hit: SearchHit, block: ResultBlock | null, range: VariantRange | null): Gene {
   const d = block?.details, g = d?.group ?? null, lead = g?.lead ?? null, row = leadRow(block, range)
   return {
@@ -166,7 +166,7 @@ function openGene(hit: SearchHit): GenePack {
     if (hit.blk_off == null || hit.blk_len == null) return null
     const f = resultsFile(st, EQTL_TYPE, hit.chr)
     return fetchDecoded('store:block', detail0, f.name, hit.blk_off, hit.blk_len,
-      (b, what) => decodeResultBlock(b, f.dof, { blk_len: hit.blk_len, n_var: hit.n_var, var_start: hit.var_start }, what))
+      (b, what) => decodeResultBlock(b, { blk_len: hit.blk_len, n_var: hit.n_var, var_start: hit.var_start }, what))
   })
   const variants = Promise.all([s, phen]).then(([st, ps]) => {
     const withRuns = ps.filter(p => p.var_off != null && p.var_len != null)
@@ -197,7 +197,7 @@ function openGene(hit: SearchHit): GenePack {
         const off = Math.min(...rowsS.map(p => p.blk_off))
         const len = Math.max(...rowsS.map(p => p.blk_off + p.blk_len)) - off
         const decoded = await fetchDecoded('store:introns', detail0, f.name, off, len, (span, what) =>
-          rowsS.map(p => decodeResultBlock(span.subarray(p.blk_off - off, p.blk_off - off + p.blk_len), f.dof,
+          rowsS.map(p => decodeResultBlock(span.subarray(p.blk_off - off, p.blk_off - off + p.blk_len),
             { blk_len: p.blk_len, n_var: p.n_var, var_start: p.var_start }, `${what} ${p.phenotype_id}`)))
         rowsS.forEach((p, i) => blocks.set(p.phenotype_id, decoded[i]))
         const list = rowsS.map((p, i) => spliceRow(hit, p, decoded[i], range))
@@ -287,11 +287,11 @@ const rawSource = (raw: string) => `(SELECT position, A1, A2,
   FROM ${raw})`
 
 /** One cis window as a table for the plots: -log10 p, credible-set class, a tooltip label, and
- *  the GWAS statistics for variants present there. Both sides are ref/alt oriented in a v1 store
+ *  the GWAS statistics for variants present there. Both sides are ref/alt oriented in the store
  *  (SPEC section 10), so a GWAS beta is already the effect of A1 = ALT, the allele the QTL beta
  *  refers to, and the two are directly comparable in sign. Ordered so
  *  credible-set variants are drawn last (on top). A row with no p (a site the phenotype did not
- *  test) has no -log10 p; a results set without dof has no slopes, and the label says so. */
+ *  test) has no -log10 p, and the label says so. */
 const locusSQL = (qtl: string, gwas: string) => `
     SELECT q.position,
            -- p underflows to 0 for a few extreme variants: place them just above the largest finite value
@@ -349,7 +349,7 @@ export async function locusTable(gp: GenePack, qtlType: 'e' | 's', phenotypeId?:
     position: makeVector(c.position), A1: vectorFromArray(c.a1, new Utf8()), A2: vectorFromArray(c.a2, new Utf8()),
     rs_number: makeVector(c.rsNumber), tss_distance: makeVector(c.tssDistance), af: makeVector(c.af),
     ma_samples: makeVector(c.maSamples), ma_count: makeVector(c.maCount), pval_nominal: makeVector(c.pval),
-    beta: makeVector(c.slope), beta_se: makeVector(c.se), pip: makeVector(c.pip), cs_id: makeVector(c.csId),
+    beta: makeVector(c.beta), beta_se: makeVector(c.se), pip: makeVector(c.pip), cs_id: makeVector(c.csId),
     coloc_pp: makeVector(colocPp),
   }), 'stream')
   performance.measure('store:decode', { start: t0, end: performance.now(), detail: { ...detail, part: 'columns' } })

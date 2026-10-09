@@ -2,15 +2,23 @@
 
 Builds the qtlstore (`SPEC.md` at the repo root, format version 2) that the browser reads. Each
 study goes through an adapter into contract tables (`CONTRACT.md`), then into a refget-anchored
-store, then through checks, then into the bucket. The adapters run on Rivanna through Slurm from
-the synced checkout (`~/scratch/qtl-browser-live`); the store builds anywhere the tables are.
+store, then through checks, then into the bucket. The adapters run on Rivanna through Slurm from a
+checkout (`QTLB_REPO`, default `/scratch/$USER/qtl-browser`; logs go to `/scratch/<user>/`); the
+store builds anywhere the tables are.
 
 ```bash
 # adapters (Slurm; details below)
 QTLB_DERIVED=<tree> sbatch adapter.sbatch                          # TOPCHeF adapter + gate + contract check
 
-# the store: one command from the configured tables to a validated store (about 10 min genome-wide)
-uv run python -m pipeline.build_store --store data/derived/store-genome-v2 --validate
+# the store: one command from the configured TOPCHeF tables to a validated store (about 10 min
+# genome-wide; without --keep it deletes the directory first, so never aim it at a combined store)
+uv run python -m pipeline.build_store --store data/derived/store-topchef-v2 --validate
+# a second cohort into an existing store (how store-release-v2 got GTEx; log build_15_store_release_v2.log)
+uv run python -m pipeline.annotation build --gtf data/raw/gencode_v39/gencode.v39.annotation.gtf.gz --store <store> --id gencode_v39
+uv run python -m pipeline.catalog --sites <tables>/sites.parquet --store <store> --id gtex_v8_heart_lv_grch38
+uv run python -m pipeline.results build --tables <tables> --store <store> --id gtex_v8_heart_lv --catalog gtex_v8_heart_lv_grch38 --annotation gencode_v39
+uv run python -m pipeline.overlap build --store <store> --id grch38 && uv run python -m pipeline.coloc add --store <store>
+# then rewrite store.json and validate, as store.sbatch's validate step does
 uv run python -m pipeline.which_codec --store <store>              # which codec wrote each object, from its bytes
 uv run python -m pipeline.scan_codes --store <store> --experiment topchef_ge_cis [--chrom chr22]
 uv run python -m pipeline.qtlstore validate | remove-experiment ID | gc [--dry-run] | crosscat A B --store <store>
@@ -56,7 +64,6 @@ changes the shape of the trans data, not just its size.
 | One step alone | `STEPS=gate` or `STEPS=contract` (or `"adapter contract"`) with the same variables | |
 | One TOPCHeF table | `STEPS=adapter QTLB_DERIVED=<tree> sbatch adapter.sbatch --step phenotypes --step trans` (trans needs the trans-only phenotypes, so both) | `adapters/topchef.py` |
 | DCM GWAS into the TOPCHeF tables | `ADAPTER=dcm_gwas STEPS="adapter contract" QTLB_DERIVED=<tree> sbatch adapter.sbatch` | `adapters/dcm_gwas.py` |
-| Only the GWAS bin table (`gwas_bins.parquet`, v0's `gwas_dcm_bins.json` bins; seconds) | `ADAPTER=dcm_gwas STEPS="adapter contract" QTLB_DERIVED=<tree> sbatch adapter.sbatch --bins-only` | `adapters/dcm_gwas.py` |
 | Store build, one cohort, locally | `uv run python -m pipeline.build_store --store <store> --validate` (`--tables`, `--sites`, `--gtf` override the configured paths; `--keep` adds to an existing store) | `build_store.py` |
 | Store build, several cohorts, Rivanna | `QTLB_CHROMS=all QTLB_STORE=<store> EXPERIMENTS="topchef:<tree>/_tables/topchef:gencode_v34 gtex_v8_heart_lv:<tree>/_tables/gtex_v8_heart_lv" CROSSCAT="topchef_grch38 gtex_v8_heart_lv_grch38" sbatch --time=6:00:00 --mem=64G store.sbatch` | `annotation.py`, `catalog.py`, `results.py`, `gwas.py`, `which_codec.py` |
 | Store maintenance | `uv run python -m pipeline.qtlstore validate \| remove-experiment ID \| gc [--dry-run] \| crosscat A B --store <store>` | `qtlstore.py` |
@@ -80,7 +87,7 @@ PASS/FAIL line per `CONTRACT.md` rule, exits 1 on any failure).
   SPEC.md section 6), a variant catalog `<id>_grch38`, and one experiment per scan: a cis and a
   trans experiment per phenotype type (the trans ones when the tables hold `trans.parquet`), each
   with its search index split by chromosome and its hits, and a GWAS experiment when they hold
-  `gwas.parquet`, with its bin summary when they also hold `gwas_bins.parquet` (SPEC.md sections 8
+  `gwas.parquet`, with the bin summary the builder computes from its rows (SPEC.md sections 8
   to 10); then `Store.validate`, a per-experiment count of genes missing from the annotation, the
   cross-catalog lookup check when `CROSSCAT` names two variant catalogs, and `which_codec`. Each
   phase logs its wall time and peak RSS. `results.py` holds one chromosome's nominal rows at a time

@@ -5,8 +5,8 @@ Reads the contract `gwas` table (CONTRACT.md) from an experiment's tables direct
       <digest>.qbg                    one per chromosome: v1 header (kind 4) + zstd blocks of rows
       <digest>.qgi                    the GWAS index (kind 5): n table, per chromosome block first
                                       positions and end offsets, so a window is one range request
-      <digest>.arrow.zst              the bin summary, when the tables hold `gwas_bins.parquet`: the
-                                      strongest p per 5 Mb window, one row per window (the landing track)
+      <digest>.arrow.zst              the bin summary, computed here from the same rows: the strongest
+                                      p per 5 Mb window, one row per window (the landing track)
 
 and returns the experiment's `gwas` entry. `results.build` calls it when the table exists.
 
@@ -35,15 +35,17 @@ ZSTD_LEVEL = 19
 COLUMNS = ("chr", "pos", "ref", "alt", "beta", "se", "af", "pvalue", "n", "rs_number")
 ORDER = ["pos", "ref", "alt", "rs_number", "pvalue", "n", "beta"]
 EXT_BINS = "arrow.zst"
-# the bin summary's schema (SPEC.md section 10, "Bin summary"): v0's gwas_dcm_bins.json columns, typed
+BIN_BP = 5_000_000          # the landing track's window
+GWS_P = 5e-8                # what `n_gws` counts
+# the bin summary's schema (SPEC.md section 10, "Bin summary")
 BINS_SCHEMA = pa.schema([("chr", pa.string()), ("bin_start", pa.uint32()), ("bin_end", pa.uint32()),
                          ("min_p", pa.float64()), ("lead_position", pa.uint32()), ("lead_rsid", pa.string()),
-                         ("lead_beta", pa.float64()), ("lead_ea", pa.string()), ("n_gws", pa.uint32()),
+                         ("lead_beta", pa.float64()), ("lead_alt", pa.string()), ("n_gws", pa.uint32()),
                          ("n_variants", pa.uint32())])
 
 
 def build(store: qs.Store, tables: Path, cdoc: dict, chroms: list[str], block_rows: int = BLOCK_ROWS,
-          level: int = ZSTD_LEVEL, codec=None) -> dict | None:
+          level: int = ZSTD_LEVEL, codec=None, bin_bp: int = BIN_BP) -> dict | None:
     """The fields of a GWAS experiment document, or None when `tables` has no `gwas.parquet`.
 
     `codec` decides how p/beta/se are stored. v2 (the default) quantizes to the same triple the QTL
@@ -123,52 +125,57 @@ def build(store: qs.Store, tables: Path, cdoc: dict, chroms: list[str], block_ro
     return {"id": meta.get("id"), "title": meta.get("title"), "files": files, "index": store.put(index, EXT_GWAS_INDEX),
             "n_rows": int(sum(rows_by_chrom.values())), "rows_by_chrom": rows_by_chrom,
             "rows_sharing_a_site": sharing, "block_rows": block_rows,
-            "n_values": n_values, "bins": build_bins(store, tables, cdoc, [c for c in chroms if c in files], level),
+            "n_values": n_values, "bins": build_bins(store, t, cdoc, bin_bp, level),
             # v1 stores the published digits exactly and has nothing to measure
             "precision": None if codec is pf else {"theoretical_limit": lim, "measured_worst": worst},
             "orientation": meta.get("orientation"), "source": meta.get("source")}
 
 
 # ---- the bin summary --------------------------------------------------------------------------
-def _round_bins(t):
-    """v0's rounding (steps_gwas.run, when it wrote gwas_dcm_bins.json): p to 3 significant digits
-    through its shortest decimal text, the lead's beta to 3 decimals (Python `round`)."""
-    t = t.copy()
-    t["min_p"] = [float(f"{p:.3g}") for p in t["min_p"]]
-    t["lead_beta"] = [round(float(b), 3) for b in t["lead_beta"]]
-    return t
-
-
-def build_bins(store: qs.Store, tables: Path, cdoc: dict, chroms: list[str], level: int = ZSTD_LEVEL) -> dict | None:
-    """The `gwas.bins` entry: the bin summary object from `gwas_bins.parquet` on `chroms`, or None when
-    the tables have no such table. Rows in variant catalog table order, then by `bin_start`."""
-    path = Path(tables) / "gwas_bins.parquet"
-    if not path.exists() or not chroms:
-        return None
-    # the build's chromosomes only (as for the GWAS rows): a subset build has a subset variant catalog
-    t = pq.read_table(path, filters=[("chr", "in", list(chroms))]).to_pandas()
-    missing = [c for c in BINS_SCHEMA.names if c not in t.columns]
-    if missing:
-        raise ValueError(f"gwas bins: required columns missing: {missing}")
+def bin_rows(t, cdoc: dict, bin_bp: int):
+    """The bin summary rows from the GWAS rows (the contract table as the builder read it, already
+    oriented): per `(chr, pos // bin_bp)` with rows, the smallest p, the row holding it, the rows
+    below `GWS_P` and the row count. A tie on the smallest p goes to the first such row in the
+    stored order (`ORDER`), so the lead is deterministic. p is rounded to 3 significant digits and
+    the lead's beta to 3 decimals: a label, not a statistic. Rows in variant catalog table order,
+    then by `bin_start`. Every GWAS gets this; no adapter supplies it."""
     order = {c["name"]: i for i, c in enumerate(cdoc["chromosomes"])}
-    stray = sorted(set(t["chr"]) - set(order))
-    if stray:
-        raise ValueError(f"gwas bins: chromosomes {stray} are not in the variant catalog's table")
-    t = t.assign(_o=t["chr"].map(order)).sort_values(["_o", "bin_start"], kind="mergesort").drop(columns="_o")
-    t = _round_bins(t[list(BINS_SCHEMA.names)]).reset_index(drop=True)
-    table = pa.Table.from_pandas(t, schema=BINS_SCHEMA, preserve_index=False)
-    width = sorted(set((t["bin_end"] - t["bin_start"]).tolist()))
-    if len(width) > 1:
-        raise ValueError(f"gwas bins: bins of several widths {width}")
-    bin_bp = int(width[0]) if width else 0
-    fails = check_bins(table, cdoc, bin_bp, len(t))
+    d = t.assign(_o=t["chr"].map(order), _b=t["pos"] // bin_bp)
+    d = d.sort_values(["_o", "_b", "pvalue", *ORDER], kind="mergesort")
+    lead = d.groupby(["_o", "_b"], sort=True).head(1).set_index(["_o", "_b"])
+    agg = d.groupby(["_o", "_b"], sort=True).agg(n_variants=("pvalue", "size"),
+                                                  n_gws=("pvalue", lambda p: int((p < GWS_P).sum())))
+    out = lead.join(agg).reset_index()
+    rs = out["rs_number"].to_numpy(dtype=np.int64)
+    return {
+        "chr": out["chr"].tolist(),
+        "bin_start": (out["_b"] * bin_bp).astype(np.int64).tolist(),
+        "bin_end": ((out["_b"] + 1) * bin_bp).astype(np.int64).tolist(),
+        "min_p": [float(f"{float(p):.3g}") for p in out["pvalue"]],
+        "lead_position": out["pos"].astype(np.int64).tolist(),
+        "lead_rsid": [f"rs{r}" if r > 0 else None for r in rs],
+        "lead_beta": [round(float(b), 3) for b in out["beta"]],
+        "lead_alt": out["alt"].tolist(),
+        "n_gws": out["n_gws"].astype(np.int64).tolist(),
+        "n_variants": out["n_variants"].astype(np.int64).tolist(),
+    }
+
+
+def build_bins(store: qs.Store, t, cdoc: dict, bin_bp: int = BIN_BP, level: int = ZSTD_LEVEL) -> dict | None:
+    """The `gwas.bins` entry: the bin summary object computed from the GWAS rows `t`, or None when
+    there are none."""
+    if not len(t):
+        return None
+    rows = bin_rows(t, cdoc, bin_bp)
+    table = pa.table(rows, schema=BINS_SCHEMA)
+    fails = check_bins(table, cdoc, bin_bp, table.num_rows)
     if fails:
         raise ValueError(f"gwas bins: {fails[0]}" + (f" (and {len(fails) - 1} more)" if len(fails) > 1 else ""))
     sink = pa.BufferOutputStream()
     with pa.ipc.new_stream(sink, BINS_SCHEMA) as w:
         w.write_table(table.combine_chunks())
     return {"file": store.put(pf.zstd_frame(sink.getvalue().to_pybytes(), level), EXT_BINS),
-            "bin_bp": bin_bp, "n_bins": len(t)}
+            "bin_bp": bin_bp, "n_bins": table.num_rows}
 
 
 def decode_bins(buf: bytes) -> pa.Table:
@@ -186,7 +193,7 @@ def check_bins(t: pa.Table, cdoc: dict, bin_bp: int, n_bins: int) -> list[str]:
     """What `Store.validate` checks on a bin summary (SPEC.md section 10): the schema; `n_bins` rows;
     chromosomes of the variant catalog, in its table order, bins ascending and unique; every bin
     `[bin_start, bin_start + bin_bp)` aligned to `bin_bp` and inside the chromosome; the lead position
-    inside its bin; `0 < min_p <= 1`; `0 <= n_gws <= n_variants`, `n_variants >= 1`; `lead_ea` present."""
+    inside its bin; `0 < min_p <= 1`; `0 <= n_gws <= n_variants`, `n_variants >= 1`; `lead_alt` present."""
     if t.schema != BINS_SCHEMA:
         return [f"schema {t.schema.to_string(show_schema_metadata=False)!r} is not the bin schema"]
     fails = []
@@ -218,8 +225,8 @@ def check_bins(t: pa.Table, cdoc: dict, bin_bp: int, n_bins: int) -> list[str]:
         g, n = d["n_gws"][i], d["n_variants"][i]
         if g is None or n is None or n < 1 or g > n:
             fails.append(f"{where}: n_gws {g}, n_variants {n}")
-        if d["lead_beta"][i] is None or not d["lead_ea"][i]:
-            fails.append(f"{where}: lead beta or effect allele missing")
+        if d["lead_beta"][i] is None or not d["lead_alt"][i]:
+            fails.append(f"{where}: lead beta or alt allele missing")
     return fails
 
 

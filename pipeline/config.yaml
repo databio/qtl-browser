@@ -10,7 +10,6 @@ dbsnp_assembly_report: dbsnp_b157/GCF_000001405.40_GRCh38.p14_assembly_report.tx
 # figures were drawn from BiobanksOnly (5,022 / 932,941), which is what the browser matches.
 # The META build is parked at data/derived/_full/gwas_meta/.
 dcm_gwas: dcm_gwas_jurgens2024/DCM_GWAS/Jurgens_DCM_GWAS_META_BiobanksOnly.tsv.gz
-gwas_bin_bp: 5000000     # landing-track windows (plan: 5 Mb regardless of what the track shows)
 
 # Refget anchor (steps_refget.py): the sequences every position sits on, named by digest.
 reference:
@@ -44,7 +43,8 @@ nominal_bin_genes: 100
 # read every intron from the raw file instead. Every intron keeps its permutation row regardless.
 sqtl_nominal: significant
 
-# paper-named variants that must resolve to these rsIDs through the variants table
+# the preprint's named lead variants: steps_refget.spot_check confirms the allele check's call at each
+# position against the reference bytes. The rsIDs are a record of what the paper names; nothing checks them.
 paper_variants:
   chr1:2212668: rs2503715      # SKI
   chr1:236689867: rs4659701    # ACTN2
@@ -168,6 +168,53 @@ collections:
       file: "Jurgens_DCM_GWAS_META_BiobanksOnly.tsv.gz"
       fetched: "2026-09-04"
       note: "the biobanks-only set (5,022 cases / 932,941 controls), which the preprint's figures were drawn from; the full META is parked locally"
+  gtex_v8_heart_lv:
+    title: "GTEx v8 heart left ventricle eQTL and sQTL (eQTL Catalogue release 6)"
+    citation:
+      title: "The GTEx Consortium atlas of genetic regulatory effects across human tissues"
+      first_author: "The GTEx Consortium"
+      year: 2020
+      venue: "Science"
+      volume: 369
+      pages: "1318-1330"
+      doi: "10.1126/science.aaz1776"
+    source:
+      record: "eQTL Catalogue release 6, study QTS000015, datasets QTD000256 (ge) and QTD000260 (leafcutter)"
+      description: "the eQTL Catalogue's uniform reprocessing of GTEx v8: nominal and permutation summary statistics, SuSiE credible sets"
+      title: "A compendium of uniformly processed human gene expression and splicing quantitative trait loci"
+      first_author: "Nurlan Kerimov"
+      last_author: "Kaur Alasoo"
+      year: 2021
+      venue: "Nature Genetics"
+      volume: 53
+      pages: "1290-1299"
+      doi: "10.1038/s41588-021-00924-w"
+
+# Coloc lists (SPEC section 20, pipeline/coloc.py): optional, one per declared pair of a QTL experiment
+# and a GWAS experiment, membership only. `file` is coloc results as commonly written (CSV or TSV with
+# a phenotype, gene or symbol column, and maybe PP.H4, in which case `min_pp_h4` filters); the
+# pipeline never runs coloc. Added to a store whenever both experiments are in it.
+colocs:
+  murray2026_ge_dcm:
+    qtl: topchef_ge_cis
+    gwas: dcm_jurgens2024_biobanks
+    file: pipeline/colocs/murray2026_ge_dcm.tsv
+    threshold: "PP.H4 > 0.8"
+    source:
+      reported_by: "Murray et al. 2026, medRxiv, doi 10.64898/2026.01.12.26343934"
+      table: "Table 2 (eQTL); the gene symbols as listed by the authors, since the table body is not in the public PDF"
+      method: "coloc.abf, coloc 5.2.3 default priors, single causal variant, +/-1 Mb window"
+    note: "PJVK and CDKN1A are not eGenes by the permutation rule; their colocalization used nominal statistics."
+  murray2026_leafcutter_dcm:
+    qtl: topchef_leafcutter_cis
+    gwas: dcm_jurgens2024_biobanks
+    file: pipeline/colocs/murray2026_leafcutter_dcm.tsv
+    threshold: "PP.H4 >= 0.8"
+    source:
+      reported_by: "Murray et al. 2026, medRxiv, doi 10.64898/2026.01.12.26343934"
+      table: "Supplemental Table 2 (sQTL); the gene symbols as listed by the authors, since the table body is not in the public PDF"
+      method: "coloc.abf, coloc 5.2.3 default priors, single causal variant, +/-1 Mb window"
+    note: "17 introns in these 4 genes; the list names the genes, not the introns."
 
 # The bucket the browsers read (pipeline/upload.py). Credentials are never here: `B2_ACCESS_KEY_ID`
 # and `B2_SECRET_ACCESS_KEY` come from the environment or the gitignored .env at the repo root

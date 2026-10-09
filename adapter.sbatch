@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=qtlb_adapter
-#SBATCH --output=/home/ns5bc/scratch/qtlb_adapter_%j.log
+#SBATCH --output=/scratch/%u/qtlb_adapter_%j.log
 #SBATCH --partition=standard
 #SBATCH --account=shefflab
 #SBATCH --time=3:00:00
@@ -16,9 +16,11 @@
 #               gate = the TOPCHeF acceptance gate (verify_topchef), skipped for other adapters;
 #               contract = pipeline/adapters/contract_check.py on the tables the adapter wrote
 #   QTLB_CHROMS comma list, or unset / `all` for every chromosome
+#   QTLB_REPO   the checkout to run from (default /scratch/$USER/qtl-browser)
+# The log goes to /scratch/<user>/qtlb_adapter_<job>.log.
 # Examples:
-#   QTLB_DERIVED=/scratch/ns5bc/qtl-browser/derived-topchef-v2 sbatch adapter.sbatch
-#   ADAPTER=eqtl_catalogue QTLB_DERIVED=/scratch/ns5bc/qtl-browser/derived-eqtlcat-all-v2 sbatch adapter.sbatch
+#   QTLB_DERIVED=/scratch/$USER/qtl-browser/derived-topchef-v2 sbatch adapter.sbatch
+#   ADAPTER=eqtl_catalogue QTLB_DERIVED=/scratch/$USER/qtl-browser/derived-gtex-v2 sbatch adapter.sbatch
 #   STEPS=contract ADAPTER=eqtl_catalogue QTLB_DERIVED=... sbatch --mem=32G adapter.sbatch
 #   STEPS=gate QTLB_CHROMS=chr21,chr22 QTLB_DERIVED=... sbatch adapter.sbatch
 #   STEPS="adapter contract" QTLB_DERIVED=... sbatch adapter.sbatch --step trans    # one TOPCHeF table
@@ -38,7 +40,7 @@ case "$ADAPTER" in
   *) echo "unknown ADAPTER $ADAPTER"; exit 2 ;;
 esac
 TABLES="$QTLB_DERIVED/_tables/$EXP_ID"
-cd /home/ns5bc/scratch/qtl-browser-live
+cd "${QTLB_REPO:-/scratch/$USER/qtl-browser}"
 mkdir -p "$QTLB_DERIVED"
 echo "host $(hostname) adapter $ADAPTER steps '$STEPS' chroms ${QTLB_CHROMS:-all} derived $QTLB_DERIVED started $(date -Is)"
 quiet() { grep --line-buffered -v "DeprecationWarning\|fetch_arrow_table()"; }
