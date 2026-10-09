@@ -65,7 +65,8 @@ def write_gtf(path: Path, lines=None) -> Path:
     return path
 
 
-def build_fixture(st: qs.Store, annot_id: str = "ann", genes=(("ENSG1", "chr1", 1, 50), ("ENSG2", "chr1", 60, 90))) -> dict:
+def build_fixture(st: qs.Store, annot_id: str = "ann", genes=(("ENSG1", "chr1", 1, 50), ("ENSG2", "chr1", 60, 90)),
+                  version: int = qs.FORMAT_VERSION) -> dict:
     """A real annotation (tables, gene models, lookup) in `st`, from a GTF of one-exon genes
     `(gene_id, chr, start, end)` on `+`, named `SYM<n>`: what the other suites' stores point at."""
     lines = []
@@ -74,7 +75,7 @@ def build_fixture(st: qs.Store, annot_id: str = "ann", genes=(("ENSG1", "chr1", 
         lines += [gtf_line(chrom, "gene", start, end, "+", attrs),
                   gtf_line(chrom, "exon", start, end, "+", attrs + f' transcript_id "T{i + 1}.1"; exon_number 1;')]
     st.root.mkdir(parents=True, exist_ok=True)
-    return an.build(st, annot_id, write_gtf(st.root / f"{annot_id}.gtf.gz", lines))
+    return an.build(st, annot_id, write_gtf(st.root / f"{annot_id}.gtf.gz", lines), version=version)
 
 
 @case

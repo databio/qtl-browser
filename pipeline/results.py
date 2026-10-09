@@ -71,7 +71,7 @@ from . import catalog as cat
 from . import gwas
 from . import packfmt_v1 as pf
 from . import qtlstore as qs
-from .annotation import encode as encode_arrow, decode as decode_arrow
+from .annotation import encode as encode_arrow, decode as decode_arrow, load as load_annotation
 
 KIND_RESULTS, KIND_HITS, KIND_TRANS = qs.KIND_RESULTS, qs.KIND_HITS, qs.KIND_TRANS
 EXT_RESULTS, EXT_HITS, EXT_INDEX, EXT_TRANS = "qbe", "qbh", "arrow.zst", "qbt"
@@ -126,6 +126,26 @@ INDEX_SCHEMA = pa.schema([
     ("var_start", pa.uint32()), ("n_var", pa.uint32()), ("var_off", pa.uint32()), ("var_len", pa.uint32()),
     ("w_lo", pa.int32()), ("w_hi", pa.int32()),
     ("trans_off", pa.uint32()), ("trans_len", pa.uint32()), ("n_trans", pa.uint32())])
+
+# One experiment is one scan (`plans/2026-10-07-experiment-model.md` D9), so its index carries only
+# the columns its scope uses. The 21-column schema above served both and is the build's working
+# table; these two are what reaches the store. 8 columns are cis-only and 3 trans-only, so each
+# stored row is narrower than today's and the totals come out about the same across four objects.
+_SHARED_INDEX = ("ord", "phenotype_type", "phenotype_id", "phenotype_object_id", "gene_id", "chr",
+                 "has_nominal", "is_group_lead", "significant", "sig_value")
+CIS_INDEX_FIELDS = _SHARED_INDEX + ("blk_off", "blk_len", "var_start", "n_var", "var_off", "var_len",
+                                    "w_lo", "w_hi")
+TRANS_INDEX_FIELDS = _SHARED_INDEX + ("trans_off", "trans_len", "n_trans")
+CIS_INDEX_SCHEMA = pa.schema([INDEX_SCHEMA.field(f) for f in CIS_INDEX_FIELDS])
+TRANS_INDEX_SCHEMA = pa.schema([INDEX_SCHEMA.field(f) for f in TRANS_INDEX_FIELDS])
+# `chr` is the **phenotype's** chromosome in both indexes -- where the gene is, not where its
+# variants are -- so both are split into per-chromosome parts the gene page reads by the gene's
+# chromosome. In the cis index that is where the block is; in the trans index it is the same
+# chromosome when the phenotype has a cis result, else the annotation's, else null. The null ones
+# go in `search_index_unplaced`, a part of the same shape, so that nothing is dropped. An earlier
+# draft left the trans index unsplit on the grounds that "a trans phenotype has no cis chromosome",
+# which confused the variants' chromosomes with the phenotype's; measured genome-wide it made the
+# gene page's trans lookup a 1.7 MB read where a part is tens of kB.
 
 
 # ---- inputs -----------------------------------------------------------------------------------
@@ -254,10 +274,28 @@ def _clean(x):
 
 # ---- build ------------------------------------------------------------------------------------
 def build(store: qs.Store, exp_id: str, tables: Path, cat_id: str, annot_id: str, chroms: list[str],
-          ingestion: dict | None = None, level: int = ZSTD_LEVEL, codec=pf) -> dict:
-    """`codec` is `packfmt_v1` (the default) or `packfmt_v2`, so the same contract tables build
-    either format and the two stores can be diffed object for object. Everything above the codec --
-    table reading, the search index, hits, trans, the pointer -- is shared."""
+          ingestion: dict | None = None, level: int = ZSTD_LEVEL, codec=None,
+          collection: str | None = None, collections: dict | None = None) -> dict:
+    """Build **one experiment per scan** from one set of contract tables, and return
+    `{experiment_id: pointer}`.
+
+    `exp_id` is the stem the ids are derived from, not an id itself: a cohort with eQTL and sQTL, cis
+    and trans, yields `<exp_id>_ge_cis`, `<exp_id>_ge_trans`, `<exp_id>_leafcutter_cis`,
+    `<exp_id>_leafcutter_trans`, and a GWAS beside them (`plans/2026-10-07-experiment-model.md` D1,
+    D9). They share one `collection` digest, which is what puts them in one collection.
+
+    Everything expensive is still computed once -- the tables are read once, the nominal rows once --
+    and the split happens at document assembly. What does *not* carry over from the single-document
+    shape is the ordinal space: `ord` numbers rows of one experiment's search index, so each one is
+    renumbered and its hit records remapped with it (D10a).
+
+    `codec` is `packfmt_v2` (the default, `qtlstore.FORMAT_VERSION`) or `packfmt_v1`, so the same
+    contract tables build either format and the two stores can be diffed object for object.
+    `collection` reuses an existing collection object instead of writing one, for a release
+    ingested in several passes. `collections` is config.yaml's `collections:` map, the publication
+    metadata keyed by `exp_id` and by a GWAS experiment's id; an entry wins over what the adapter
+    recorded, and a missing one falls back to it."""
+    codec = codec or qs.codec_for(qs.FORMAT_VERSION)
     tables = Path(tables)
     if ingestion is None:
         ip = tables / "ingestion.json"
@@ -351,7 +389,7 @@ def build(store: qs.Store, exp_id: str, tables: Path, cat_id: str, annot_id: str
             # the second kind is counted in the pointer rather than dropped silently
             if (r.phenotype_type, r.phenotype_object_id) not in groups and not any(
                     k in per_chrom[x]["runs"] for x in chroms):
-                unplaced.append(r.phenotype_id)
+                unplaced.append(k)
             continue
         pc_ = per_chrom[c]
         run = pc_["runs"].get(k)
@@ -457,30 +495,52 @@ def build(store: qs.Store, exp_id: str, tables: Path, cat_id: str, annot_id: str
                         "precision": _precision(a, dofs.get(ptype, (None, None))[0], codec),
                         "trans": None if trans_doc is None else trans_doc["types"].get(ptype)})
 
-    # hits, one object per chromosome
-    hits = {}
+    # Hits, per chromosome and now **per phenotype type**: the cis scan's hits hold leads and
+    # credible sets, the trans scan's hold trans rows. Records are built in the global ordinal space
+    # and remapped per experiment below, because `ord` indexes the experiment's own search index.
+    cis_hit_recs: dict[str, dict[str, list]] = {pt: {} for pt in types}
+    trans_hit_recs: dict[str, dict[str, list]] = {pt: {} for pt in types}
+    type_of_ord = {o: k[0] for k, o in ords.items()}
     for c in chroms:
         pc_ = per_chrom[c]
-        lv = [], []
+        by_type: dict[str, list] = {pt: [] for pt in types}
+        lv: dict[str, tuple[list, list]] = {pt: ([], []) for pt in types}
         for v, g in zip(pc_["lead_vidx"].tolist(), pc_["leads"].itertuples(index=False)):
             k = (g.phenotype_type, g.phenotype_id)
             if k not in ords:
                 raise ValueError(f"permuted: lead phenotype {k} is not in `phenotypes`")
-            lv[0].append(v)
+            lv[k[0]][0].append(v)
             # `value` is the quantity the rule tested (SPEC section 9, kind 0); the flag bit is one
             # bit, so an unassessed experiment reads as 0 there and the index's null is the record
-            lv[1].append((ords[k], _nan(sig_val(g)), int(bool(sig(g)))))
-        parts = [pf.hit_records(lv[0], [x[0] for x in lv[1]], [x[1] for x in lv[1]], HIT_LEAD,
-                                flags=[x[2] for x in lv[1]])]
+            lv[k[0]][1].append((ords[k], _nan(sig_val(g)), int(bool(sig(g)))))
+        for pt in types:
+            vs, meta = lv[pt]
+            by_type[pt].append(pf.hit_records(vs, [x[0] for x in meta], [x[1] for x in meta], HIT_LEAD,
+                                              flags=[x[2] for x in meta]))
         for k, csr in pc_["cs"].items():
             if k not in ords:
                 raise ValueError(f"credible_sets: {k} is not in `phenotypes`")
-            parts.append(pf.hit_records(csr["vidx"].to_numpy(), ords[k], csr["pip"].to_numpy(dtype=np.float64), HIT_CS,
-                                        cs_id=csr["cs_id"].to_numpy()))
-        parts += trans_hits.get(c, [])
-        recs = np.concatenate(parts)
-        hits[c] = store.put(encode_hits(c, table[c]["seq_digest"], recs, table[c]["count"], level=level,
-                                        codec=codec), EXT_HITS)
+            by_type[k[0]].append(pf.hit_records(csr["vidx"].to_numpy(), ords[k],
+                                                csr["pip"].to_numpy(dtype=np.float64), HIT_CS,
+                                                cs_id=csr["cs_id"].to_numpy()))
+        for pt in types:
+            cis_hit_recs[pt][c] = by_type[pt]
+        # trans records arrive in one list per chromosome across types; `ord` says whose
+        for recs in trans_hits.get(c, []):
+            for pt in types:
+                m = np.fromiter((type_of_ord.get(int(o)) == pt for o in recs["ord"].tolist()),
+                                dtype=bool, count=len(recs))
+                if m.any():
+                    trans_hit_recs[pt].setdefault(c, []).append(recs[m])
+
+    def put_hits(per: dict[str, list], remap: dict[int, int]) -> dict:
+        out = {}
+        for c in chroms:
+            parts = per.get(c) or []
+            recs = _remap_hits(np.concatenate(parts) if parts else pf.hit_records([], [], [], HIT_LEAD), remap)
+            out[c] = store.put(encode_hits(c, table[c]["seq_digest"], recs, table[c]["count"],
+                                           level=level, codec=codec), EXT_HITS)
+        return out
 
     index = pa.Table.from_pylist(index_rows, schema=INDEX_SCHEMA)
     if "has_nominal" in ph.columns:
@@ -492,34 +552,82 @@ def build(store: qs.Store, exp_id: str, tables: Path, cat_id: str, annot_id: str
             raise ValueError(f"phenotypes.has_nominal disagrees with nominal for {len(off)}, e.g. {off[:3]}")
     src_annot = (ingestion.get("source") or {}).get("gene_annotation") if isinstance(ingestion.get("source"), dict) \
         else None
-    doc = {
-        "id": exp_id,
+    # One collection object for the publication, named by its digest; every scan carries the same
+    # value, which is what puts them in one collection (D16/D17). No member list exists to disagree.
+    meta = (collections or {}).get(exp_id) or {}
+    coll = collection or store.write_collection(
+        meta.get("title") or ingestion.get("title") or exp_id,
+        citation=meta.get("citation") or ingestion.get("citation"),
+        source=meta.get("source") or {k: ingestion[k] for k in ("experiment_id", "source") if k in ingestion})
+    common = {
+        "collection": coll,
         "catalog": cat_id,
         "catalog_identity": cdoc["identity_digest"],
         "annotation": annot_id,
         # the source's own gene annotation when it is not the one attached (a known gap, not an error)
         "annotation_source": src_annot if src_annot and src_annot != annot_id else None,
         "allele_orientation_source": ingestion.get("allele_orientation_source"),
-        "significance": rule,
-        "search_index": store.put(encode_arrow(index, level), EXT_INDEX),
-        # the index by chromosome and the page counts, which the browser reads instead (split_index)
-        **split_index(store, index, chroms, level),
-        "n_phenotypes": len(entries),
-        # phenotypes with no nominal rows, no permuted group and no credible set: nothing says which
-        # chromosome they are on, so no build places them (on a subset build this includes phenotypes
-        # whose only credible sets lie on other chromosomes)
-        "unplaced": {"count": len(unplaced), "examples": unplaced[:5]},
-        "hits": hits,
-        "results": results,
-        # trans rows a subset build could not place (variant or phenotype on a chromosome outside it),
-        # and what the adapter left out (variants with no source alleles); null when there is no trans table
-        "trans": None if trans_doc is None else {k: v for k, v in trans_doc.items() if k != "types"},
-        "trans_excluded": ingestion.get("trans_eqtl_excluded"),
-        "gwas": gwas_doc,
         "source": {k: ingestion[k] for k in ("experiment_id", "source") if k in ingestion},
     }
-    store.write_pointer("experiments", exp_id, doc)
-    return doc
+    out = {}
+    gene_chr = _gene_chromosomes(store, annot_id)
+    for ptype in types:
+        a = acc[ptype]
+        dof, fit = dofs.get(ptype, (None, None))
+        rows = [r for r in index_rows if r["phenotype_type"] == ptype]
+        unplaced_t = [pid for t, pid in unplaced if t == ptype]
+        # the cis scan: phenotypes placed on a chromosome, which is what a cis window needs
+        cis_rows, cis_remap = _renumber([r for r in rows if r["chr"] is not None])
+        eid = f"{exp_id}_{ptype}_cis"
+        out[eid] = {
+            "id": eid, "kind": "qtl_cis", "phenotype_type": ptype, **common,
+            "dof": dof, "dof_fit": fit, "dof_source": "ingestion.json" if ptype in dofs else None,
+            "significance": rule,
+            "files": a["files"],
+            "hits": put_hits(cis_hit_recs[ptype], cis_remap),
+            **_experiment_index(store, cis_rows, CIS_INDEX_SCHEMA, chroms, level),
+            "counts": type_counts(pa.Table.from_pylist(cis_rows, schema=INDEX_SCHEMA)).get(ptype),
+            # this type's phenotypes nothing places on a chromosome: no nominal rows, no permuted
+            # group, no credible set. On a subset build this includes ones whose credible sets lie
+            # elsewhere.
+            "unplaced": {"count": len(unplaced_t), "examples": unplaced_t[:5]},
+            "precision": _precision(a, dof, codec),
+        }
+        tdoc = None if trans_doc is None else trans_doc["types"].get(ptype)
+        if tdoc:
+            trans_rows, trans_remap = _renumber([r for r in rows if r["trans_off"] is not None])
+            eid = f"{exp_id}_{ptype}_trans"
+            # No `significance`: the rule tests the permutation pass, which is a cis quantity.
+            out[eid] = {
+                "id": eid, "kind": "qtl_trans", "phenotype_type": ptype, **common,
+                "dof": dof, "dof_source": "ingestion.json" if ptype in dofs else None,
+                "file": tdoc["file"], "n_rows": tdoc["n_rows"],
+                "hits": put_hits(trans_hit_recs[ptype], trans_remap),
+                **_experiment_index(store, _place_by_gene(trans_rows, gene_chr, chroms), TRANS_INDEX_SCHEMA,
+                                    chroms, level, residue="search_index_unplaced"),
+                # this type's rows a subset build could not place, and what the adapter left out
+                # of this type for want of source alleles; both counted rather than silently dropped
+                "placement": tdoc["placement"],
+                "excluded": _trans_excluded(ingestion, ptype),
+                "precision": tdoc["precision"],
+            }
+    if gwas_doc:
+        eid = gwas_doc.get("id") or f"{exp_id}_gwas"
+        # **Its own collection, not this cohort's.** The DCM GWAS is Jurgens et al. 2024; TOPCHeF
+        # colocalized against it and did not produce it. Giving it the QTL collection's digest would
+        # move the misattribution this restructure exists to remove from a field into a digest --
+        # and would make the citation of one publication describe another's.
+        gmeta = (collections or {}).get(eid) or {}
+        gcoll = store.write_collection(gmeta.get("title") or gwas_doc.get("title") or eid,
+                                       citation=gmeta.get("citation"),
+                                       source=gmeta.get("source") or gwas_doc.get("source"))
+        out[eid] = {"id": eid, "kind": "gwas", "collection": gcoll,
+                    "catalog": cat_id, "catalog_identity": cdoc["identity_digest"],
+                    "allele_orientation_source": common["allele_orientation_source"],
+                    **{k: v for k, v in gwas_doc.items() if k != "id"}}
+    for eid, doc in out.items():
+        store.write_pointer("experiments", eid, doc)
+    return out
 
 
 def _dof(v) -> tuple:
@@ -775,9 +883,13 @@ def build_trans(store: qs.Store, con, src: str | None, cdoc: dict, chroms: list[
     con.register("ordtab", pd.DataFrame({"phenotype_type": [k[0] for k in ords], "phenotype_id": [k[1] for k in ords],
                                          "ord": np.fromiter(ords.values(), dtype=np.int64, count=len(ords))}))
     inb = "(" + ", ".join(f"'{c}'" for c in chroms) + ")"
-    total, out_var, out_ph = con.execute(f"""SELECT count(*), count(*) FILTER (WHERE t.chr NOT IN {inb}),
-        count(*) FILTER (WHERE t.chr IN {inb} AND o.ord IS NULL)
-        FROM {src} t LEFT JOIN ordtab o ON o.phenotype_type = t.phenotype_type AND o.phenotype_id = t.phenotype_id""").fetchone()
+    # per phenotype type, since each type is its own experiment and reports its own placement
+    placed = {pt: (int(total), int(out_var), int(out_ph)) for pt, total, out_var, out_ph in con.execute(f"""
+        SELECT t.phenotype_type, count(*), count(*) FILTER (WHERE t.chr NOT IN {inb}),
+               count(*) FILTER (WHERE t.chr IN {inb} AND o.ord IS NULL)
+        FROM {src} t LEFT JOIN ordtab o ON o.phenotype_type = t.phenotype_type AND o.phenotype_id = t.phenotype_id
+        GROUP BY 1""").fetchall()}
+    total, out_var, out_ph = (sum(v[i] for v in placed.values()) for i in range(3))
     j = f"""FROM {src} t JOIN ordtab o ON o.phenotype_type = t.phenotype_type AND o.phenotype_id = t.phenotype_id
         LEFT JOIN allsites s ON s.chr = t.chr AND s.pos = t.pos AND s.ref = t.ref AND s.alt = t.alt
         WHERE t.chr IN {inb}"""
@@ -812,6 +924,11 @@ def build_trans(store: qs.Store, con, src: str | None, cdoc: dict, chroms: list[
         parts, off = [], qs.HEADER_LEN
         lim = {"neglog10p": 0.0, "beta_over_se": 0.0, "se_rel": 0.0}
         worst = {"neglog10p": 0.0, "beta_over_se": 0.0, "se_rel": 0.0, "rows_compared": 0}
+        # One zstd frame per phenotype, in both versions. A frame starts with an absolute position,
+        # so a phenotype with more rows than a reader wants to inflate at once could later be written
+        # as several frames in one span with an index beside them -- that is the path for gap G12 --
+        # with no change to the frame layout. Nothing in hand needs it (`plans/2026-10-07-experiment-model.md`
+        # D20 is what it cost to build ahead of need), so a span is one frame today.
         for k in trans_frame_order(index_rows, runs):
             a, b = runs[k]
             fr = _encode_trans(codec, col, ref, alt, a, b, level)
@@ -827,8 +944,14 @@ def build_trans(store: qs.Store, con, src: str | None, cdoc: dict, chroms: list[
         name = store.put(body, EXT_TRANS)
         del parts, body
         lim["af"] = 0.5 / pf.AF_MAXQ
+        src_total, src_out_var, src_out_ph = placed.get(ptype, (0, 0, 0))
         doc["types"][ptype] = {"file": name, "n_rows": int(n), "n_phenotypes": int(len(starts)),
-                               "precision": {"theoretical_limit": lim, "measured_worst": worst}}
+                               "precision": {"theoretical_limit": lim, "measured_worst": worst},
+                               # this type's rows: written, in the source, and the two ways a subset
+                               # build leaves one out
+                               "placement": {"rows": int(n), "rows_in_source": src_total,
+                                             "rows_skipped_variant_outside_build": src_out_var,
+                                             "rows_skipped_phenotype_outside_build": src_out_ph}}
         doc["rows"] += int(n)
         with np.errstate(divide="ignore"):
             nlp = -np.log10(col["pvalue"])
@@ -874,52 +997,59 @@ def gene_trans_ranges(index_rows: list, gene_id: str) -> dict[str, tuple[int, in
 
 
 def check_trans_layout(index_rows: list, doc: dict, sizes: dict[str, int]) -> list[str]:
-    """Failures of the trans frame layout (SPEC.md section 9) against the search index: per phenotype type,
-    the frames tile the object from byte 64 to its end with no gap or overlap, and each gene's frames form
-    one gap-free run. `sizes` maps each trans object name to its size in bytes."""
+    """Failures of the trans frame layout (SPEC.md section 9) against one trans experiment's search
+    index: the frames tile the object from byte 64 to its end with no gap or overlap, and each gene's
+    frames form one gap-free run. `sizes` maps the object name to its size in bytes.
+
+    One experiment is one scan now, so this checks one object rather than looping over a `results`
+    list -- and `index_rows` are that experiment's own rows, every one of which has a frame."""
     fails = []
-    for r in doc["results"]:
-        t = r.get("trans")
-        if not t:
-            continue
-        ptype = r["phenotype_type"]
-        fr = sorted((x["trans_off"], x["trans_len"], x["gene_id"], x["phenotype_id"]) for x in index_rows
-                    if x["phenotype_type"] == ptype and x["trans_off"] is not None)
-        what = f"trans {ptype}"
-        if len(fr) != t["n_phenotypes"]:
-            fails.append(f"{what}: {len(fr)} index rows with frames, the pointer says {t['n_phenotypes']}")
-        end = qs.HEADER_LEN
-        for off, ln, _, pid in fr:
-            if off != end:
-                fails.append(f"{what}: frame of {pid} starts at {off}, the previous frame ends at {end}")
-                break
-            end = off + ln
-        if end != sizes.get(t["file"], end):
-            fails.append(f"{what}: frames end at {end}, the object is {sizes[t['file']]} bytes")
-        by_gene: dict[str, list] = {}
-        for off, ln, g, pid in fr:
-            if g is not None:
-                by_gene.setdefault(g, []).append((off, ln))
-        split = [g for g, xs in by_gene.items() if any(xs[i][0] != xs[i - 1][0] + xs[i - 1][1] for i in range(1, len(xs)))]
-        if split:
-            fails.append(f"{what}: {len(split)} genes whose frames are not one contiguous range, e.g. {split[:3]}")
+    name = doc.get("file")
+    if not name:
+        return fails
+    ptype = doc.get("phenotype_type")
+    fr = sorted((x["trans_off"], x["trans_len"], x.get("gene_id"), x["phenotype_id"]) for x in index_rows
+                if x["trans_off"] is not None)
+    what = f"trans {ptype}"
+    if len(fr) != len(index_rows):
+        fails.append(f"{what}: {len(fr)} of {len(index_rows)} index rows have a frame")
+    end = qs.HEADER_LEN
+    for off, ln, _, pid in fr:
+        if off != end:
+            fails.append(f"{what}: frame of {pid} starts at {off}, the previous frame ends at {end}")
+            break
+        end = off + ln
+    if end != sizes.get(name, end):
+        fails.append(f"{what}: frames end at {end}, the object is {sizes[name]} bytes")
+    by_gene: dict[str, list] = {}
+    for off, ln, g, pid in fr:
+        if g is not None:
+            by_gene.setdefault(g, []).append((off, ln))
+    split = [g for g, xs in by_gene.items() if any(xs[i][0] != xs[i - 1][0] + xs[i - 1][1] for i in range(1, len(xs)))]
+    if split:
+        fails.append(f"{what}: {len(split)} genes whose frames are not one contiguous range, e.g. {split[:3]}")
     return fails
 
 
 def read_trans(store: qs.Store, doc: dict, row: dict) -> dict | None:
     """Decode one phenotype's trans frame from its search-index row, or None when it has no trans rows.
-    Adds `chr` (variant chromosome names from the ordinals) and, with a dof, `se` = |beta| / t(p, dof)."""
+    Adds `chr` (variant chromosome names from the ordinals). `se` is stored in v2; under v1 it is
+    rebuilt as |beta| / t(p, dof), or NaN with no dof.
+
+    The codec comes from the object's own file header, since the frame magic differs by version
+    (`QTT2`, `QTT3`) and the search-index row does not say which wrote it."""
     if row.get("trans_off") is None:
         return None
-    r = next(x for x in doc["results"] if x["phenotype_type"] == row["phenotype_type"])
-    with open(store.immutable / r["trans"]["file"], "rb") as f:
+    with open(store.immutable / doc["file"], "rb") as f:
+        codec = qs.codec_for(qs.parse_file_header(f.read(qs.HEADER_LEN))["version"])
         f.seek(row["trans_off"])
-        fr = pf.decode_trans_frame(f.read(row["trans_len"]))
+        fr = codec.decode_trans_frame(f.read(row["trans_len"]))
     cdoc = store.load(qs.CATALOGS, doc["catalog"])
     names = [c["name"] for c in cdoc["chromosomes"]]
     fr["chr"] = [names[i - 1] for i in fr["ordinal"].tolist()]
-    dof = r["dof"]
-    fr["se"] = np.full(fr["n"], np.nan) if dof is None else np.abs(fr["beta"]) / pf.t_from_p(fr["p"], dof)
+    if "se" not in fr:
+        dof = doc["dof"]
+        fr["se"] = np.full(fr["n"], np.nan) if dof is None else np.abs(fr["beta"]) / pf.t_from_p(fr["p"], dof)
     return fr
 
 
@@ -1003,7 +1133,7 @@ def type_counts(index: pa.Table) -> dict:
 
 def index_parts(index: pa.Table, chroms: list[str]) -> tuple[dict[str, pa.Table], pa.Table]:
     """The search index's rows by chromosome (every chromosome in `chroms`, empty ones too, in ord
-    order) and its trans-only rows (`chr` null)."""
+    order) and its rows with no chromosome (`chr` null)."""
     chrom = index.column("chr").to_pylist()
     rows = {c: [] for c in chroms}
     other = sorted({c for c in chrom if c is not None} - set(chroms))
@@ -1016,34 +1146,129 @@ def index_parts(index: pa.Table, chroms: list[str]) -> tuple[dict[str, pa.Table]
     return {c: take(ix) for c, ix in rows.items()}, take(trans_only)
 
 
+def _renumber(rows: list[dict]) -> tuple[list[dict], dict[int, int]]:
+    """Rows with `ord` renumbered 0..n-1 in their existing order, and the old -> new map.
+
+    Each experiment owns its ordinal space (D10a), so the global numbering the build works in has to
+    be collapsed per experiment -- and `hits` records carry the same `ord`, which is why the map is
+    returned rather than discarded. The order is preserved: it is the search index's row order, which
+    `trans_frame_order` and `ord_ranges` both depend on."""
+    out, remap = [], {}
+    for i, r in enumerate(rows):
+        remap[r["ord"]] = i
+        out.append({**r, "ord": i})
+    return out, remap
+
+
+def _remap_hits(recs: np.ndarray, remap: dict[int, int]) -> np.ndarray:
+    """Hit records with `ord` moved into one experiment's ordinal space, dropping any record whose
+    phenotype is not in it. A cis experiment's hits hold leads and credible sets, a trans
+    experiment's hold trans rows, so every record reaching here should map -- but dropping rather
+    than raising keeps a subset build from failing on a phenotype it legitimately does not carry."""
+    if not len(recs):
+        return recs
+    keep = np.fromiter((int(o) in remap for o in recs["ord"].tolist()), dtype=bool, count=len(recs))
+    out = recs[keep].copy()
+    if len(out):
+        out["ord"] = np.fromiter((remap[int(o)] for o in out["ord"].tolist()), dtype=np.uint32, count=len(out))
+    return out
+
+
+def _trans_excluded(ingestion: dict, ptype: str) -> dict | None:
+    """What the adapter left out of one phenotype type's trans rows, or None when nothing was.
+
+    The contract key is `trans_excluded: {phenotype_type: {variants, rows, rows_in_source,
+    phenotypes_with_excluded_rows, reason}}`. Ingestion reports written before it carried TOPCHeF's
+    `trans_eqtl_excluded`, one record for the cohort with the eQTL and sQTL counts side by side; it
+    is read here in the same per-type shape so an existing report still builds."""
+    per = ingestion.get("trans_excluded")
+    if isinstance(per, dict):
+        return per.get(ptype)
+    old = ingestion.get("trans_eqtl_excluded")
+    if not old:
+        return None
+    rows = {"ge": old.get("trans_eqtl_rows", 0), "leafcutter": old.get("trans_sqtl_rows", 0)}.get(ptype, 0)
+    if not rows:
+        return None
+    return {"variants": old.get("variants"), "rows": rows, "rows_in_source": old.get("trans_eqtl_rows_total"),
+            "phenotypes_with_excluded_rows": old.get("genes_with_excluded_rows"), "reason": old.get("reason")}
+
+
+def _gene_chromosomes(store: qs.Store, annot_id: str) -> dict[str, str]:
+    """`gene_id -> chr` from the stored annotation, or empty when the annotation is not in the store
+    yet (validate reports that; the build does not fail on it). It places a trans phenotype that has
+    no cis result on its gene's chromosome, so its index row can be filed under a part."""
+    if not (store.root / "annotations" / f"{annot_id}.json").exists():
+        return {}
+    g = load_annotation(store, annot_id)["genes"]
+    return dict(zip(g.column("gene_id").to_pylist(), g.column("chr").to_pylist()))
+
+
+def _place_by_gene(rows: list[dict], gene_chr: dict[str, str], chroms: list[str]) -> list[dict]:
+    """Rows with a null `chr` given their gene's chromosome from the annotation, when that chromosome
+    is in this build. A phenotype with no cis result has no placement of its own; its gene's is the
+    right one for a trans index, since that is the chromosome the gene page will ask under."""
+    out = []
+    for r in rows:
+        if r["chr"] is None and gene_chr.get(r.get("gene_id")) in chroms:
+            r = {**r, "chr": gene_chr[r["gene_id"]]}
+        out.append(r)
+    return out
+
+
+def _experiment_index(store: qs.Store, rows: list[dict], schema: pa.Schema, chroms: list[str],
+                      level: int, *, residue: str | None = None) -> dict:
+    """One experiment's search index: the whole table, the per-chromosome parts the browser reads
+    (keyed by the phenotype's chromosome), and -- under `residue`, when a key is given -- the rows
+    with no chromosome at all. A cis scan has no such rows, since every one of its phenotypes has a
+    block on a chromosome, so it passes no key and a row without one is an error."""
+    t = pa.Table.from_pylist([{f: r.get(f) for f in schema.names} for r in rows], schema=schema)
+    out = {"search_index": store.put(encode_arrow(t, level), EXT_INDEX), "n_phenotypes": t.num_rows}
+    parts, rest = index_parts(t, chroms)
+    if rest.num_rows and residue is None:
+        raise ValueError(f"cis index: {rest.num_rows} rows with no chromosome")
+
+    def entry(p: pa.Table) -> dict:
+        return {"file": store.put(encode_arrow(p, level), EXT_INDEX), "rows": p.num_rows,
+                "ords": ord_ranges(p.column("ord").to_pylist())}
+    out["search_index_parts"] = {c: entry(p) for c, p in parts.items()}
+    if rest.num_rows:
+        out[residue] = entry(rest)
+    return out
+
+
 def split_index(store: qs.Store, index: pa.Table, chroms: list[str], level: int = ZSTD_LEVEL) -> dict:
-    """Put the search index parts and return the pointer keys `search_index_parts` (chromosome ->
-    `{file, rows, ords}`), `search_index_trans_only` (the same shape, or null) and `counts`. `build` and
-    `add_split` both come here."""
-    parts, trans_only = index_parts(index, chroms)
+    """Put a cis experiment's search index parts and return the pointer key `search_index_parts`
+    (chromosome -> `{file, rows, ords}`).
 
-    def entry(t: pa.Table) -> dict:
-        return {"file": store.put(encode_arrow(t, level), EXT_INDEX), "rows": t.num_rows,
-                "ords": ord_ranges(t.column("ord").to_pylist())}
-    return {"search_index_parts": {c: entry(t) for c, t in parts.items()},
-            "search_index_trans_only": entry(trans_only) if trans_only.num_rows else None,
-            "counts": type_counts(index)}
+    `search_index_trans_only` is gone: it held the rows with a null `chr`, which existed only because
+    one document served both scopes. A trans experiment's index is not split at all, so there is no
+    residue -- and a row with no chromosome reaching here is now an error rather than a category."""
+    parts, residue = index_parts(index, chroms)
+    if residue.num_rows:
+        raise ValueError(f"cis index: {residue.num_rows} rows with no chromosome")
+    return {"search_index_parts": {
+        c: {"file": store.put(encode_arrow(t, level), EXT_INDEX), "rows": t.num_rows,
+            "ords": ord_ranges(t.column("ord").to_pylist())} for c, t in parts.items()}}
 
 
-SPLIT_KEYS = ("search_index_parts", "search_index_trans_only", "counts")
+SPLIT_KEYS = ("search_index_parts", "search_index_unplaced")
 
 
 def _chroms_of(doc: dict, cdoc: dict) -> list[str]:
     """The chromosomes an experiment was built on, in variant catalog table order."""
-    built = {c for r in doc["results"] for c in r["files"]}
+    built = set(doc.get("files") or doc.get("hits") or {})
     return [c["name"] for c in cdoc["chromosomes"] if c["name"] in built]
 
 
 def add_split(store: qs.Store, exp_id: str, level: int = ZSTD_LEVEL) -> dict:
     """Give an experiment built before the split objects existed its `search_index_parts`,
-    `search_index_trans_only` and `counts`, from the search index it already names, and rewrite its
-    pointer (objects first). Returns the new pointer."""
+    from the search index it already names, and rewrite its pointer (objects first). Returns the new
+    pointer. A cis scan only: a trans scan's parts are written by `build` and carry an unplaced
+    residue this path does not produce."""
     doc = {k: v for k, v in store.load("experiments", exp_id).items() if k not in SPLIT_KEYS}
+    if doc.get("kind") != "qtl_cis":
+        raise ValueError(f"experiments/{exp_id}: kind {doc.get('kind')!r}; add-split serves cis scans only")
     parts = split_index(store, load_index(store, doc), _chroms_of(doc, store.load("variant_catalogs", doc["catalog"])), level)
     out = {}
     for k, v in doc.items():            # right after `search_index`, as `build` writes them
@@ -1093,42 +1318,48 @@ def migrate_index(store: qs.Store, exp_id: str, level: int = ZSTD_LEVEL) -> dict
 
 def check_split(store: qs.Store, doc: dict, cdoc: dict) -> list[str]:
     """The browser's parts agree with the search index: one part per chromosome built, each holding
-    exactly that chromosome's rows with the ord runs its entry lists, the trans-only rows likewise, and
-    `counts` recomputed from the index. Failures as strings (empty = pass)."""
+    exactly that chromosome's rows with the ord runs its entry lists, and for a trans scan the
+    `search_index_unplaced` part holding exactly the rows with no chromosome. Failures as strings.
+
+    A cis scan has no unplaced rows -- every phenotype in it has a block on a chromosome -- so one
+    is a failure there rather than a part."""
     where = f"experiments/{doc.get('id')}"
-    if not isinstance(doc.get("search_index_parts"), dict) or "counts" not in doc or "search_index_trans_only" not in doc:
-        return [f"{where}: no search_index_parts, search_index_trans_only or counts (the browser reads these; "
+    if doc.get("kind") not in qs.QTL_KINDS:
+        return []
+    if not isinstance(doc.get("search_index_parts"), dict):
+        return [f"{where}: no search_index_parts (the browser reads these; "
                 f"`python -m pipeline.results add-split`)"]
+    unplaced = doc.get("search_index_unplaced")
     names = [p["file"] for p in doc["search_index_parts"].values()] + [doc["search_index"]]
-    if doc["search_index_trans_only"]:
-        names.append(doc["search_index_trans_only"]["file"])
+    names += [unplaced["file"]] if unplaced else []
     if not all((store.immutable / n).exists() for n in names):
         return []                       # missing objects are reported by validate already
     index = load_index(store, doc)
     fails = []
     try:
-        parts, trans_only = index_parts(index, _chroms_of(doc, cdoc))
+        parts, residue = index_parts(index, _chroms_of(doc, cdoc))
     except ValueError as e:
         return [f"{where}: {e}"]
-    if set(parts) != set(doc["search_index_parts"]):
-        fails.append(f"{where}: search_index_parts chromosomes {sorted(doc['search_index_parts'])} != chromosomes built {sorted(parts)}")
-    want = dict(parts)
-    if trans_only.num_rows or doc["search_index_trans_only"]:
-        want["trans-only"] = trans_only
-    got = {c: e for c, e in doc["search_index_parts"].items()}
-    if doc["search_index_trans_only"]:
-        got["trans-only"] = doc["search_index_trans_only"]
+    want, got = dict(parts), dict(doc["search_index_parts"])
+    if doc.get("kind") == "qtl_cis":
+        if residue.num_rows:
+            fails.append(f"{where}: {residue.num_rows} index rows with no chromosome")
+    elif residue.num_rows or unplaced:
+        want["unplaced"] = residue
+        if unplaced:
+            got["unplaced"] = unplaced
+        else:
+            fails.append(f"{where}: {residue.num_rows} index rows with no chromosome and no search_index_unplaced")
+    if set(want) != set(got):
+        fails.append(f"{where}: search index parts {sorted(got)} != parts of the index {sorted(want)}")
     for c, e in got.items():
         if c not in want:
-            fails.append(f"{where} search index part {c}: no such rows in the index")
             continue
         t = decode_arrow((store.immutable / e["file"]).read_bytes(), f"{where} search index part {c}")
         if not t.equals(want[c]):
             fails.append(f"{where} search index part {c}: rows differ from the search index")
         if e.get("rows") != t.num_rows or e.get("ords") != ord_ranges(t.column("ord").to_pylist()):
             fails.append(f"{where} search index part {c}: rows or ords in the pointer do not describe the part")
-    if doc["counts"] != type_counts(index):
-        fails.append(f"{where}: counts {doc['counts']} != recomputed {type_counts(index)}")
     return fails
 
 
@@ -1138,15 +1369,20 @@ def load_index(store: qs.Store, doc: dict) -> pa.Table:
 
 
 def read_block(store: qs.Store, doc: dict, row: dict) -> dict:
-    """Decode one phenotype's block, given its search-index row.
+    """Decode one phenotype's block, given its search-index row, with the codec the object's own
+    file header names.
 
-    With `dof: null` (no usable fit, CONTRACT.md "Degrees of freedom") no slope can be rebuilt:
-    `slope` comes back all NaN and the reader has the stored -log10 p, SE and sign bit only. Any
-    stand-in dof would decode to slopes that look valid and are wrong."""
-    r = next(x for x in doc["results"] if x["phenotype_type"] == row["phenotype_type"])
-    buf = (store.immutable / r["files"][row["chr"]]).read_bytes()
-    dof = r["dof"]
-    out = pf.decode_gene_block(buf[row["blk_off"]:row["blk_off"] + row["blk_len"]], dof if dof is not None else 1,
+    Under v2 `beta` is stored and nothing is derived. Under v1 the slope is rebuilt from the dof,
+    and with `dof: null` (no usable fit, CONTRACT.md "Degrees of freedom") it cannot be: `slope`
+    comes back all NaN and the reader has the stored -log10 p, SE and sign bit only. Any stand-in
+    dof would decode to slopes that look valid and are wrong."""
+    buf = (store.immutable / doc["files"][row["chr"]]).read_bytes()
+    blk = buf[row["blk_off"]:row["blk_off"] + row["blk_len"]]
+    codec = qs.codec_for(qs.parse_file_header(buf)["version"])
+    if codec is not pf:
+        return codec.decode_gene_block(blk, expect_blk_len=row["blk_len"], details_version=DETAILS_VERSION)
+    dof = doc["dof"]
+    out = pf.decode_gene_block(blk, dof if dof is not None else 1,
                                expect_blk_len=row["blk_len"], details_version=DETAILS_VERSION)
     if dof is None:
         out["slope"] = np.full(len(out["slope"]), np.nan)
@@ -1174,17 +1410,18 @@ def main(argv: list[str] | None = None) -> int:
     args = ap.parse_args(argv)
     if args.cmd == "add-split":
         doc = add_split(qs.Store(args.store), args.id)
-        print(json.dumps({"parts": len(doc["search_index_parts"]), "counts": doc["counts"]}))
+        print(json.dumps({"parts": len(doc.get("search_index_parts") or {}), "counts": doc.get("counts")}))
         return 0
     if args.cmd == "migrate-index":
         doc = migrate_index(qs.Store(args.store), args.id)
-        print(json.dumps({"search_index": doc["search_index"], "parts": len(doc["search_index_parts"]),
-                          "counts": doc["counts"]}))
+        print(json.dumps({"search_index": doc["search_index"],
+                          "parts": len(doc.get("search_index_parts") or {}), "counts": doc.get("counts")}))
         return 0
     from .common import CHROMS
-    doc = build(qs.Store(args.store), args.id, args.tables, args.catalog, args.annotation, CHROMS,
-                codec=qs.codec_for(args.version))
-    print(json.dumps({k: v for k, v in doc.items() if k not in ("hits",)}, indent=1))
+    docs = build(qs.Store(args.store), args.id, args.tables, args.catalog, args.annotation, CHROMS,
+                 codec=qs.codec_for(args.version))
+    print(json.dumps({eid: {k: v for k, v in d.items() if k not in ("hits", "files", "search_index_parts")}
+                      for eid, d in sorted(docs.items())}, indent=1))
     return 0
 
 

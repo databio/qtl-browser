@@ -64,10 +64,12 @@ Rules:
     (its trans eQTL pairs) is ingested. Alleles are **not inferred** -- not from dbSNP by rsID, not
     from population frequency, not from any other study. A guessed allele that is wrong looks
     exactly like a right one once it is anchored, and it would carry a real VRS id.
-  - The exclusion is counted, not silent: `ingestion.json` records `trans_eqtl_excluded` with the
-    number of variants, the number of trans eQTL rows left out (and the total), the genes those rows
-    belong to, and the reason. The orientation counts list the same variants under the class
-    `no_source_alleles`.
+  - The exclusion is counted, not silent: `ingestion.json` records it per phenotype type under
+    `trans_excluded` -- `{phenotype_type: {variants, rows, rows_in_source,
+    phenotypes_with_excluded_rows, reason} | null}` -- because each type's trans scan is its own
+    experiment and reports only its own. TOPCHeF's adapter also keeps its cohort-level
+    `trans_eqtl_excluded` for its own invariant. The orientation counts list the same variants under
+    the class `no_source_alleles`.
   - Trans sQTL rows carry A1/A2 in the source and are unaffected.
   - This holds **until the authors supply the alleles** (asked for: A1/A2 on the trans eQTL files,
     or their `.bim` files). When they do, the variants enter as ordinary sites from the source's
@@ -346,8 +348,9 @@ table), so it equals v0's `gwas_dcm_bins.json`.
 
 Each adapter writes `ingestion.json` next to the tables. Beyond what individual rules above
 require, it records, per `phenotype_type`: the number of phenotypes, groups, and phenotypes with
-`nominal` rows (`has_nominal`), and whether `permuted.n_variants` was recounted from nominal or
-copied from the source. Every site dropped or held out of `sites` is counted there by reason.
+`nominal` rows (`has_nominal`), whether `permuted.n_variants` was recounted from nominal or
+copied from the source, and what was left out of that type's trans rows (`trans_excluded`, above).
+Every site dropped or held out of `sites` is counted there by reason.
 
 ## Orientation
 

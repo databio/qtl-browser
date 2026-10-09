@@ -1,40 +1,50 @@
-# qtlb format, version 1: the qtlstore
+# qtlb format, version 2: the qtlstore
 
 A **qtlstore** is a directory of content-addressed objects holding N experiments over M variant
-catalogs, every position anchored to a refget sequence. It is read over plain HTTP range requests,
-like v0. This document is the byte-level contract for what the builders write today:
+catalogs, every position anchored to a refget sequence. It is read over plain HTTP range requests.
+This document is the byte-level contract for what the builders write today:
 
 | module | writes |
 |---|---|
-| `pipeline/qtlstore.py` | object names, the 64-byte v1 header, variant catalog identity, orientation, `Store.validate`, store maintenance (`remove-experiment`, `gc`, `crosscat`) |
+| `pipeline/qtlstore.py` | object names, the 64-byte header, variant catalog identity, orientation, experiment kinds and collections, `store.json`, `Store.validate`, store maintenance (`remove-experiment`, `gc`, `crosscat`) |
 | `pipeline/catalog.py` | a variant catalog: per-chromosome variants files, variant index, rsID index |
 | `pipeline/annotation.py` | a gene/exon annotation object, its per-chromosome genes and exon models, and its gene lookup |
-| `pipeline/results.py` | an experiment: results files, hits files, search index and its per-chromosome parts, trans objects |
-| `pipeline/gwas.py` | an experiment's GWAS object: per-chromosome GWAS files, the GWAS index and the bin summary |
-| `pipeline/dof.py` | the degrees-of-freedom fit an experiment records |
-| `pipeline/packfmt_v1.py` | the v1 codec pieces (zstd framing, variant page header, results block, quantizers, SNP codes, hits, trans and GWAS frames) |
+| `pipeline/results.py` | the QTL experiments of a cohort, one per scan: results files, hits files, search index and its per-chromosome parts, trans objects |
+| `pipeline/gwas.py` | a GWAS experiment: per-chromosome GWAS files, the GWAS index and the bin summary |
+| `pipeline/dof.py` | the degrees-of-freedom fit a QTL experiment records |
+| `pipeline/packfmt_v2.py` | the codec: the quantizers, the results block, the trans frame and the GWAS block |
+| `pipeline/packfmt_v1.py` | the codec-free pieces every version shares (zstd framing, variant pages, SNP codes, hits records, the GWAS index payload), and the version 1 layouts for reading a v1 store |
+| `pipeline/build_store.py` | one command from contract tables to a validated store |
+| `pipeline/upload.py` | the store into the bucket the browsers read, objects first and `store.json` last |
+| `pipeline/which_codec.py`, `pipeline/scan_codes.py` | which codec wrote each object, read from the bytes; a sweep of every code in every results block |
 | `pipeline/CONTRACT.md` | the input tables every builder reads (the ingestion contract) |
 
-`pipeline/packfmt_v0.py` is the v0 codec; no v1 module imports it (`test_qtlstore.py` checks). The two
-share code by copy: where v1 reuses a v0 layout, the v1 function is the v0 one byte for byte.
+`qtlstore.FORMAT_VERSION` is 2 and is what every builder writes unless told otherwise; `SUPPORTED_VERSIONS`
+is `(1, 2)`, because the live bucket holds a version 1 store until the version 2 release. The
+builders import `packfmt_v1` only for the shared pieces and take the codec as a parameter
+(`test_qtlstore.codecs_do_not_mix`); `pipeline/packfmt_v0.py` is the v0 codec and nothing current
+imports it.
 
 When this document and the code disagree, one of them is wrong and both are fixed in the same
 change. Section 18 lists what is still open.
 
-Measurements behind the design choices (page size, codec, dof, precision, the reference allele
-checks) are in the analysis repo, `qtlb-format/docs/EVIDENCE.md`. They were taken on v0 files;
-where v1 reuses a v0 layout unchanged (variant pages, result blocks, quantizers) they carry over.
+Measurements behind the design choices are in `plans/2026-10-07-qtlstore-v2.md` (the triple, its
+precision, the genome-wide sizes), `plans/2026-10-07-experiment-model.md` (one experiment per scan,
+collections, what merging the trans and GWAS layouts cost when it was tried) and, for the pieces
+that date from v0 (page size, SNP codes, the reference allele checks), the analysis repo's
+`qtlb-format/docs/EVIDENCE.md`.
 
 **Terms.** A **variant catalog** is the list of variants a study's results point to: for each variant
 its sequence digest, position, `ref` and `alt`, stored as per-chromosome variants files, plus the
 variant index (vidx) and the rsID index. It is not the **eQTL Catalogue**, the EBI resource one of
-the experiments comes from; this document spells that one out in full every time.
+the experiments comes from; this document spells that one out in full every time. An **experiment**
+is one scan: one cis QTL scan, one trans QTL scan, or one GWAS (section 8). A **collection** is the
+publication a set of experiments came from, named by a content-addressed document (section 8).
 
-**Status.** Builders and `Store.validate` exist and pass on a genome-wide two-experiment store
-(`/scratch/ns5bc/qtl-browser/store-genome-v1f` on Rivanna: TOPCHeF, with its trans results and the DCM
-GWAS, and GTEx v8 heart LV). Marked **(future)** below: the VRS-id index and `store.json` refget URLs.
-The browser reader for v1 is `ui-topchef/` (topchef.databio.org) and `ui/` (the general multi-study fork);
-this document is their reference.
+**Status.** Builders and `Store.validate` pass on a genome-wide store built locally from the TOPCHeF
+contract tables (`data/derived/store-genome-v2`: four TOPCHeF experiments and the DCM GWAS, 341
+objects, 4.53 GB). Nothing version 2 is uploaded yet. The browser readers in `ui-topchef/` and `ui/`
+read version 1 and are being moved to this document.
 
 ## 1. Conventions
 
@@ -57,12 +67,14 @@ this document is their reference.
 
 ```
 <store>/
-  store.json                    mutable: name, format version, ids at each pointer level, refget URLs
-  immutable/<digest>.<ext>      every object; <digest> = sha512t24u of the object's bytes
+  store.json                    mutable: name, format version, refget URLs, the ids at each pointer level,
+                                and for experiments their kind and collection
+  immutable/<digest>.<ext>      every object; <digest> = sha512t24u of the object's bytes. Collection
+                                documents live here too, as <digest>.json
   variant_catalogs/<id>.json    mutable pointer: one variant catalog
   overlaps/<id>.json            mutable pointer: one catalog overlap index (section 19), derived
   annotations/<id>.json         mutable pointer: one gene annotation release
-  experiments/<id>.json         mutable pointer: one experiment (variant catalog + annotation + results)
+  experiments/<id>.json         mutable pointer: one experiment, which is one scan (section 8)
 ```
 
 Four mutable levels; everything else is content-addressed. `overlaps/` is derived: it can be
@@ -71,24 +83,31 @@ rebuilt from the catalogs, and a store without it is complete. This mirrors a re
 
 **Write order.** Objects first, then pointers, then `store.json`. `Store.write_pointer` refuses a
 pointer that names an object not yet in `immutable/`. `Store.write_store` lists whatever pointer
-files exist when it runs. A reader that starts from any level never meets a dangling name.
+files exist when it runs. A reader that starts from any level never meets a dangling name. An
+upload follows the same order (`pipeline/upload.py`): until `store.json` is replaced the live store
+is the old one with every old object still present, and a reader mid-session keeps working.
 
 **`store.json`:**
 
 ```json
-{"name": "store-genome-v1f", "format_version": 1, "refget": [],
- "variant_catalogs": ["gtex_v8_heart_lv_grch38", "topchef_grch38"],
- "annotations": ["gencode_v34", "gencode_v39"],
- "experiments": ["gtex_v8_heart_lv", "topchef"]}
+{"name": "topchef", "format_version": 2, "refget": [],
+ "experiments": {
+   "topchef_ge_cis":           {"kind": "qtl_cis",   "collection": "T9HbqRhi22izfYL7gVk-NUfsLP2OpRhd.json"},
+   "topchef_ge_trans":         {"kind": "qtl_trans", "collection": "T9HbqRhi22izfYL7gVk-NUfsLP2OpRhd.json"},
+   "topchef_leafcutter_cis":   {"kind": "qtl_cis",   "collection": "T9HbqRhi22izfYL7gVk-NUfsLP2OpRhd.json"},
+   "topchef_leafcutter_trans": {"kind": "qtl_trans", "collection": "T9HbqRhi22izfYL7gVk-NUfsLP2OpRhd.json"},
+   "dcm_jurgens2024_biobanks": {"kind": "gwas",      "collection": "x9WHpI55YzTxpa95Ngk6dld7aR8pQHdR.json"}},
+ "variant_catalogs": ["topchef_grch38"],
+ "annotations": ["gencode_v34"],
+ "overlaps": []}
 ```
 
-(The genome-wide two-experiment store on Rivanna, `/scratch/ns5bc/qtl-browser/store-genome-v1f/`.)
-The pointer level of variant catalogs is the directory `variant_catalogs/` and the `store.json` key
-`variant_catalogs` (stores built before 2026-09-24 used `catalogs`). An experiment names its variant
-catalog in its own key `catalog` (section 8).
-
-Id lists are sorted. `refget` is a list of refgetstore URLs; `store.sbatch` writes `[]` today
-**(future: filled)**.
+`experiments` is a **map**, generated by `write_store` from the documents on disk, carrying each
+experiment's `kind` and `collection` so a reader can group experiments by publication and route by
+kind from the first file it fetches, without opening any pointer; `validate` checks every entry
+against its document. The other id lists are sorted. `refget` is a list of refgetstore URLs,
+written `[]` today **(future: filled)**. An experiment names its variant catalog in its own key
+`catalog` (section 8).
 
 ## 3. Object names
 
@@ -108,35 +127,37 @@ pointer that names it.
 | ext | object | kind (header) |
 |---|---|---|
 | `qbv` | variants file, one per variant catalog chromosome | 1 |
-| `qbe` | results file, one per (experiment, phenotype type, chromosome) | 2 |
-| `qbg` | GWAS file, one per (experiment GWAS, chromosome) | 4 |
-| `qgi` | GWAS index, one per experiment GWAS | 5 |
-| `qbt` | trans object, one per (experiment, phenotype type) | 6 |
-| `qbh` | hits file, one per (experiment, chromosome) | 7 |
+| `qbe` | results file, one per (cis experiment, chromosome) | 2 |
+| `qbg` | GWAS file, one per (GWAS experiment, chromosome) | 4 |
+| `qgi` | GWAS index, one per GWAS experiment | 5 |
+| `qbt` | trans object, one per trans experiment | 6 |
+| `qbh` | hits file, one per (QTL experiment, chromosome) | 7 |
 | `qbr` | rsID index, one per variant catalog | 8 |
 | `qbx` | variant index, one per variant catalog | 9 |
 | `qgl` | gene lookup, one per annotation | 10 |
 | `qbo` | catalog overlap index, one per store (section 19) | 11 |
 | `arrow.zst` | annotation gene and exon tables and their per-chromosome genes and exon models, experiment search index and its per-chromosome parts, GWAS bin summary | no header |
+| `json` | a collection document (section 8) | no header |
 
-Kind 3 is unused in v1 (v0's detail-less sQTL kind). Kinds 4-6 keep v0's numbers for the same
-content (GWAS, GWAS index, trans) with v1 layouts. The codec module is `pipeline/packfmt_v1.py`
-(plan step 8's separate v1 codec); kinds were not renumbered.
+Kind 3 is unused (v0's detail-less sQTL kind). Kinds 4-6 keep v0's numbers for the same content
+(GWAS, GWAS index, trans); kinds were not renumbered across versions, the header's version byte
+says which layout a body has.
 
 A pointer document names objects by bare `<digest>.<ext>` strings. `qtlstore.object_names`
 collects every string anywhere in a pointer that matches the name pattern; those are the objects
 `Store.validate` resolves.
 
-## 4. File header, v1 (64 bytes)
+## 4. File header (64 bytes)
 
-Every binary object (`qbv`, `qbe`, `qbg`, `qgi`, `qbt`, `qbh`, `qbr`, `qbx`, `qgl`) starts with this header.
-Struct `<4sBBH8sIII32s4x>` (`qtlstore._HEADER`).
+Every binary object (`qbv`, `qbe`, `qbg`, `qgi`, `qbt`, `qbh`, `qbr`, `qbx`, `qgl`, `qbo`) starts with this
+header. Struct `<4sBBH8sIII32s4x>` (`qtlstore._HEADER`). The header is the same in versions 1 and 2;
+only byte 5 differs.
 
 | offset | type | field |
 |---|---|---|
 | 0 | 4 bytes | magic `QTLB` |
 | 4 | u8 | kind, 1..255 (section 3 table) |
-| 5 | u8 | version: the layout of the file's **body**, 1 here. A v2 store writes 2 (`plans/2026-10-07-qtlstore-v2.md`); the header itself is unchanged, and a GWAS block carries no magic of its own, so this byte is the only thing in a `.qbg` that names the codec that wrote its rows |
+| 5 | u8 | version: the layout of the file's **body**, 2 for everything a current build writes, 1 in the live store until the release. A GWAS block carries no magic of its own, so this byte is the only thing in a `.qbg` that names the codec that wrote its rows, and `validate` compares every object's byte to `store.json`'s `format_version` |
 | 6 | u16 | header length: 64 |
 | 8 | 8 bytes | chromosome name, ASCII, 1-8 bytes, no NUL inside, zero-padded; `all` for objects that span a whole variant catalog |
 | 16 | u32 | count (by kind, below) |
@@ -157,10 +178,10 @@ Struct `<4sBBH8sIII32s4x>` (`qtlstore._HEADER`).
 | 9 variant index | chromosomes | variants per page (512) | `all` | the **collection** digest |
 | 10 gene lookup | buckets (1024) | 0 | `all` | the annotation's `identity_digest` |
 
-`seq_digest` is the one field v1 adds: a file found alone says which exact sequence its positions
-index. For the kinds whose chromosome is `all` (5, 6, 8, 9) the same 32 bytes carry the seqcol
-collection digest instead, since they span sequences. The gene lookup (kind 10) indexes no sequence,
-so they carry the identity digest of the annotation it was built from.
+`seq_digest` is what lets a file found alone say which exact sequence its positions index. For the
+kinds whose chromosome is `all` (5, 6, 8, 9, 11) the same 32 bytes carry the seqcol collection digest
+instead, since they span sequences. The gene lookup (kind 10) indexes no sequence, so it carries the
+identity digest of the annotation it was built from.
 
 **What a reader checks.** `Store.validate` checks every header against its pointer at build time
 (section 14). The browser does not send a separate request for a header: it checks a header only
@@ -179,7 +200,7 @@ than failing.
 (`file_header(1, "chr1", 3, 512, 2, "Ya6Rs7DHhDeg7YaOSg1EoNi3U_nQ9SvO")`):
 
 ```
-00: 51 54 4c 42 01 01 40 00 63 68 72 31 00 00 00 00   QTLB, kind 1, v1, hlen 64, "chr1"
+00: 51 54 4c 42 01 02 40 00 63 68 72 31 00 00 00 00   QTLB, kind 1, version 2, hlen 64, "chr1"
 10: 03 00 00 00 00 02 00 00 02 00 00 00 59 61 36 52   count 3, page 512, n_cis 2, "Ya6R...
 20: 73 37 44 48 68 44 65 67 37 59 61 4f 53 67 31 45
 30: 6f 4e 69 33 55 5f 6e 51 39 53 76 4f 00 00 00 00   ...9SvO", reserved
@@ -259,7 +280,7 @@ Ya6Rs7DHhDeg7YaOSg1EoNi3U_nQ9SvO\t11012\tC\tG\n
 stores built before the rsID-text fix, such as `store-two-sqtlfix`, did.)
 
 - `chromosomes` is the **chromosome table**. Its order is the ordinal order: ordinal = 1-based
-  position in this list. There is no fixed chr1..chrX list in v1.
+  position in this list. There is no fixed chr1..chrX list.
 - `attributes` lists which of `af, ma_samples, ma_count, rs_number, match` the sites table
   carried, in that order: exactly what the pages store. The rsID text is never listed; a reader
   forms it as `rs<rs_number>` (the builder checked the source's `rsid` agrees).
@@ -337,8 +358,8 @@ Then zero padding of the page to a multiple of 4.
 ```
 
 `n_pages_cis = ceil(n_cis / P)`, `n_pages_trans = ceil(n_trans / P)`. No trailing bytes. Unlike v0
-(`QVX0`) there are no reserved fields, no `n_frames` and no `hits_off`, because v1 hits are not
-paged (section 8). Chromosome names are not stored: they are the variant catalog JSON's table, in order.
+(`QVX0`) there are no reserved fields, no `n_frames` and no `hits_off`, because hits are paged in
+their own files (section 8). Chromosome names are not stored: they are the variant catalog JSON's table, in order.
 
 **Page of a vidx:** below `n_cis`, page `vidx // P`; otherwise page `n_pages_cis + (vidx - n_cis) // P`.
 Bytes `page_off[k] .. page_off[k+1] - 1`. **Page of a position:** within a section, the last page
@@ -483,81 +504,141 @@ It returns `counts: {as_is, swapped, dropped}`.
 
 ## 8. Experiment
 
-One experiment = one cohort and tissue, possibly several phenotype types, over one variant catalog and one
-annotation (`results.build`). The phenotype type (`ge`, `leafcutter`, ...) is data, not a file
-kind: one code path and one block layout serve every type.
+One experiment = **one scan**: one cis QTL scan, one trans QTL scan, or one GWAS, over one variant
+catalog and, for the QTL kinds, one annotation (`results.build`, `gwas.build`). A cohort that
+published eQTL and sQTL results in cis and trans is four experiments; a GWAS it was colocalized
+against is a fifth, its own, because the cohort did not produce it. So TOPCHeF is `topchef_ge_cis`,
+`topchef_ge_trans`, `topchef_leafcutter_cis`, `topchef_leafcutter_trans`, and beside them
+`dcm_jurgens2024_biobanks`.
+
+`kind` is a **closed** enum, `qtl_cis | qtl_trans | gwas` (`qtlstore.EXPERIMENT_KINDS`), and it
+decides the document's shape and the object kinds it names. The rule for what is open and what is
+closed: open where the value is a label, closed where the value selects a layout. The phenotype type
+(`ge`, `leafcutter`, a protein assay) is a label, so it is open and one code path and one block
+layout serve every type; `kind` picks the layout, so a reader that meets one it does not know must
+refuse rather than show a partial store as complete. Adding a kind is a version bump.
+
+Ids are `<cohort>_<phenotype_type>_<scope>` for the QTL kinds, derived by the builder from the stem
+it is given, and the adapter's own id for a GWAS. They are URL-visible and are what a deployment
+names, so they are hard to change later.
+
+### Collections
+
+A collection is the publication a set of experiments came from. It is a **field, not a pointer
+level**: each experiment carries `collection`, the object name of a small content-addressed JSON
+document, and experiments carrying the same name are in the same collection. Membership is derived
+by matching, never declared, so there is no member list to keep in agreement, and the digest
+proves that the members share one copy of the citation.
+
+```json
+{"title": "Dilated cardiomyopathy GWAS, Jurgens et al. 2024 (biobanks-only meta-analysis)",
+ "citation": {},
+ "source": {"file": "Jurgens_DCM_GWAS_META_BiobanksOnly.tsv.gz", "config_key": "dcm_gwas",
+            "n_cases": 5022, "n_controls": 932941, "rows_with_grch38_position_and_p_above_0": 12504079},
+ "parent": null}
+```
+
+`Store.write_collection(title, citation, source, parent)` writes it with sorted keys, so identical
+metadata is one object. `parent` is another collection's object name, for nesting; a chain is
+followed to its root and the depth is capped at 16. A cycle is impossible among well-formed objects,
+since each name depends on the other's bytes; the loop guard exists only so the walk terminates on
+a store whose bytes no longer match their names, which `validate` reports separately. **Members
+need not agree on anything**: a collection records who published what together, not that the
+results are comparable, and one publication can release a GRCh37 scan beside a GRCh38 one. A reader
+putting two experiments on one axis compares their catalogs itself.
+
+`store.json` carries every experiment's `collection` (section 2), so grouping is a `GROUP BY` over the
+first file fetched and a collections page costs one fetch per distinct document, each of which
+caches forever.
 
 ### `experiments/<id>.json`
 
+Every kind has `id`, `kind`, `collection`, `catalog`, `catalog_identity`, `allele_orientation_source`,
+`source` and `precision`; the two QTL kinds add `annotation`, `annotation_source`, `phenotype_type`,
+`dof`, `dof_source`, a search index with its parts, and `hits`. What differs is below.
+
 ```json
-{"id": "topchef",
- "catalog": "topchef_grch38",
- "catalog_identity": "<32>",
- "annotation": "gencode_v34",
- "annotation_source": null,
+{"id": "topchef_ge_cis", "kind": "qtl_cis", "phenotype_type": "ge",
+ "collection": "T9HbqRhi22izfYL7gVk-NUfsLP2OpRhd.json",
+ "catalog": "topchef_grch38", "catalog_identity": "<32>",
+ "annotation": "gencode_v34", "annotation_source": null,
  "allele_orientation_source": "topchef_refcheck_a2_is_ref",
- "significance": {"column": "p_perm", "op": "<", "threshold": 0.05, "label": "Permutation p"},
- "search_index": "<digest>.arrow.zst",
- "search_index_parts": {"chr21": {"file": "<digest>.arrow.zst", "rows": 986, "ords": [[0, 189], [703, 1498]]}},
- "search_index_trans_only": {"file": "<digest>.arrow.zst", "rows": 53, "ords": [[686, 702], [3565, 3600]]},
- "counts": {"ge": {"phenotypes": 686, "with_rows": 686, "significant": 372, "significant_genes": 372},
-            "leafcutter": {"phenotypes": 2862, "with_rows": 2862, "significant": 512, "significant_genes": 204}},
- "n_phenotypes": 0,
+ "source": {"experiment_id": "topchef", "source": {"zenodo": "zenodo_21382723", "archives": ["..."]}},
+ "dof": 435, "dof_fit": null, "dof_source": "ingestion.json",
+ "significance": {"column": "p_perm", "op": "<", "threshold": 0.05},
+ "files": {"chr1": "<digest>.qbe"},
+ "hits": {"chr1": "<digest>.qbh"},
+ "search_index": "<digest>.arrow.zst", "n_phenotypes": 19423,
+ "search_index_parts": {"chr1": {"file": "<digest>.arrow.zst", "rows": 1959, "ords": [[0, 1958]]}},
+ "counts": {"phenotypes": 19423, "with_rows": 19423, "significant": 10220, "significant_genes": 10220},
  "unplaced": {"count": 0, "examples": []},
- "hits": {"chr21": "<digest>.qbh"},
- "results": [
-   {"phenotype_type": "ge", "dof": 435, "dof_fit": null, "dof_source": "ingestion.json",
-    "n_phenotypes": 0, "files": {"chr21": "<digest>.qbe"},
-    "precision": {"neglog10p_max_error": 0.0, "slope_se_max_rel_error": 0.0,
-                  "slope_max_error_over_se": 0.0, "slope_rows_compared": 0, "af_max_error": 7.63e-06},
-    "trans": {"file": "<digest>.qbt", "n_rows": 0, "n_phenotypes": 0,
-              "precision": {"neglog10p_max_error": 0.0, "beta_max_error": 0.0, "af_max_error": 7.63e-06}}},
-   {"phenotype_type": "leafcutter", "dof": 480, "...": "..."}],
- "trans": {"rows": 0, "rows_in_source": 0, "rows_skipped_variant_outside_build": 0,
-           "rows_skipped_phenotype_outside_build": 0},
- "trans_excluded": {"variants": 32765, "trans_eqtl_rows": 37951, "...": "..."},
- "gwas": {"id": "dcm_jurgens2024_biobanks", "title": "...", "files": {"chr21": "<digest>.qbg"},
-          "index": "<digest>.qgi", "n_rows": 0, "rows_by_chrom": {}, "rows_sharing_a_site": 0,
-          "block_rows": 2048, "n_values": [],
-          "bins": {"file": "<digest>.arrow.zst", "bin_bp": 5000000, "n_bins": 0},
-          "orientation": {}, "source": {}},
- "source": {"experiment_id": "topchef", "source": {}}}
+ "precision": {"theoretical_limit": {"neglog10p": 1.27e-03, "beta_over_se": 1.09e-03, "se_rel": 2.34e-05, "af": 7.63e-06},
+               "measured_worst": {"neglog10p": 1.27e-03, "beta_over_se": 1.04e-03, "se_rel": 2.34e-05, "rows_compared": 123458053}}}
+```
+
+```json
+{"id": "topchef_ge_trans", "kind": "qtl_trans", "phenotype_type": "ge",
+ "collection": "T9HbqRhi22izfYL7gVk-NUfsLP2OpRhd.json",
+ "catalog": "topchef_grch38", "catalog_identity": "<32>",
+ "annotation": "gencode_v34", "annotation_source": null,
+ "allele_orientation_source": "topchef_refcheck_a2_is_ref", "source": {"...": "..."},
+ "dof": 435, "dof_source": "ingestion.json",
+ "file": "<digest>.qbt", "n_rows": 2642166,
+ "hits": {"chr1": "<digest>.qbh"},
+ "search_index": "<digest>.arrow.zst", "n_phenotypes": 19440,
+ "search_index_parts": {"chr1": {"file": "<digest>.arrow.zst", "rows": 1959, "ords": [[0, 1958]]}},
+ "search_index_unplaced": {"file": "<digest>.arrow.zst", "rows": 16, "ords": [[19423, 19438]]},
+ "placement": {"rows": 2642166, "rows_in_source": 2642166,
+               "rows_skipped_variant_outside_build": 0, "rows_skipped_phenotype_outside_build": 0},
+ "excluded": {"variants": 32765, "rows": 37951, "rows_in_source": 2680117,
+              "phenotypes_with_excluded_rows": 7200, "reason": "..."},
+ "precision": {"theoretical_limit": {"...": "..."}, "measured_worst": {"...": "..."}}}
+```
+
+```json
+{"id": "dcm_jurgens2024_biobanks", "kind": "gwas",
+ "collection": "x9WHpI55YzTxpa95Ngk6dld7aR8pQHdR.json",
+ "title": "Dilated cardiomyopathy GWAS, Jurgens et al. 2024 (biobanks-only meta-analysis)",
+ "catalog": "topchef_grch38", "catalog_identity": "<32>",
+ "allele_orientation_source": "topchef_refcheck_a2_is_ref",
+ "files": {"chr1": "<digest>.qbg"}, "index": "<digest>.qgi",
+ "n_rows": 12494731, "rows_by_chrom": {"chr1": 985110}, "rows_sharing_a_site": 1593062,
+ "block_rows": 2048, "n_values": [42637, "..."],
+ "bins": {"file": "<digest>.arrow.zst", "bin_bp": 5000000, "n_bins": 569},
+ "precision": {"theoretical_limit": {"...": "..."}, "measured_worst": {"...": "..."}},
+ "orientation": {"as_is": 10401887, "swapped": 2092846, "dropped": 9346, "...": "..."},
+ "source": {"file": "...", "n_cases": 5022, "n_controls": 932941, "...": "..."}}
 ```
 
 - `catalog_identity` copies the variant catalog's `identity_digest` at build time.
 - `annotation_source` is the source's own annotation when it differs from the one attached
-  (a known gap, reported), else null.
-- `significance` comes from the adapter's `ingestion.json`; absent there means `p_perm < 0.05`.
-  `column` names **any numeric column of `permuted`**, `op` is one of `<` `<=` `>` `>=`,
-  `threshold` is a number, and `label` is what a reader shows the metric as ("Permutation p",
-  "Bonferroni p"). The builder refuses a rule whose column `permuted` does not carry.
-  `p_perm` and `p_beta` are the conventional names for a tensorQTL-family permutation pass, not the
-  only possible metrics: a study whose source ran PLINK2 `--glm` or MatrixEQTL has neither, and may
-  declare a rule on whatever it does publish or compute.
-  **`significance` may be `null`**: the source assessed no significance. Then every `significant`
-  below is null too -- which is not false. "Never assessed" and "tested and not significant" are
-  different claims, and a reader that prints the second for the first is lying for the study.
-  Every `significant` below means "the group's `column` passes the rule", and `sig_value` is the
-  value that was tested, whichever column it came from.
-- `unplaced` counts phenotypes that no nominal row, permuted group or credible set places on a
-  chromosome.
-- `results[].files` has one entry per chromosome built, including chromosomes with no blocks (a
-  header-only file).
-- `precision` per results set: `neglog10p_max_error` = the largest `nlp_max / 131066` over its
-  blocks, `slope_se_max_rel_error` = the largest `expm1((lse_max - lse_min) / 65532)`,
-  `af_max_error` = `0.5 / 65534` (worst-case bounds, section 13), and
-  `slope_max_error_over_se`, **measured**: the largest |slope rebuilt from the stored codes - source
-  beta| / source se over every row the builder can rebuild a slope for (`slope_rows_compared`
-  rows: p above 0, SE present, finite source beta and se). Null when `dof` is null.
-- `results[].trans` is the phenotype type's trans object (section 9), null when it has no trans rows.
-  Top-level `trans` counts the rows (a subset build skips rows whose variant or phenotype lies outside
-  it, counted); it is null when the experiment has no trans table. `trans_excluded` copies the
-  adapter's count of trans rows left out because their variants have no source alleles (section 12).
-- `gwas` is the experiment's GWAS object (section 10), or null.
+  (a known gap, reported), else null. A GWAS has no annotation: its one phenotype is a trait.
+- `significance` is a cis scan's rule, from the adapter's `ingestion.json`; absent there means
+  `p_perm < 0.05`. `column` names **any numeric column of `permuted`**, `op` is one of `<` `<=` `>`
+  `>=`, `threshold` is a number, and `label` is what a reader shows the metric as ("Permutation p",
+  "Bonferroni p"). The builder refuses a rule whose column `permuted` does not carry. `p_perm` and
+  `p_beta` are the conventional names for a tensorQTL-family permutation pass, not the only possible
+  metrics: a study whose source ran PLINK2 `--glm` or MatrixEQTL has neither, and may declare a rule
+  on whatever it does publish or compute. **`significance` may be `null`**: the source assessed no
+  significance. Then every `significant` below is null too, which is not false. "Never assessed"
+  and "tested and not significant" are different claims, and a reader that prints the second for
+  the first is lying for the study. Every `significant` below means "the group's `column` passes
+  the rule", and `sig_value` is the value that was tested, whichever column it came from. A trans
+  scan carries no rule: the permutation pass is a cis quantity.
+- `unplaced`, on a cis scan, counts its phenotypes that no nominal row, permuted group or credible
+  set places on a chromosome.
+- `files` has one entry per chromosome built, including chromosomes with no blocks (a header-only
+  file). A trans scan has one object, `file`, with chromosome `all`.
+- `placement` and `excluded`, on a trans scan, are that type's own: its rows written, in the source,
+  and skipped by a subset build; and what its adapter left out for want of source alleles
+  (section 12), null when nothing was.
+- `precision` has one shape in every kind (section 13).
 
 ### Degrees of freedom
 
-`results[].dof` is what a reader uses to rebuild a slope. From `ingestion.json` `dof[phenotype_type]`:
+`dof` is **provenance**: recorded for a QTL scan, reported, used by nothing that decodes. Every
+stored value is decoded from its own code and a null `dof` costs an experiment nothing. From
+`ingestion.json` `dof[phenotype_type]`:
 
 - an integer (TOPCHeF publishes 435 for `ge`, 480 for `leafcutter`): stored as is, `dof_fit` null;
 - a `dof.fit` result (eQTL Catalogue): stored when `usable`, else **`dof: null`**. `dof_fit` keeps
@@ -569,52 +650,58 @@ with finite beta, `se > 0` and `1e-300 < p < 0.5`. It runs on a uniform sample (
 the same count from the large-|t| tail. `residual_log10p` is the larger of the uniform residual and
 the tail residual at the uniform dof. **usable** = residual at most 0.01 and neither minimum at a
 grid edge. `identified` (reported, not gating) = both fits agree and the runner-up is at least 2x
-worse on the tail.
-
-**`dof: null` means no slope.** A reader of a results set with `dof: null` shows the stored
--log10 p, SE and the sign bit, and no slope value (`results.read_block` returns NaN slopes). It
-must not substitute any other dof: a stand-in dof decodes to slopes that look valid and are wrong.
+worse on the tail. A source whose p, beta and se are not related by a Student t (SAIGE, REGENIE,
+Firth, a score test) fits badly and stores `dof: null`, and loses nothing by it.
 
 ### Results file (kind 2, `.qbe`)
 
-`[64-byte header][block][block]...`, one block per phenotype of that type on that chromosome,
+`[64-byte header][block][block]...`, one block per phenotype of the cis scan on that chromosome,
 back to back, in search-index `ord` order. Header count = blocks, page size 0, `n_cis` 0,
 `seq_digest` = the chromosome's.
 
-**Block**: the v0 layout (`packfmt_v1.encode_gene_block`, a byte-for-byte copy of v0's), unchanged in bytes:
+**Block** (`packfmt_v2.encode_gene_block`): a 72-byte header, then three **columnar** code arrays,
+then the credible-set records, then the details frame. The code arrays are raw, not compressed, so
+a gene page range-reads one block and decodes it with no inflate step, and a reader that wants only
+p can take the first `72 + 2n` bytes.
 
 | offset | type | field |
 |---|---|---|
-| 0 | 4 bytes | magic `QGB0` |
+| 0 | 4 bytes | magic `QGB2` |
 | 4 | u32 | block length including padding |
 | 8 | u32 | `n_rows` |
 | 12 | u32 | `var_start` (variant catalog vidx of row 0; `0xFFFFFFFF` when `n_rows` is 0) |
-| 16 | i32 | `anchor`: **always 0 in v1** |
+| 16 | u32 | `flags`, reserved 0 (where a per-block widening of the beta code would be signalled) |
 | 20 | u32 | `pos_first` (0 when `n_rows` is 0) |
 | 24 | u32 | `pos_last` (0 when `n_rows` is 0) |
 | 28 | u32 | `n_cs` |
 | 32 | f64 | `nlp_max` |
 | 40 | f64 | `lse_min` |
 | 48 | f64 | `lse_max` |
-| 56 | u32 | `details_zlen` |
-| 60 | u32 | `details_len` |
+| 56 | f64 | `beta_max` |
+| 64 | u32 | `details_zlen` |
+| 68 | u32 | `details_len` |
+| 72 | u16 x n | `nlp` codes |
+| 72 + 2n | i16 x n | `beta` codes |
+| 72 + 4n | u16 x n | `se` codes |
+| 72 + 6n | 12 x k | credible-set records `{u32 row, f32 pip, u8 cs_id, 3 zero bytes}`, sorted strictly by `(row, cs_id)` |
+| 72 + 6n + 12k | zstd | the details frame |
 
-Then `n_rows` pairs `{u16 nlp code, u16 SE code}`, `n_cs` credible-set records `{u32 row, f32 pip,
-u8 cs_id, 3 zero bytes}` sorted strictly by `(row, cs_id)`, one zstd details frame, zero padding to
-4. Block length = `64 + 4 n_rows + 12 n_cs + details_zlen`, rounded up to 4.
+Block length = `72 + 6 n_rows + 12 n_cs + details_zlen`, rounded up to 4 with zero padding.
 
 - **Rows** are the vidx run `var_start .. var_start + n_rows - 1` covering every nominal row and
   every credible-set site of the phenotype. A vidx in the run the phenotype did not test is a
-  **null row**: nlp code 65535, SE code 0xFFFF. A run is a contiguous vidx range by construction,
-  which does not make it free of null rows: TOPCHeF's FLNC run holds one, a catalog site inside the
-  window that the phenotype did not test and that is not a credible-set site either. A run never
-  crosses the cis/trans-only boundary; the builder raises if it would.
+  **null row**: nlp code 65535, beta code -32768, se code 65535. A run is a contiguous vidx range
+  by construction, which does not make it free of null rows: TOPCHeF's FLNC run holds one, a catalog
+  site inside the window that the phenotype did not test and that is not a credible-set site
+  either. A run never crosses the cis/trans-only boundary; the builder raises if it would.
 - **A phenotype with no nominal rows and no credible sets** still gets a block with `n_rows` 0 and a
   search-index row, so a reader can say "no per-variant data published".
-- **Every v1 block has a details frame** (v0's detail-less kind 3 sQTL block is gone).
-- **`anchor` is 0.** v0 stored the tensorQTL window start there. v1 treats the TSS as annotation:
-  a reader takes it from the annotation object by `gene_id`.
-- Codes, scales, the scale rule and the reject rules are v0's (section 13; `decode_gene_block`).
+- **Every block has a details frame.**
+- **Two invariants a partial reader depends on**, stated because a reader relying on them cannot
+  detect their loss: `nlp` is the first column, at offset 72, and the code arrays are raw. Reordering
+  the columns or framing the row array for size would break every such reader without changing a
+  magic or a length, so either is a version bump.
+- Codes, scales, the scale rule and the reject rules are section 13's (`decode_gene_block`).
 
 **Details JSON** (`v: 1`), compact, key order as written:
 
@@ -637,58 +724,62 @@ Readers reject a details object whose `v` is not 1.
 
 ### Search index (`.arrow.zst`)
 
-One row per phenotype, all phenotype types, in `ord` order. Sorted by (phenotype type in the
-ingestion's `phenotype_types` order, chromosome in variant catalog table order with trans-only
-phenotypes last, position of the run's first site or else the group lead's position,
-`phenotype_id`). Schema (`results.INDEX_SCHEMA`):
+One row per phenotype of the experiment, numbered `ord` from 0 in row order, so **each experiment
+owns its ordinal space**: an `ord` in a hits record indexes that experiment's index and no other.
+Rows are sorted by (chromosome in variant catalog table order, position of the run's first site or
+else the group lead's position, `phenotype_id`), the phenotypes with no chromosome last. A cis
+scan's index and a trans scan's carry different columns (`results.CIS_INDEX_SCHEMA`,
+`TRANS_INDEX_SCHEMA`), the shared ones first:
 
-| column | type | meaning; null when |
-|---|---|---|
-| `ord` | uint32 | row number; never null |
-| `phenotype_type`, `phenotype_id`, `phenotype_object_id` | string | |
-| `gene_id` | string | join key to the annotation; null when the source names no gene |
-| `chr` | string | the chromosome its cis results are on; **null for a trans-only phenotype** |
-| `has_nominal` | bool | the phenotype has nominal rows |
-| `is_group_lead` | bool | this phenotype is its group's lead |
-| `significant` | bool | the group passes the experiment's rule (on its `column`); false with no group; **null when the experiment declares no rule**, which is not the same as false |
-| `sig_value` | float64 | the value the rule tested, whichever `permuted` column it names; null with no group or no rule |
-| `blk_off`, `blk_len` | uint32 | the block in `results[type].files[chr]`; **null for a trans-only phenotype** |
-| `var_start`, `n_var` | uint32 | the run; null when `n_rows` is 0 |
-| `var_off`, `var_len` | uint32 | variant catalog `.qbv` bytes of the pages covering the run; null likewise |
-| `w_lo`, `w_hi` | int32 | positions of the run's first and last sites; null likewise |
-| `trans_off`, `trans_len` | uint32 | the phenotype's frame in `results[type].trans.file` (section 9; a gene's frames are adjacent); null when it has no trans rows |
-| `n_trans` | uint32 | trans rows in that frame; null likewise |
+| column | in | type | meaning; null when |
+|---|---|---|---|
+| `ord` | both | uint32 | row number; never null |
+| `phenotype_type`, `phenotype_id`, `phenotype_object_id` | both | string | |
+| `gene_id` | both | string | join key to the annotation; null when the source names no gene |
+| `chr` | both | string | **the phenotype's chromosome**: where its cis results are, else (trans scan) its gene's chromosome from the annotation; null when neither places it |
+| `has_nominal` | both | bool | the phenotype has nominal rows |
+| `is_group_lead` | both | bool | this phenotype is its group's lead |
+| `significant` | both | bool | the group passes the cis scan's rule (on its `column`); false with no group; **null when the scan declares no rule**, which is not the same as false |
+| `sig_value` | both | float64 | the value the rule tested, whichever `permuted` column it names; null with no group or no rule |
+| `blk_off`, `blk_len` | cis | uint32 | the block in `files[chr]` |
+| `var_start`, `n_var` | cis | uint32 | the run; null when `n_rows` is 0 |
+| `var_off`, `var_len` | cis | uint32 | variant catalog `.qbv` bytes of the pages covering the run; null likewise |
+| `w_lo`, `w_hi` | cis | int32 | positions of the run's first and last sites; null likewise |
+| `trans_off`, `trans_len` | trans | uint32 | the phenotype's frame in `file` (section 9; a gene's frames are adjacent) |
+| `n_trans` | trans | uint32 | trans rows in that frame |
 
-A **trans-only phenotype** is one the source reports only in trans (TOPCHeF: 17 genes, most on chrM,
-and 36 introns): it is in `phenotypes`, has no nominal rows, no group and no credible set, so nothing
-places it on a chromosome. Its row has `chr` and `blk_*` null and the trans pointers set; there is
-no block for it in any results file. Only trans-only phenotypes have `chr` null.
+Membership says which scan a phenotype is in. A phenotype the source reports only in trans
+(TOPCHeF: 17 genes, most on chrM, and 36 introns) is a row of the trans scan and absent from the cis
+one, where before one shared index carried it with null cis columns. In a trans scan's index `chr`
+is filled from the annotation for such a phenotype; it stays null only when the gene is not in the
+annotation either (TOPCHeF: 16 `ge` phenotypes, none of `leafcutter`).
 
-No annotation columns, and no schema metadata listing pack hashes (v0's `qtl_browser.packs`):
-content-addressed names already pin every object. When `phenotypes.has_nominal` exists the
-builder fails if it disagrees with the nominal rows it found.
+No annotation columns, and no schema metadata listing object hashes: content-addressed names
+already pin every object. When `phenotypes.has_nominal` exists the builder fails if it disagrees
+with the nominal rows it found.
 
-**Parts.** The same rows split for readers that need one chromosome (`results.split_index`, which
-`build` and `add-split` both call): `search_index_parts[chr]` holds the rows whose `chr` is that
-chromosome, one part per chromosome built (empty ones included), and `search_index_trans_only`
-the rows whose `chr` is null (null when there are none). Each is an Arrow object with the search
-index's schema and its rows in `ord` order; `rows` is its row count and `ords` its rows' `ord`
-values as sorted inclusive `[first, last]` runs, so a reader holding an `ord` (from a hits record)
-knows which part to read without reading any. Because rows are ordered by phenotype type first, a
-chromosome's part has one run per phenotype type. TOPCHeF: chr1 322 KB, chr7 166 KB, all 3.0 MB.
+**Parts.** The same rows split for readers that need one chromosome (`results._experiment_index`):
+`search_index_parts[chr]` holds the rows whose `chr` is that chromosome, one part per chromosome
+built (empty ones included), in **both** kinds, since a gene page asks under the gene's
+chromosome whichever scan it reads. A trans scan files the rows with a null `chr` under
+`search_index_unplaced`, a part of the same shape (absent when there are none); a cis scan has no
+such rows, since every one of its phenotypes has a block on a chromosome. Each part is an Arrow
+object with the index's schema and its rows in `ord` order; `rows` is its row count and `ords` its
+rows' `ord` values as sorted inclusive `[first, last]` runs, so a reader holding an `ord` (from a
+hits record) knows which part to read without reading any. Genome-wide TOPCHeF: the cis parts for
+chr1 are 60 KB (`ge`) and 199 KB (`leafcutter`); the trans parts 15 KB and 90 KB at the median.
 
-A gene page reads the part of its gene's annotation chromosome, so a phenotype placed on another
-chromosome than its gene would not show there (TOPCHeF and GTEx have none).
-
-**`counts`**, per phenotype type, over its phenotypes with a cis result (`chr` set) (`results.type_counts`):
-`phenotypes`, `with_rows` (`n_var` set), `significant`, and `significant_genes` (distinct non-null
-`gene_id` among the significant). The summary line a landing page prints, so it reads no index.
+**`counts`**, on a cis scan, over its phenotypes (`results.type_counts`): `phenotypes`, `with_rows`
+(`n_var` set), `significant`, and `significant_genes` (distinct non-null `gene_id` among the
+significant). The summary line a landing page prints, so it reads no index.
 
 ### Hits file (kind 7, `.qbh`)
 
-What the variant page lists for one variant: the groups it leads, the credible sets it is in, and
-its trans associations, keyed by the variant catalog's vidx. One file per chromosome, **paged by
-vidx**: frame `g` holds the records of vidx `g * F .. (g + 1) * F - 1`, F = 1,024.
+What the variant page lists for one variant, keyed by the variant catalog's vidx: for a cis scan
+the groups it leads and the credible sets it is in, for a trans scan its trans associations. Each
+QTL experiment has its own hits files, one per chromosome, so a variant page reads one per
+experiment and joins them; a GWAS experiment has none. Each file is **paged by vidx**: frame `g`
+holds the records of vidx `g * F .. (g + 1) * F - 1`, F = 1,024.
 
 ```
 [64-byte header][u32 frame_off[n_frames + 1]][frame 0][frame 1]...
@@ -715,37 +806,39 @@ vidx**: frame `g` holds the records of vidx `g * F .. (g + 1) * F - 1`, F = 1,02
 | 18 | u8 | flags: bit 0 significant by the experiment's rule (kind 0 only); other bits zero. One bit, so an experiment that declares no rule reads 0 here -- the search index's null `significant` is where "not assessed" is recorded |
 | 19 | u8 | zero |
 
-Kind 0: `ord` is the group's lead phenotype. Kind 1: a site in two sets of one phenotype keeps both
-records. Kind 2: one record per trans row whose variant is this one (section 9): `ord` is the trans
-phenotype (possibly trans-only). `value` is `-log10(pvalue)` of the contract `trans` row, computed in
-float64 from the source p and rounded to the nearest f32 (+inf for p = 0; p itself would underflow
-f32); `beta` is the source beta rounded to f32. These are not the trans frame's values: the frame
-(section 9) stores the same row's -log10 p as a 16-bit code, which decodes to within `nlp_max / 131066`
-of the source's (`nlp_max` of that phenotype's frame), so a kind 2 `value` and the frame's decoded
--log10 p for one row differ by at most `nlp_max / 131066 + |value| * 2^-24` (the second term is the
-f32 rounding, at most 1.8e-5 since a finite -log10 p is at most 300), and both are +inf when p = 0.
-Likewise `beta` and the frame's decoded beta differ by at most `beta_max / 65534 + |beta| * 2^-24`.
-A reader derives the SE as `|beta| / t(p, dof)` with its phenotype type's `dof`.
+Kind 0: `ord` is the group's lead phenotype in the cis scan's index. Kind 1: a site in two sets of
+one phenotype keeps both records. Kind 2, in a trans scan's files only: one record per trans row
+whose variant is this one (section 9), `ord` the phenotype in the trans scan's index. `value` is
+`-log10(pvalue)` of the contract `trans` row, computed in float64 from the source p and rounded to
+the nearest f32 (+inf for p = 0; p itself would underflow f32); `beta` is the source beta rounded to
+f32. These are not the trans frame's values: the frame (section 9) stores the same row's -log10 p
+as a 16-bit code, which decodes to within `nlp_max / 131066` of the source's (`nlp_max` of that
+phenotype's frame), so a kind 2 `value` and the frame's decoded -log10 p for one row differ by at
+most `nlp_max / 131066 + |value| * 2^-24` (the second term is the f32 rounding, at most 1.8e-5 since
+a finite -log10 p is at most 300), and both are +inf when p = 0. Likewise `beta` and the frame's
+decoded beta differ by at most `beta_max / 65532 + |beta| * 2^-24`. A hits record carries no SE;
+the frame does.
+
+The record layout is the same in versions 1 and 2, and so are the variant catalog, the rsID and
+variant indexes, the gene lookup and the Arrow objects: these hold no quantized statistics, which is
+why `which_codec` reports them codec-independent.
 
 **Variant lookup:** read bytes 0 .. `64 + 4 (n_frames + 1)` once per chromosome (the header and the
 table; 2.8 KB for chr1), then frame `vidx // F`, then the records with that `vidx`
 (`results.hits_frame`). The frame table sits in the hits file, not in the variant catalog's variant
-index as in v0, because a variant catalog is shared by experiments and hits belong to one.
-
-*Changed 2026-09-24 from the first v1 layout* (one zstd frame per chromosome of 16-byte records with
-no `beta` field and no kind 2): records are 20 bytes, the file is paged, and the header's page size
-and byte 24 are no longer 0.
+index, because a variant catalog is shared by experiments and hits belong to one.
 
 ## 9. Trans results
 
 The gene page's trans table: every trans association of one phenotype, whichever chromosome its
 variants lie on. From the contract `trans` table (CONTRACT.md); `results.build_trans`.
 
-**One object per (experiment, phenotype type)**, kind 6, `.qbt`: `[64-byte header][frame][frame]...`.
-Header chromosome `all`, `seq_digest` = the collection digest (rows span every chromosome), count =
-frames, page size 0. One frame per phenotype with trans rows, back to back with no padding. A
-phenotype's frame is `trans_off .. trans_off + trans_len - 1` from its search-index row. One object
-per type rather than per chromosome because a trans-only phenotype has no chromosome to be filed under.
+**One object per trans experiment**, kind 6, `.qbt`: `[64-byte header][frame][frame]...`. Header
+chromosome `all`, `seq_digest` = the collection digest (rows span every chromosome), count = frames,
+page size 0. One frame per phenotype with trans rows, back to back with no padding. A phenotype's
+frame is `trans_off .. trans_off + trans_len - 1` from its search-index row. One object rather than
+one per chromosome because a phenotype's trans hits lie on a median of 16 chromosomes (TOPCHeF,
+measured genome-wide), so chromosome is not a useful axis for them.
 
 **Frame order** (`results.trans_frame_order`): first the phenotypes with a `gene_id`, grouped by gene,
 genes in search-index order (a gene's place is the smallest `ord` among its phenotypes, which is its
@@ -757,69 +850,69 @@ per object. `ord` order alone would not do this: introns sort by position, so on
 interleave with a neighbouring or overlapping gene's. The search index needs no per-gene columns for
 it; `ord` and the search-index row order are unchanged.
 
-**Frame** (`packfmt_v1.encode_trans_frame` / `decode_trans_frame`): one zstd frame; the payload is
-exactly `32 + 16 n + heap_len` bytes:
+**Frame** (`packfmt_v2.encode_trans_frame` / `decode_trans_frame`): one zstd frame; the payload is
+exactly `48 + 18 n + 12 k + heap_len` bytes:
 
 | offset | type x count | field |
 |---|---|---|
-| 0 | 4 bytes | magic `QTT2` |
+| 0 | 4 bytes | magic `QTT3` |
 | 4 | u32 | `n` rows, at least 1 |
 | 8 | f64 | `nlp_max`: the frame's largest finite -log10 p |
 | 16 | f64 | `beta_max`: the frame's largest \|beta\| |
-| 24 | u32 | `heap_len` |
-| 28 | u32 | reserved, 0 |
-| 32 | u32 x n | position delta: absolute on the first row and wherever the ordinal changes, else `pos - previous pos` (0 allowed) |
-| 32 + 4n | u32 x n | `rs_number`, 0 = none (the variant catalog's) |
-| 32 + 8n | u16 x n | `af` code, ALT, the variant catalog's (`rint(af * 65534)`, 65535 null) |
-| 32 + 10n | u16 x n | -log10 p code (section 13: `code * nlp_max / 65533`, 65534 is p = 0; 65535 is not allowed) |
-| 32 + 12n | i16 x n | beta code, `rint(beta / beta_max * 32767)`; -32768 not allowed; all 0 when `beta_max` is 0 |
-| 32 + 14n | u8 x n | chromosome ordinal of the variant (1-based, the variant catalog's table) |
-| 32 + 15n | u8 x n | allele code (section 5's SNP codes, 0 = heap) |
-| 32 + 16n | heap | `ref + "\t" + alt + "\n"` for each code-0 row, in row order |
+| 24 | f64 | `lse_min` |
+| 32 | f64 | `lse_max` |
+| 40 | u32 | `heap_len` |
+| 44 | u32 | `n_cs` = k, credible-set records |
+| 48 | u32 x n | position delta: absolute on the first row and wherever the ordinal changes, else `pos - previous pos` (0 allowed) |
+| 48 + 4n | u32 x n | `rs_number`, 0 = none (the variant catalog's) |
+| 48 + 8n | u16 x n | `af` code, ALT, the variant catalog's (`rint(af * 65534)`, 65535 null) |
+| 48 + 10n | u16 x n | `nlp` code (section 13) |
+| 48 + 12n | i16 x n | `beta` code |
+| 48 + 14n | u16 x n | `se` code |
+| 48 + 16n | u8 x n | chromosome ordinal of the variant (1-based, the variant catalog's table) |
+| 48 + 17n | u8 x n | allele code (section 5's SNP codes, 0 = heap) |
+| 48 + 18n | 12 x k | credible-set records, as in the results block |
+| 48 + 18n + 12k | heap | `ref + "\t" + alt + "\n"` for each code-0 row, in row order |
 
 Rows are sorted by (ordinal, position, ref, alt), so ordinals never decrease. `beta` is the ALT
-effect. The SE is not stored: a reader derives `se = |beta| / t(p, dof)` with the phenotype type's
-`dof` (`results.read_trans`), none when `dof` is null. Alleles, rsID and `af` are inline so the
-table needs no variants file from another chromosome (v0's reason, kept).
+effect and `se` is stored, so nothing is derived and a null `dof` costs nothing
+(`results.read_trans`). Alleles, rsID and `af` are inline so the table needs no variants file from
+another chromosome; the alternative, a `vidx` column with the identity looked up in the catalog,
+was the first version 1 layout and cost a gene page up to 33 page reads. A frame starts with an
+absolute position, so a builder may later write a large phenotype as several frames inside its one
+span, with an index object beside the trans object, and no frame changes; readers inflate a span
+frame by frame.
 
 **No `vidx`.** A row's `(ordinal, pos, ref, alt)` names its site, so its vidx is recoverable through
 the variant catalog (the variant index and a page, as in cross-catalog lookup, section 11) when a
 reader needs one; the browser links a trans row by rsID or `chr:pos` and never needed it. The hits
 files' kind 2 records (section 8) keep their own vidx.
 
-*Changed 2026-09-24 from the first v1 layout* (`QTT1`: a u32 `vidx` column first, `32 + 20 n +
-heap_len` bytes, frames in search-index `ord` order): dropping `vidx` saves 4 bytes a row (15.8M
-TOPCHeF rows; TOPCHeF trans 232.4 MB to 197.6 MB, v0 170.6 MB, the rest being the inline alleles and
-one frame per phenotype), and the gene grouping takes a gene page from a median of 3 and up to 33
-frame reads to one range per object. The magic changed so a `QTT1` reader fails loudly.
-
 **Rules the builder enforces:** every row's `(chr, pos, ref, alt)` is a site of the experiment's
 variant catalog and every phenotype is in `phenotypes` (else the build fails); p is in [0, 1] and
-beta finite. The same rows, keyed by variant, are the hits files' kind 2 records (section 8).
+beta finite. The same rows, keyed by variant, are the trans scan's hits records (section 8). No
+threshold is applied: the object holds every trans association the source published, which for
+TOPCHeF is 1,469 B and 95 rows per frame at the median only because its authors filtered first.
 
-**Precision** (`results[].trans.precision`): `neglog10p_max_error` = the largest `nlp_max / 131066`
-over frames, `beta_max_error` = the largest `beta_max / 65534`, `af_max_error` as for variant pages.
-
-*v0 difference:* v0 had one frame per gene holding the gene's eQTL rows and all its introns' sQTL
-rows, with no alleles and a fixed chr1..chrX variant chromosome code; v1 has one object per phenotype
-type, one frame per phenotype (a phenotype need not have a gene), a gene's frames contiguous in each
-object (so a gene page makes at most one request per type, v0's one request per gene), alleles inline,
-and ordinals from the variant catalog's table.
+**Precision**: the experiment's `precision` block, section 13, folded over every frame.
 
 ## 10. GWAS
 
-A GWAS shown next to an experiment (TOPCHeF: the DCM GWAS, Jurgens et al. 2024, biobanks-only).
-From the contract `gwas` table and `gwas.json` in the experiment's tables directory (CONTRACT.md);
-`gwas.build`. Listed in the experiment's `gwas` entry (section 8).
+A GWAS is its own experiment, `kind: gwas` (section 8): a single-phenotype genome-wide scan, read by
+position rather than by phenotype, with no annotation, no hits and no search index. From the
+contract `gwas` table and `gwas.json` in a tables directory (CONTRACT.md); `gwas.build`. Which QTL
+experiments it is shown beside is a deployment's choice, not a fact the store records.
 
-**Values are the source's, lossless**: beta, se and af to 4 decimals (`rint(x * 10000)`), p to 4
-significant digits (mantissa and exponent), n from a table of distinct values: v0's GWAS rules and
-codes, unchanged (`packfmt_v1.gwas_codes`). What changed is orientation: rows are **ref/alt** like
-everything else in the store, `ref` the reference base(s), `beta` and `af` ALT-relative. The adapter
-orients each row against the refgetstore with `qtlstore.orient_to_ref` (the source's `EA` is the
-effect allele; where `EA` is the reference the alleles swap, beta negates and `af = 1 - EAFREQ`, both
-exact at 4 decimals) and drops, with a count, rows whose alleles the reference does not read. For the
-DCM GWAS: 12,504,079 source rows, 10,401,887 as given, 2,092,846 swapped, 9,346 dropped.
+**Values are quantized** like every other statistic in the store: p, beta and se as the section 13
+triple against per-block scales, af as `rint(af * 65534)`, n from a table of distinct values. The
+adapter orients each row against the refgetstore with `qtlstore.orient_to_ref`: rows are
+**ref/alt** like everything else, `ref` the reference base(s), `beta` and `af` ALT-relative (the
+source's `EA` is the effect allele; where `EA` is the reference the alleles swap, beta negates and
+`af = 1 - EAFREQ`), and rows whose alleles the reference does not read are dropped and counted. For
+the DCM GWAS: 12,504,079 source rows, 10,401,887 as given, 2,092,846 swapped, 9,346 dropped. The
+printed digits are not recoverable from the store (section 13); measured genome-wide on the DCM
+GWAS, beta and se decode to the source's four decimals on all but 2,274 of 12,494,731 rows, and p to
+its four significant digits on all but 1.8%.
 
 **A site may repeat.** The DCM GWAS lists 796,531 indels twice, once per allele order, with
 different N and statistics (two measurements the meta-analysis did not merge). After orientation
@@ -831,28 +924,40 @@ refuses identical rows. The DCM GWAS object holds 12,494,731 rows.
 **GWAS file** (kind 4, `.qbg`, one per chromosome with rows): `[64-byte header][block][block]...`.
 Header: the chromosome, count = rows, page size = B (2048, rows per block), `seq_digest` = the
 chromosome's. Rows are sorted by (pos, ref, alt, rs_number, p, n, beta). Each block is one zstd
-frame of B rows (the last may be shorter), back to back with no padding. Block payload, exactly
-`8 + 21 n + heap_len` bytes (v0's GWAS block, with `af` for v0's `eaf` and the allele pair
-`(ref, alt)` for v0's `(ea, nea)`):
+frame of B rows (the last may be shorter), back to back with no padding. Block payload
+(`packfmt_v2.encode_gwas_block`), exactly `48 + 18 n + 12 k + heap_len` bytes; a block carries no
+magic, so the file header's version byte is what names its layout:
 
 | offset | type x count | column |
 |---|---|---|
 | 0 | u32 | `n` rows |
 | 4 | u32 | `heap_len` |
-| 8 | u32 x n | position delta: first absolute, then `pos[i] - pos[i-1]` |
-| 8 + 4n | i32 x n | beta code, `rint(beta * 10000)` |
-| 8 + 8n | u32 x n | `rs_number`, 0 = none |
-| 8 + 12n | u16 x n | se code, `rint(se * 10000)` |
-| 8 + 14n | u16 x n | af code (ALT), `rint(af * 10000)`, at most 10000 |
-| 8 + 16n | u16 x n | `p_mant`, 1000..9999 |
-| 8 + 18n | i8 x n | `p_exp`; p = `p_mant / 10^(-p_exp)` |
-| 8 + 19n | u8 x n | `n_code`, index into the index's n table |
-| 8 + 20n | u8 x n | allele code of (ref, alt), 0 = heap |
-| 8 + 21n | heap | `ref + "\t" + alt + "\n"` per code-0 row |
+| 8 | u32 | `n_cs` = k |
+| 12 | u32 | reserved 0, so the scales are 8-aligned |
+| 16 | f64 | `nlp_max` |
+| 24 | f64 | `beta_max` |
+| 32 | f64 | `lse_min` |
+| 40 | f64 | `lse_max` |
+| 48 | u32 x n | position delta: first absolute, then `pos[i] - pos[i-1]` |
+| 48 + 4n | u32 x n | `rs_number`, 0 = none |
+| 48 + 8n | u16 x n | af code (ALT), `rint(af * 65534)`, 65535 null |
+| 48 + 10n | u16 x n | `nlp` code (section 13) |
+| 48 + 12n | i16 x n | `beta` code |
+| 48 + 14n | u16 x n | `se` code |
+| 48 + 16n | u8 x n | `n_code`, index into the index's n table |
+| 48 + 17n | u8 x n | allele code of (ref, alt), 0 = heap |
+| 48 + 18n | 12 x k | credible-set records, as in the results block: a fine-mapped locus lives in the block a locus read fetches |
+| 48 + 18n + 12k | heap | `ref + "\t" + alt + "\n"` per code-0 row |
 
-**GWAS index** (kind 5, `.qgi`, one per experiment GWAS): `[64-byte header][one zstd frame]`.
+The row is the trans frame's row with `n_code` where the frame has the chromosome ordinal, since a
+GWAS file is one chromosome and N varies per row. The two layouts stay separate file kinds: the
+framing that suits a GWAS, blocks that never span a chromosome, shatters a trans phenotype whose
+hits sit on 16 chromosomes (`plans/2026-10-07-experiment-model.md`, F2).
+
+**GWAS index** (kind 5, `.qgi`, one per GWAS experiment): `[64-byte header][one zstd frame]`.
 Header: chromosome `all`, count = chromosomes with rows, page size = B, `seq_digest` = the collection
-digest. Payload (`packfmt_v1.encode_gwas_index_payload`), all u32 except names:
+digest. Payload (`packfmt_v1.encode_gwas_index_payload`, the same in both versions), all u32 except
+names:
 
 ```
 u32 n_values_count, u32 n_values[n_values_count]      distinct n, ascending
@@ -873,10 +978,9 @@ repeated across a block boundary.
 ### Bin summary
 
 The landing page's genome track draws, per 5 Mb window, the GWAS's strongest p. Reading every GWAS block
-for that is too much for a landing page, so the experiment carries a small summary: `gwas.bins` names
-it, `{"file": "<digest>.arrow.zst", "bin_bp": 5000000, "n_bins": N}`, or `gwas.bins` is null when the
-tables have no bin table. It is v0's `gwas_dcm_bins.json` (built by v0's `gwas_bins` step) as a v1
-object: the same bins and the same values.
+for that is too much for a landing page, so the experiment carries a small summary: `bins` names
+it, `{"file": "<digest>.arrow.zst", "bin_bp": 5000000, "n_bins": N}`, or `bins` is null when the
+tables have no bin table.
 
 **Source.** The adapter writes the contract table `gwas_bins.parquet` next to `gwas.parquet`
 (CONTRACT.md) with v0's query, unchanged (`dcm_gwas.BINS_SQL`): over **every source row with a GRCh38
@@ -922,18 +1026,18 @@ on two variant catalogs of a store: shared sites per chromosome, sampled lookups
 back to the same site, and sampled rsID lookups through the other catalog's rsID index. A VRS-id index
 object (VRS id -> variant catalog, chromosome ordinal, vidx) is reserved and not built **(future)**.
 
-## 12. What v1 leaves out
+## 12. What the store leaves out
 
 - **Trans eQTL variants without source alleles.** TOPCHeF's trans eQTL files report 32,765
   positions as bare `chr:pos`. A position is not a variant, so these get no site and none of their
   trans eQTL rows is ingested; alleles are not inferred from dbSNP, frequency or other studies
-  (CONTRACT.md, decided 2026-09-24). `ingestion.json` `trans_eqtl_excluded` counts the variants, the
-  rows left out and the genes. They enter when the authors supply the alleles.
-  Every other trans row is in v1: all 13,182,408 trans sQTL rows and 2,642,166 of 2,680,117 trans
-  eQTL rows (the variant has alleles from another file of the release: one tested variant per
-  position, joined on `chr:pos`). The experiment JSON's `trans_excluded` repeats the count.
+  (CONTRACT.md, decided 2026-09-24). `ingestion.json` `trans_excluded` counts, per phenotype type,
+  the variants, the rows left out and the phenotypes, and the trans experiment's `excluded`
+  repeats its own type's count: 37,951 of 2,680,117 trans eQTL rows, none of the 13,182,408 trans
+  sQTL rows. They enter when the authors supply the alleles.
 - **GWAS rows the reference does not read.** 9,346 of the DCM GWAS's 12,504,079 rows have alleles
-  that match neither reference reading; they are dropped and counted in `gwas.orientation`.
+  that match neither reference reading; they are dropped and counted in the experiment's
+  `orientation`.
 
 The Python reference decoders are `results.read_block`, `results.read_trans`, `results.hits_frame` /
 `decode_hits`, `catalog.decode_file`, `decode_vidx`, `decode_rsid`, `rsid_lookup`, `gwas.read_window`,
@@ -941,51 +1045,75 @@ The Python reference decoders are `results.read_block`, `results.read_trans`, `r
 
 ## 13. Precision
 
-Unchanged from v0. The quantizers are v0's (`packfmt_v1.quantize_nlp`, `quantize_se`, copies of v0's),
-so the v0 round-trip evidence (EVIDENCE.md A.1, A.2) applies to the codes. The lossy-versus-lossless
-question is closed.
+Every statistic is stored as the same **triple**, 6 bytes a row, in every result kind: `nlp`, `beta`
+and `se` each as a 16-bit code against scales the scope's header carries, where a scope is one
+results block, one trans frame or one GWAS block. Nothing is derived from anything else, so no
+source assumption (a Student t relating p to beta/se, a dof, a printed precision) is needed to
+decode a value, and a source that breaks one stores exactly what it published.
 
-- **`-log10 p`:** code 0..65533 gives `code * (nlp_max / 65533)`; 65534 is p = 0; 65535 is null.
-  The writer rejects a finite -log10 p above 300. `nlp_max` is the block's largest finite -log10 p
-  (0.0 when every p is 1 or null). Worst error half a step, `nlp_max / 131066`.
-- **SE and slope sign:** bit 15 set when slope < 0 (0.0 and -0.0 are positive); bits 0-14 a log(SE)
-  code 0..32766, `se = exp(lse_min + q * (lse_max - lse_min) / 32766)`; 0xFFFF null (SE or slope
-  null); 0x7FFF invalid. Worst relative error `expm1((lse_max - lse_min) / 65532)`.
-- **Scale rule:** when `nlp_max > 0` some row holds 65533, else every finite code is 0; when
-  `lse_min < lse_max` some row holds 0 and some 32766; when equal every non-null code is 0; when no
-  row has an SE both are 0.0.
-- **Slope:** `slope = sign * se * t`, `t = max(0, -stdtrit(dof, p / 2))`, null when p is null, p is
-  0, the SE code is null, **or `dof` is null**. D13 (store SE, derive slope) stands.
-- **`af`:** `rint(af * 65534)`, error at most 7.63e-6.
-- **Trans** (section 9): -log10 p as above per frame; beta `code * beta_max / 32767`, worst error
-  `beta_max / 65534`; SE derived.
-- **GWAS** (section 10): lossless at the source's printed precision.
+| code | type | value | reserved |
+|---|---|---|---|
+| `nlp` | u16 | `code * nlp_max / 65533` | 65534 is p = 0 (underflowed in the source); 65535 null |
+| `beta` | i16 | `code * beta_max / 32766`, the sign in the code | -32768 null |
+| `se` | u16 | `exp(lse_min + code * (lse_max - lse_min) / 65534)` | 65535 null |
+
+The four `f64` scales per scope are `nlp_max`, the largest finite -log10 p; `beta_max`, the largest
+\|beta\|; `lse_min` and `lse_max`, the log of the smallest and largest se. There is no ceiling on
+`nlp_max`: resolution degrades gracefully at extreme magnitudes (a step of 0.15 in -log10 p at
+`nlp_max` 10,000), where the former limit of 300 failed a build outright.
+
+- **`af`:** `rint(af * 65534)`, error at most 7.63e-6, in every kind.
 - **Exact:** positions, alleles, `rs_number`, counts, credible-set rows and `cs_id`; `pip` and hits
   values as f32.
-- Measured v0 maxima (TOPCHeF, every row; EVIDENCE.md A.2): -log10 p 1.27e-3; `slope_se` relative
-  1.41e-5 (eQTL), 1.93e-5 (sQTL); slope at most 4.47e-3 of the row's `slope_se`.
+- **Scale rule** (`scan_codes` checks it): when `nlp_max > 0` some row holds 65533, else every finite
+  code is 0; when `beta_max > 0` some row holds ±32766; when `lse_min < lse_max` some row holds 0
+  and some 65534, when equal every non-null code is 0; when no row has a value the scales are 0.0.
+- A null row has all three null codes; the three never disagree.
 
-**Slope error, measured per results set.** The slope is the one value a reader derives rather than
-decodes, so its error has no closed-form bound in the block header: it depends on how well `beta /
-se` agrees with `p` under the stored `dof` in the source itself, plus the two rounding steps. The
-builder therefore measures it: every block is decoded again after encoding and every rebuilt slope
-is compared to the source beta (`results.slope_error`); the experiment records the largest
-`|slope - beta| / se` as `precision.slope_max_error_over_se` with the row count
-(`slope_rows_compared`). Genome-wide, `store-genome-v1e`:
+**The `precision` block**, one shape on every experiment:
 
-| experiment | type | dof | rows compared | `slope_max_error_over_se` |
-|---|---|---:|---:|---:|
-| TOPCHeF | `ge` | 435 | 123,458,053 | 3.52e-3 |
-| TOPCHeF | `leafcutter` | 480 | 499,596,989 | 4.47e-3 |
-| GTEx v8 heart LV | `ge` | 367 (fitted) | 153,275,168 | 3.30e-3 |
-| GTEx v8 heart LV | `leafcutter` | 367 (fitted) | 16,489,572 | 2.91e-3 |
+```json
+"precision": {
+  "theoretical_limit": {"neglog10p": 1.269e-03, "beta_over_se": 1.090e-03, "se_rel": 2.345e-05, "af": 7.63e-06},
+  "measured_worst":    {"neglog10p": 1.269e-03, "beta_over_se": 1.043e-03, "se_rel": 2.344e-05, "rows_compared": 123458053}}
+```
 
-TOPCHeF's two maxima equal v0's round-trip numbers to every printed digit (v0 manifest
-`precision.*.slope_max_error_over_se`: 3.518e-3, 4.466e-3), as they must, since the codes are
-identical. For the eQTL Catalogue, with a fitted dof, the measured error is at the same level. **So a
-rebuilt slope is within 0.5% of the row's SE** in every results set built so far. The check costs a
-second decode of every block at build time (the TOPCHeF results phase went from 5.4 to 19.8 minutes
-with the trans objects and the slope measurement together).
+`theoretical_limit` is half a quantization step in each quantity's own unit, computed from the four
+header scales and nothing else, so any reader recomputes it from a stored block and it holds for
+every row: `neglog10p` = `nlp_max / 131066` absolute; `beta_over_se` = `beta_max / 65532 / se_min`,
+the beta step in units of the smallest stored se, since the step is absolute and the row it hurts
+most is generally not the row that set `beta_max`; `se_rel` = `expm1((lse_max - lse_min) / 131068)`
+relative. `measured_worst` is found by decoding every row after encoding and comparing it with the
+source value, with `rows_compared` as the n. Every entry is a maximum. `measured_worst` exceeding
+`theoretical_limit` is a detectable defect, since the arithmetic forbids it; `scan_codes` asserts it.
+The experiment's block is the fold over its scopes, so the limit is the loosest scope's.
+
+Genome-wide, `data/derived/store-genome-v2`, every row compared:
+
+| experiment | rows compared | `neglog10p` limit / measured | `beta_over_se` limit / measured | `se_rel` limit / measured |
+|---|---:|---|---|---|
+| `topchef_ge_cis` | 123,458,053 | 1.27e-03 / 1.27e-03 | 1.09e-03 / 1.04e-03 | 2.34e-05 / 2.34e-05 |
+| `topchef_leafcutter_cis` | 499,596,989 | 1.56e-03 / 1.56e-03 | 1.19e-03 / 1.17e-03 | 2.18e-05 / 2.18e-05 |
+| `topchef_ge_trans` | 2,642,166 | 1.05e-03 / 1.04e-03 | 1.53e-03 / 1.28e-03 | 2.27e-05 / 2.25e-05 |
+| `topchef_leafcutter_trans` | 13,182,408 | 6.09e-04 / 6.09e-04 | 1.81e-03 / 1.53e-03 | 2.29e-05 / 2.29e-05 |
+| `dcm_jurgens2024_biobanks` | 12,494,731 | 2.99e-04 / 2.99e-04 | 3.90e-03 / 3.89e-03 | 3.78e-05 / 3.78e-05 |
+
+The `beta_over_se` figures are in units of the row's own standard error, the denomination of the
+4.47e-03 slope budget the format has always stated. The four QTL scans sit at a quarter of it or
+less; **the DCM GWAS sits at 87%**. The one assumption still inside the beta code is that
+`beta_max / se_min` stays under 293 in every scope, which is where that budget is reached, and a
+GWAS block is where it is closest: 2,048 consecutive positions mix a rare large-effect variant,
+which sets `beta_max`, with a common small-se one, which sets `se_min`, so the ratio runs far
+above any single row's \|z\| (the DCM GWAS's worst block has `beta_max / se_min` of 255 against a
+largest \|z\| under 10). A larger or more deeply imputed GWAS would cross it. The remedies, in
+order: a smaller block, which narrows the mix; coding the effect as z against a per-block `z_max`,
+which makes the bound per row and closes the gap outright (`plans/2026-10-08-v2-compression-audit.md`,
+measured size-neutral); or a per-block widening signalled in the results block's `flags`. Never a
+global widening, which would spend bytes on every row of every study to serve a few blocks.
+
+**The store is a view, not an archive.** The printed digits of a source are not recoverable from
+it; exact values live in the source releases, and this block is what says how far a stored value
+can be from them.
 
 ## 14. Validation
 
@@ -1003,8 +1131,11 @@ empty failure list with non-empty notes is a partial pass.**
    everywhere passes the rest.)
 5. `identity_digest` is a 32-character digest; with a site reader (`catalog.read_sites`) it
    recomputes from the decoded variants files. Without one: a note.
-6. Every experiment's variant catalog and annotation are in the store, and its `catalog_identity` equals
-   the variant catalog's `identity_digest`.
+6. Every experiment's `kind` is one of the three, its variant catalog is in the store and so is
+   its annotation when it is a QTL kind, and its `catalog_identity` equals the variant catalog's
+   `identity_digest`. `store.json`'s `experiments` map agrees with every document on `kind` and
+   `collection`, and every `collection` names an object in the store whose `parent` chain resolves
+   and terminates. **Not** checked: that experiments sharing a collection agree on anything.
 7. Every results file, hits file and GWAS file names a chromosome in its variant catalog table, and
    its header has the right kind (2, 7, 4) and the table entry's chromosome and `seq_digest`.
 8. The variant index, rsID index, trans objects and GWAS index have the right kind (9, 8, 6, 5),
@@ -1016,32 +1147,37 @@ empty failure list with non-empty notes is a partial pass.**
     repeats, each is `[k * bin_bp, k * bin_bp + bin_bp)` starting inside the chromosome, and holds its
     `lead_position`; `0 < min_p <= 1`; `0 <= n_gws <= n_variants`, `n_variants >= 1`; `lead_beta` and
     `lead_ea` are present (`gwas.check_bins`, which the builder also runs).
-11. Every trans object is tiled by its frames as the search index places them (from byte 64 to the
-    end, no gap or overlap, as many frames as the pointer's `n_phenotypes`), and each gene's frames
-    in it form one contiguous range (`results.check_trans_layout`, section 9).
+11. Every trans object is tiled by its frames as its search index places them (from byte 64 to the
+    end, no gap or overlap, one frame per index row), and each gene's frames in it form one
+    contiguous range (`results.check_trans_layout`, section 9).
 12. Every annotation has `chroms` and `lookup`: one `chroms` entry per chromosome of `genes`, each
     `genes` object equal to that chromosome's rows and each `exon_models` object equal to the models
     recomputed from `exons`; the lookup has kind 10, chromosome `all` and the annotation's
     `identity_digest`, its offsets tile it, and every bucket equals what `lookup_buckets` makes of
     `genes` (`annotation.check_split`).
-13. Every experiment with a search index has `search_index_parts`, `search_index_trans_only` and
-    `counts`: one part per chromosome built, each equal to that chromosome's index rows with `rows`
-    and `ords` describing it, the trans-only part likewise, and `counts` equal to `type_counts` of
-    the index (`results.check_split`).
+13. Every QTL experiment has `search_index_parts`, one part per chromosome built, each equal to that
+    chromosome's index rows with `rows` and `ords` describing it; a trans scan's
+    `search_index_unplaced` equals its rows with no chromosome and is present exactly when there
+    are any; a cis scan has no such rows (`results.check_split`).
 
 `python -m pipeline.annotation add-split --store DIR --id ID` and `python -m pipeline.results
 add-split --store DIR --id ID` give a store built before 12 and 13 its derived objects, from the
 objects it already has, by the same code the builders run; the pointer is rewritten and no other
-object changes.
+object changes. `add-split` serves cis scans only.
 
 Every header check also checks the kind: a variants file must be kind 1.
+
+Beyond `validate`: `which_codec` reads the block and frame magics back out of every object and
+reports which codec wrote it, since validate compares headers to a declaration and only the bytes
+say what encoded a block; `scan_codes` sweeps every code in every results block of a cis scan for
+the reserved values, the scale rule and `measured_worst <= theoretical_limit`.
 
 Build-time checks outside `validate`: orphan nominal or credible-set rows (a site not in the
 variant catalog) fail the build; a repeated `(phenotype, cs_id, site)` credible-set row fails; one
 phenotype's nominal rows on two chromosomes fail; `cs_id` outside 0..127 fails; nominal rows for a
 phenotype missing from `phenotypes` fail; a trans row whose site is not in the variant catalog or whose
-phenotype is not in `phenotypes`, or with a null p or beta, fails; a GWAS value with more than 4
-decimals (or p with more than 4 significant digits) fails; identical GWAS rows fail.
+phenotype is not in `phenotypes`, or with a null p or beta, fails; identical GWAS rows fail; a GWAS
+row with a null p, beta, se, af or n fails.
 
 ## 15. Store maintenance
 
@@ -1053,14 +1189,40 @@ decimals (or p with more than 4 significant digits) fails; identical GWAS rows f
   catalog and annotation pointers stay, since another experiment may name them.
 - `gc [--dry-run]`: deletes every file in `immutable/` whose name no pointer file names (a pointer on
   disk protects its objects whether or not `store.json` lists it), and leftover `*.tmp` files from
-  an interrupted write. Files that are not object names are left alone.
+  an interrupted write. A collection document is an object an experiment names, so it is protected
+  the same way. Files that are not object names are left alone.
 - `crosscat A B`: section 11's check.
 
 Because objects are named by their bytes, adding or removing an experiment never changes another
 experiment's objects: building TOPCHeF alone, adding GTEx, removing GTEx and running `gc` leaves every
-TOPCHeF object byte for byte as it was (pipeline/README.md, "Experiment modularity").
+TOPCHeF object byte for byte as it was (pipeline/README.md, "Experiment modularity"). Removing one
+experiment can no longer delete another publication's data, because a GWAS is its own experiment
+and is reachable only through its own pointer.
 
-## 16. Differences from v0
+`python -m pipeline.upload` puts a store in the bucket in section 2's order and prunes what the
+store no longer names, as separate commands, each a dry run unless told otherwise.
+
+## 16. Differences from v1 and v0
+
+Version 2 against version 1, the store live in the bucket until the release:
+
+| | v1 | v2 |
+|---|---|---|
+| what a result row stores | two of `(nlp, beta, se)`: cis `(nlp, se)` with the slope rebuilt through a dof, trans `(nlp, beta)` with se rebuilt, GWAS all three as fixed-point integers | the same 6-byte triple everywhere, nothing derived (section 13) |
+| results block | `QGB0`, 64-byte header, interleaved `(nlp, se)` pairs with the slope's sign in the se field | `QGB2`, 72-byte header with `beta_max`, columnar `nlp`, `beta`, `se`, `flags` where `anchor` was |
+| trans frame | `QTT2`, 32-byte header, 16-byte row, no se | `QTT3`, 48-byte header with the se scales and `n_cs`, 18-byte row, credible-set section |
+| GWAS block | 8-byte header, 21-byte lossless row | 48-byte header with scales and `n_cs`, 18-byte quantized row, credible-set section |
+| `dof` | decoded through | provenance |
+| `precision` | five keys with inconsistent names and units, cis and trans differing, GWAS none | one block on every experiment, `theoretical_limit` and `measured_worst` in one unit per quantity |
+| experiment | one document per cohort: `results[]` per phenotype type, each with a `trans` entry, and a `gwas` field | one document per scan, `kind` closed, a GWAS its own experiment |
+| collections | none; `source.zenodo` | a content-addressed document named by every member's `collection` field |
+| `store.json` `experiments` | a sorted list of ids | a map of id to `{kind, collection}` |
+| search index | one per cohort, both types and both scopes, 21 columns, one ordinal space, a trans-only residue | one per experiment with its own columns and ordinal space; trans parts by the gene's chromosome and an unplaced residue |
+| hits | one object per chromosome holding leads, credible sets and trans records together | per experiment: a cis scan's hold leads and credible sets, a trans scan's hold trans records |
+| validate | headers against pointers | also every header's version against `store.json`, the experiments map, the collection chains |
+| genome-wide TOPCHeF store | 2.94 GB without a GWAS | 4.53 GB with the DCM GWAS; cis blocks +49%, the price of the stored beta |
+
+Version 1 against v0:
 
 | | v0 | v1 |
 |---|---|---|
@@ -1088,27 +1250,36 @@ TOPCHeF object byte for byte as it was (pipeline/README.md, "Experiment modulari
 | variant catalog identity | none | `identity_digest` |
 | what a first gene page reads | the whole `search_index` (1.9 MB) | one lookup bucket, its chromosome's genes, exon models and index part (sections 6, 8) |
 
-## 17. Where v0 lives
+## 17. Where v1 and v0 live
+
+The version 1 specification is this file at commit `be0bb44` (`git show be0bb44:SPEC.md`): the
+single-document experiment, the derived slope, the lossless GWAS and the `QGB0`/`QTT2` layouts.
+The version 1 store is what the bucket serves until the version 2 release (`store-genome-v1f`,
+TOPCHeF and GTEx v8 heart LV), and `packfmt_v1.py` still reads it: `read_block`, `read_trans` and
+`read_window` pick the codec from each object's header.
 
 The v0 spec (sections 1-15, byte layouts for GWAS, trans and paged hits included) is in the
 analysis repo's git history at `qtlb-format/docs/SPEC.md`, commit `fe5a606`. Its Appendix A is now
-`qtlb-format/docs/EVIDENCE.md`.
-
-The frozen v0 build is on Rivanna at `/scratch/ns5bc/qtl-browser/derived/`: the packs in
-`immutable/`, `manifest.json`, and the v0 tables in `_tables/`. The live site no longer serves it.
-No v1 builder reads v0 packs; TOPCHeF is rebuilt into the store from its contract tables. Only the
-comparisons read that tree: `pipeline/verify_v0.py` (store.sbatch), the TOPCHeF acceptance gate
-`pipeline/adapters/verify_topchef.py` (adapter.sbatch), and `pipeline/bench_store.py`, through
-`packfmt_v0.py` and the v0 reader `packtool.py`. The code that built v0 (the pack steps, `packcheck`,
-the R2 upload) is in this repo's git history at commit `c62bca3`.
+`qtlb-format/docs/EVIDENCE.md`. The frozen v0 build is on Rivanna at
+`/scratch/ns5bc/qtl-browser/derived/`: the packs in `immutable/`, `manifest.json`, and the v0 tables
+in `_tables/`. The TOPCHeF acceptance gate (`pipeline/adapters/verify_topchef.py`) compares the
+contract tables against the v0 tables there, through the v0 reader `packtool.py`; nothing else
+current reads the packs. The code that built v0 is in this repo's git history at commit `c62bca3`,
+and the v0-against-v1 comparison tools at commits before 2026-10-09.
 
 ## 18. Open
 
 1. `store.json` `refget` URLs are written empty; the VRS-id index is reserved, not built. The
    overlap index (section 19) matches sites across catalogs *within* one store; VRS ids would match
    them across stores, and are still the thing that is missing.
-2. The v0 bridges (`pipeline/verify_v0.py`, `pipeline/bench_store.py`, `pipeline/adapters/verify_topchef.py`,
-   with `packfmt_v0.py` and `packtool.py`) go away with the frozen v0 build.
+2. The browser readers read version 1; the version 2 readers and the two apps' divergence (a
+   collection chooser with no default in the general app, a pinned collection in the TOPCHeF app,
+   the GWAS pairing and coloc's priors in deployment config) are the release.
+3. The assumptions the format still makes, each with what breaks it and how it would present, are
+   `plans/2026-10-07-qtlstore-v2.md`'s gaps G1 to G12: the `beta_max / se_min` ratio (section 13),
+   phenotypes in the millions, a per-row sample size on the QTL side (declined), structural
+   variants, a second assembly in one store, coloc's standardised-trait assumption, the archive
+   question, and a trans source published at a loose threshold.
 
 ## 19. Catalog overlap index
 

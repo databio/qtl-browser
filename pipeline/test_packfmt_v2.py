@@ -299,14 +299,70 @@ def gwas_block_round_trips():
 
 @case
 def gwas_block_is_smaller_than_v1s():
-    """v1's GWAS row is 21 bytes and lossless; v2's is 18 and quantized. The payload shrinks because
-    9 bytes of p/beta/se become 6, which more than pays for the 32 bytes of scales once per block."""
+    """v1's GWAS row is 21 bytes and lossless; v2's is 18 and quantized. The *uncompressed* payload
+    shrinks because 9 bytes of p/beta/se become 6, which more than pays for the 40 bytes of scales
+    and credible-set count once per block. The stored object does not shrink (measured +2.2%), which
+    the encoder's docstring records; this case is about the layout arithmetic only."""
     B = 2048
     v2_payload = v2.GWAS_HEADER_LEN + v2.GWAS_ROW_BYTES * B
     v1_payload = v1.GWAS_HEADER_LEN + v1.GWAS_ROW_BYTES * B
-    assert v1_payload == 43_016 and v2_payload == 36_904, (v1_payload, v2_payload)
+    assert v1_payload == 43_016 and v2_payload == 36_912, (v1_payload, v2_payload)
     assert v2_payload < v1_payload
-    assert v2.GWAS_HEADER_LEN / B < 0.02                  # the scales cost under 0.02 B/row
+    assert v2.GWAS_HEADER_LEN / B < 0.025                 # the header costs under 0.025 B/row
+
+
+@case
+def gwas_block_holds_credible_sets():
+    """Gap G11, experiment-model F1: a fine-mapped GWAS locus had nowhere to go. The records are the
+    cis block's 12-byte `(row, pip, cs_id)`, and a block without any costs nothing extra."""
+    pos, p, beta, se, af, n_code, rs, ref, alt, nv = gwas_rows(n=128)
+    rows_, pips, ids = [3, 3, 9, 40], [0.51, 0.2, 0.9, 1.0], [0, 1, 0, 0]
+    fr = v2.encode_gwas_block(pos, p, beta, se, af, n_code, rs, ref, alt, 19,
+                              cs_row=rows_, cs_pip=pips, cs_id=ids)
+    d = v2.decode_gwas_block(fr, nv)
+    assert d["n_cs"] == 4 and d["cs_row"].tolist() == rows_ and d["cs_id"].tolist() == ids
+    assert np.allclose(d["cs_pip"], pips, atol=1e-7)
+    assert d["position"].tolist() == pos.tolist()
+    limits_hold(d, p, beta, se)
+    plain = v2.encode_gwas_block(pos, p, beta, se, af, n_code, rs, ref, alt, 19)
+    pd_ = v2.decode_gwas_block(plain, nv)
+    assert pd_["n_cs"] == 0 and pd_["cs_row"].size == 0
+    assert len(v2.zstd_unframe(fr, None, "x")) - len(v2.zstd_unframe(plain, None, "x")) == 12 * 4
+    for bad, msg in ((dict(cs_row=[200], cs_pip=[0.5], cs_id=[0]), "cs_row"),
+                     (dict(cs_row=[3, 3], cs_pip=[0.5, 0.5], cs_id=[1, 0]), "ascending"),
+                     (dict(cs_row=[3], cs_pip=[1.5], cs_id=[0]), "pip outside")):
+        try:
+            v2.encode_gwas_block(pos, p, beta, se, af, n_code, rs, ref, alt, 19, **bad)
+            raise AssertionError(f"accepted {bad}")
+        except ValueError as e:
+            assert msg in str(e), (bad, e)
+
+
+@case
+def trans_frame_holds_credible_sets_in_v1s_reserved_field():
+    """The same section in the trans frame, counted in the header `u32` v1 reserved as 0 -- so a
+    frame with no credible sets is byte for byte the frame it was."""
+    ordinal, pos, rs, af_code, ref, alt, p, beta, se = trans_rows()
+    plain = v2.encode_trans_frame(ordinal, pos, rs, af_code, ref, alt, p, beta, se, 19)
+    rows_, pips, ids = [0, 5, 5], [1.0, 0.4, 0.3], [0, 0, 1]
+    fr = v2.encode_trans_frame(ordinal, pos, rs, af_code, ref, alt, p, beta, se, 19,
+                               cs_row=rows_, cs_pip=pips, cs_id=ids)
+    d = v2.decode_trans_frame(fr)
+    assert d["n_cs"] == 3 and d["cs_row"].tolist() == rows_ and d["cs_id"].tolist() == ids
+    assert np.allclose(d["cs_pip"], pips, atol=1e-7)
+    assert d["pos"].tolist() == pos.tolist() and d["ordinal"].tolist() == ordinal.tolist()
+    limits_hold(d, p, beta, se)
+    pd_ = v2.decode_trans_frame(plain)
+    assert pd_["n_cs"] == 0 and pd_["cs_row"].size == 0
+    pp, pf_ = v2.zstd_unframe(plain, None, "x"), v2.zstd_unframe(fr, None, "x")
+    assert len(pf_) - len(pp) == 12 * 3
+    assert pp[:44] == pf_[:44] and pp[44:48] == b"\0\0\0\0"      # only the count differs in the header
+    try:
+        v2.encode_trans_frame(ordinal, pos, rs, af_code, ref, alt, p, beta, se, 19,
+                              cs_row=[len(pos)], cs_pip=[0.5], cs_id=[0])
+        raise AssertionError("accepted a credible-set row past the frame's rows")
+    except ValueError as e:
+        assert "cs_row" in str(e), e
 
 
 @case

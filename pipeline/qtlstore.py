@@ -24,8 +24,8 @@ from pathlib import Path
 
 import numpy as np
 
-FORMAT_VERSION = 1                 # the version written when a caller names none
-SUPPORTED_VERSIONS = (1, 2)        # versions this reader accepts; 2 is the unified p/beta/se triple
+FORMAT_VERSION = 2                 # the version written when a caller names none: the p/beta/se triple
+SUPPORTED_VERSIONS = (1, 2)        # versions this reader accepts; 1 is the live store until the v2 release
 
 # ---- digest -----------------------------------------------------------------------------------
 DIGEST = re.compile(r"^[A-Za-z0-9_-]{32}$")
@@ -202,6 +202,33 @@ CATALOGS = "variant_catalogs"            # pointer level of variant catalogs (st
 OVERLAPS = "overlaps"                    # pointer level of catalog overlap indexes (derived)
 POINTER_DIRS = (CATALOGS, "annotations", "experiments", OVERLAPS)
 
+# ---- experiment kind, and collections ----------------------------------------------------------
+# `plans/2026-10-07-experiment-model.md`. One experiment is one scan: a cis QTL scan, a trans QTL
+# scan, or a GWAS. A cohort that published eQTL and sQTL, cis and trans, is four experiments.
+#
+# `kind` is a **closed** enum, deliberately, and the rule it follows is worth stating because it
+# decides where a future axis goes: *open where the value is a label, closed where the value selects
+# a layout*. `phenotype_type` is open and always was (SPEC section 8, "data, not a file kind"), which
+# is why `protein_somalogic` cost no format change. `kind` picks which object kind to expect, which
+# fields exist and whether there is an annotation, so a reader cannot shrug at one it does not know:
+# it would show a partial store as though it were complete. Adding a kind is a version bump.
+EXPERIMENT_KINDS = ("qtl_cis", "qtl_trans", "gwas")
+QTL_KINDS = ("qtl_cis", "qtl_trans")
+
+# A collection is a **field, not an entity** (D16): experiments carrying the same value are in the
+# same collection, and membership is derived rather than declared. The value is the object name of a
+# small immutable JSON document holding the publication's title, citation and source -- a digest, so
+# equality *proves* identical metadata and there is nothing to keep in agreement. It is an object
+# name rather than a bare digest so `object_names` sees it and `gc` protects it.
+#
+# What validate does **not** check (D24): that members agree on anything. A collection is provenance,
+# not a compatibility claim -- one publication may release a GRCh37 eQTL scan and a GRCh38 pQTL scan,
+# as MESA does. The burden is the reader's: never put two experiments on one axis without comparing
+# their catalogs.
+COLLECTION_EXT = "json"
+COLLECTION_FIELDS = ("title", "citation", "source", "parent")
+MAX_COLLECTION_DEPTH = 16          # a parent chain this deep is a mistake, not a hierarchy
+
 
 class Store:
     def __init__(self, root: Path):
@@ -234,15 +261,72 @@ class Store:
             raise ValueError(f"{level}/{pid}: objects not in the store (write objects first): {missing[:3]}")
         return _write_json(self.root / level / f"{pid}.json", doc)
 
+    def write_collection(self, title: str, citation: dict | None = None, source: dict | None = None,
+                         parent: str | None = None) -> str:
+        """Put a collection document and return its object name, which is what an experiment's
+        `collection` field holds. Two publications with identical metadata collapse to one object,
+        which is correct: they would be the same collection."""
+        if not title or not isinstance(title, str):
+            raise ValueError("collection: a title is required")
+        if parent is not None and not OBJECT_NAME.match(parent):
+            raise ValueError(f"collection: parent {parent!r} is not an object name")
+        if parent is not None and not (self.immutable / parent).exists():
+            raise ValueError(f"collection: parent {parent} is not in the store (write it first)")
+        doc = {"title": title, "citation": citation or {}, "source": source or {}, "parent": parent}
+        return self.put(json.dumps(doc, indent=1, sort_keys=True).encode(), COLLECTION_EXT)
+
+    def collection_chain(self, name: str) -> list[str]:
+        """A collection's object name followed by its ancestors, nearest first.
+
+        Raises on a missing member, a document that does not parse, or a cycle. Content addressing
+        makes a cycle impossible among well-formed objects -- each name depends on the other's
+        bytes -- so the loop and depth checks only ever fire on a store whose object bytes no longer
+        match their names, which `validate` reports separately. They are here so this function
+        terminates on such a store rather than spinning."""
+        out, seen = [], set()
+        cur = name
+        while cur is not None:
+            if not OBJECT_NAME.match(cur):
+                raise ValueError(f"collection: {cur!r} is not an object name")
+            if cur in seen:
+                raise ValueError(f"collection: parent chain loops at {cur}")
+            if len(out) >= MAX_COLLECTION_DEPTH:
+                raise ValueError(f"collection: parent chain deeper than {MAX_COLLECTION_DEPTH}")
+            p = self.immutable / cur
+            if not p.exists():
+                raise ValueError(f"collection {cur}: object missing")
+            seen.add(cur)
+            out.append(cur)
+            try:
+                doc = json.loads(p.read_text())
+            except Exception as e:                # noqa: BLE001 -- any parse failure is a failure
+                raise ValueError(f"collection {cur}: {e}") from None
+            if not isinstance(doc, dict) or not doc.get("title"):
+                raise ValueError(f"collection {cur}: no title")
+            cur = doc.get("parent")
+        return out
+
     def write_store(self, name: str, refget: list[str], version: int = FORMAT_VERSION) -> Path:
         """store.json last: it lists whatever pointers exist now. `version` must be the version every
         object's header declares -- `validate` compares the two, which is what turns a store built
-        half with one codec and half with another into a failure rather than a surprise."""
+        half with one codec and half with another into a failure rather than a surprise.
+
+        Experiments are a **map**, not a list, carrying each one's `kind` and `collection` (D19). It
+        is generated from the documents on disk, like every other entry here, so it is a derived
+        index rather than a second place the truth lives -- `validate` checks the two agree. It earns
+        its place by being free: `store.json` is the first fetch on every page load, so a reader can
+        group experiments into collections and route by kind without opening anything, and at ~68
+        bytes an entry 100 experiments come to ~12 KB, 2.3 KB gzipped."""
         if version not in SUPPORTED_VERSIONS:
             raise ValueError(f"store.json: format_version {version} not in {SUPPORTED_VERSIONS}")
-        ids = {lvl: sorted(p.stem for p in (self.root / lvl).glob("*.json")) for lvl in POINTER_DIRS}
+        ids = {lvl: sorted(p.stem for p in (self.root / lvl).glob("*.json")) for lvl in POINTER_DIRS
+               if lvl != "experiments"}
+        exps = {}
+        for p in sorted((self.root / "experiments").glob("*.json")):
+            doc = json.loads(p.read_text())
+            exps[p.stem] = {"kind": doc.get("kind"), "collection": doc.get("collection")}
         return _write_json(self.root / "store.json", {"name": name, "format_version": version,
-                                                      "refget": refget, **ids})
+                                                      "refget": refget, "experiments": exps, **ids})
 
     def load(self, level: str, pid: str) -> dict:
         return json.loads((self.root / level / f"{pid}.json").read_text())
@@ -294,6 +378,7 @@ class Store:
                         fails.append(f"{lvl}/{pid}: object {n} missing")
                     elif sha512t24u_file(obj) != OBJECT_NAME.match(n)["digest"]:
                         fails.append(f"{lvl}/{pid}: object {n} bytes do not match its name")
+        fails += self._check_experiment_map(st, docs)
         for (lvl, pid), doc in docs.items():
             if lvl == CATALOGS:
                 for c in doc["chromosomes"]:
@@ -320,30 +405,30 @@ class Store:
             if cat is None:
                 fails.append(f"experiments/{pid}: variant catalog {doc['catalog']!r} not in store")
                 continue
-            if ("annotations", doc["annotation"]) not in docs:
-                fails.append(f"experiments/{pid}: annotation {doc['annotation']!r} not in store")
+            # a GWAS has no gene annotation: its one phenotype is a trait, not a gene
+            if doc.get("kind") in QTL_KINDS and ("annotations", doc.get("annotation")) not in docs:
+                fails.append(f"experiments/{pid}: annotation {doc.get('annotation')!r} not in store")
             if doc.get("catalog_identity") != cat.get("identity_digest"):
                 fails.append(f"experiments/{pid}: catalog_identity {doc.get('catalog_identity')!r} != variant catalog "
                              f"{doc['catalog']!r} identity_digest {cat.get('identity_digest')!r}")
             table = {c["name"]: c["seq_digest"] for c in cat["chromosomes"]}
-            files = [(f"{r['phenotype_type']} {chrom}", chrom, n, KIND_RESULTS)
-                     for r in doc["results"] for chrom, n in r["files"].items()]
+            # one experiment is one scan, so its per-chromosome objects are its own `files`
+            per_chrom_kind = KIND_GWAS if doc.get("kind") == "gwas" else KIND_RESULTS
+            files = [(f"{doc.get('kind')} {chrom}", chrom, n, per_chrom_kind)
+                     for chrom, n in (doc.get("files") or {}).items()]
             files += [(f"hits {chrom}", chrom, n, KIND_HITS) for chrom, n in (doc.get("hits") or {}).items()]
-            gw = doc.get("gwas") or {}
-            files += [(f"gwas {chrom}", chrom, n, KIND_GWAS) for chrom, n in (gw.get("files") or {}).items()]
             for what, chrom, n, kind in files:
                 if chrom not in table:
                     fails.append(f"experiments/{pid} {what}: {chrom} not in variant catalog table")
                 else:
                     fails += self._check_header(f"experiments/{pid} {what}", n, chrom, table[chrom], kind)
             # objects that span the whole variant catalog: chromosome `all`, the collection digest
-            wide = [(f"trans {r['phenotype_type']}", r["trans"]["file"], KIND_TRANS)
-                    for r in doc["results"] if r.get("trans")]
-            wide += [("gwas index", gw["index"], KIND_GWAS_INDEX)] if gw.get("index") else []
+            wide = [("trans", doc["file"], KIND_TRANS)] if doc.get("file") else []
+            wide += [("gwas index", doc["index"], KIND_GWAS_INDEX)] if doc.get("index") else []
             for what, n, kind in wide:
                 fails += self._check_header(f"experiments/{pid} {what}", n, ALL, cat.get("collection_digest"), kind)
             # trans frames tile each object and each gene's frames are one contiguous range
-            tfiles = [r["trans"]["file"] for r in doc["results"] if r.get("trans")]
+            tfiles = [doc["file"]] if doc.get("kind") == "qtl_trans" and doc.get("file") else []
             if tfiles and all((self.immutable / n).exists() for n in tfiles + [doc["search_index"]]):
                 from . import results     # late, as for gwas below
                 rows = results.load_index(self, doc).to_pylist()
@@ -354,7 +439,7 @@ class Store:
                 from . import results
                 fails += results.check_split(self, doc, cat)
             # the GWAS bin summary (an Arrow object, no header): schema, bins, chromosomes with GWAS rows
-            bins = gw.get("bins")
+            bins = doc.get("bins") if doc.get("kind") == "gwas" else None
             if bins and (self.immutable / bins["file"]).exists():
                 from . import gwas     # late: the Arrow stack is not needed to hash bytes
                 what = f"experiments/{pid} gwas bins"
@@ -364,7 +449,7 @@ class Store:
                     fails.append(f"{what}: {e}")
                 else:
                     fails += [f"{what}: {x}" for x in gwas.check_bins(t, cat, bins.get("bin_bp", 0), bins.get("n_bins", -1))]
-                    extra = sorted(set(t.column("chr").to_pylist()) - set(gw.get("files") or {}))
+                    extra = sorted(set(t.column("chr").to_pylist()) - set(doc.get("files") or {}))
                     if extra:
                         fails.append(f"{what}: chromosomes {extra} have bins and no GWAS file")
             # a hits file's frame table covers exactly the chromosome's variants (u32 at byte 24)
@@ -421,6 +506,50 @@ class Store:
             total = overlap.rank(d, i, d["n_union"]) if d["n_union"] else 0
             if total != c["n_sites"]:
                 fails.append(f"{what}: catalog {c['id']} has {total} set bits for {c['n_sites']} sites")
+        return fails
+
+    def _check_experiment_map(self, st: dict, docs: dict) -> list[str]:
+        """`store.json`'s `experiments` map against the documents it was generated from (D19), each
+        `kind` against the closed enum, and each `collection` chain.
+
+        Deliberately absent: any check that the experiments sharing a collection agree with one
+        another (D24). A collection records who published what together, not that the results are
+        comparable -- one release can hold two assemblies. A reader that puts two experiments on one
+        axis has to compare their catalogs itself; the store will not do it for them."""
+        fails = []
+        m = st.get("experiments")
+        if m is None:
+            return ["store.json: no experiments entry"]
+        if not isinstance(m, dict):
+            return [f"store.json: experiments is a {type(m).__name__}, expected a map of id -> "
+                    "{kind, collection}"]
+        chains: dict[str, list[str] | str] = {}
+        for pid, entry in m.items():
+            doc = docs.get(("experiments", pid))
+            if doc is None:
+                continue                            # already reported as a missing file
+            what = f"experiments/{pid}"
+            if not isinstance(entry, dict):
+                fails.append(f"store.json {pid}: entry is not a map")
+                continue
+            kind = doc.get("kind")
+            if kind not in EXPERIMENT_KINDS:
+                fails.append(f"{what}: kind {kind!r} not in {EXPERIMENT_KINDS}")
+            if entry.get("kind") != kind:
+                fails.append(f"store.json {pid}: kind {entry.get('kind')!r}, the document says {kind!r}")
+            coll = doc.get("collection")
+            if entry.get("collection") != coll:
+                fails.append(f"store.json {pid}: collection {entry.get('collection')!r}, the document "
+                             f"says {coll!r}")
+            if coll is None:
+                continue
+            if coll not in chains:
+                try:
+                    chains[coll] = self.collection_chain(coll)
+                except ValueError as e:
+                    chains[coll] = str(e)
+            if isinstance(chains[coll], str):
+                fails.append(f"{what}: {chains[coll]}")
         return fails
 
     def _check_version(self, what: str, h: dict) -> list[str]:

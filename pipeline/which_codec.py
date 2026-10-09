@@ -75,18 +75,19 @@ def gwas_row_arithmetic(buf: bytes) -> list[int]:
 
     A GWAS block has no magic, but both versions open their payload with `u32 n, u32 heap_len` at
     the same two offsets and then lay out fixed-width rows: 21 bytes in v1, 18 in v2, after headers
-    of 8 and 40 bytes. So exactly one of `HL + RB*n + heap_len == len(payload)` holds unless the
-    numbers collide, and that is an answer the build code did not get to supply.
+    of 8 and 48 bytes, and v2 adds 12 bytes per credible-set record counted at offset 8. So exactly
+    one of `HL + RB*n + 12*k + heap_len == len(payload)` holds unless the numbers collide, and that
+    is an answer the build code did not get to supply.
 
     Block 0 is read with a streaming decompressor rather than from the index, so this needs only the
     one object. Returns the versions that fit, usually a single element."""
     try:
         payload = first_frame(buf)
-        n, heap_len = struct.unpack_from("<II", payload, 0)
+        n, heap_len, k2 = struct.unpack_from("<III", payload, 0)
     except Exception:                 # noqa: BLE001 -- an unreadable block fits no version
         return []
-    return [c.FORMAT_VERSION for c in (v1, v2)
-            if len(payload) == c.GWAS_HEADER_LEN + c.GWAS_ROW_BYTES * n + heap_len]
+    return [c.FORMAT_VERSION for c, k in ((v1, 0), (v2, k2))
+            if len(payload) == c.GWAS_HEADER_LEN + c.GWAS_ROW_BYTES * n + 12 * k + heap_len]
 
 
 def scan(store: Path) -> dict:
@@ -119,12 +120,12 @@ def scan(store: Path) -> dict:
                 key = "v2" if m == v2.MAGIC_BLOCK.decode() else "v1" if m == v1.MAGIC_BLOCK.decode() else "unknown"
                 out[key].append(f"{n} block magic {m}")
         elif ext == "qbt":
-            # One zstd frame per phenotype, concatenated, so the magic has to be read out of the
-            # first frame's payload: decoding `buf[HEADER_LEN:]` whole fails on the trailing frames
-            # and says nothing about the codec.
+            # Many zstd frames concatenated, so the magic has to be read out of the first one:
+            # decoding `buf[HEADER_LEN:]` whole fails on the trailing frames and says nothing about
+            # the codec. `QTT3` is the v2 trans frame and `QTT2` the v1 one.
             m = first_frame_magic(buf)
             key = "v2" if m == v2.MAGIC_TRANS else "v1" if m == v1.MAGIC_TRANS else "unknown"
-            out[key].append(f"{n} trans frame magic {m.decode('ascii', 'replace')}")
+            out[key].append(f"{n} trans frame, magic {m.decode('ascii', 'replace')}")
         elif ext == "qbg":
             fits = gwas_row_arithmetic(buf)
             claimed = h["version"]

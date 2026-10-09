@@ -90,8 +90,8 @@ def header_round_trip():
     b = qs.file_header(1, "chrX", 1234, 512, 1200, SEQ["chr1"])
     assert len(b) == 64
     h = qs.parse_file_header(b)
-    assert h == {"kind": 1, "version": 1, "chrom": "chrX", "count": 1234, "page_size": 512, "n_cis": 1200,
-                 "seq_digest": SEQ["chr1"]}
+    assert h == {"kind": 1, "version": qs.FORMAT_VERSION, "chrom": "chrX", "count": 1234, "page_size": 512,
+                 "n_cis": 1200, "seq_digest": SEQ["chr1"]}
     raises("sha512t24u", qs.file_header, 1, "chr1", 1, 1, 0, "abc")
     raises("1-8 ASCII", qs.file_header, 1, "chromosome1", 1, 1, 0, SEQ["chr1"])
     raises("magic", qs.parse_file_header, b"XXXX" + b[4:])
@@ -110,7 +110,7 @@ def header_version_is_a_parameter():
     assert qs.parse_file_header(v1)["version"] == 1
     assert qs.parse_file_header(v2)["version"] == 2
     assert [i for i in range(64) if v1[i] != v2[i]] == [5]
-    assert qs.file_header(4, "chr1", 10, 2048, 0, SEQ["chr1"]) == v1, "the default stays v1"
+    assert qs.file_header(4, "chr1", 10, 2048, 0, SEQ["chr1"]) == v2, "the default is v2; v1 is opt-in"
     raises("version 3", qs.file_header, 4, "chr1", 10, 2048, 0, SEQ["chr1"], 3)
     assert qs.codec_for(1).FORMAT_VERSION == 1 and qs.codec_for(2).FORMAT_VERSION == 2
     raises("no codec", qs.codec_for, 3)
@@ -122,15 +122,92 @@ def a_store_rejects_an_object_of_another_version():
     validate passed, because nothing compared an object's header to store.json. Now it does, so a
     half-migrated store is a failure and not a surprise."""
     with tempfile.TemporaryDirectory() as d:
-        st = build_store(Path(d))
+        st = build_store(Path(d))                   # objects at the default version, 2
         assert st.validate() == [], st.validate()
-        st.write_store("test", ["https://refget.example/store"], 2)
-        fails = st.validate()
-        assert fails and all("header version 1, store.json says 2" in f for f in fails), fails
-        n = len(fails)
         st.write_store("test", ["https://refget.example/store"], 1)
+        fails = st.validate()
+        assert fails and all("header version 2, store.json says 1" in f for f in fails), fails
+        n = len(fails)
+        st.write_store("test", ["https://refget.example/store"], 2)
         assert st.validate() == []
         assert n >= 4, f"only {n} objects had their version checked"
+
+
+@case
+def a_collection_is_a_field_and_membership_is_derived():
+    """D16/D17: no pointer level, no member list. Experiments carrying the same digest are in the
+    same collection, and the digest addresses the metadata, so equality *proves* the metadata agrees
+    rather than relying on copies staying in step."""
+    with tempfile.TemporaryDirectory() as d:
+        st = build_store(Path(d))
+        m = json.loads((Path(d) / "store.json").read_text())["experiments"]
+        groups = {}
+        for eid, e in m.items():
+            groups.setdefault(e["collection"], []).append(eid)
+        assert sorted(map(sorted, groups.values())) == [["gtex_v8_heart_lv_ge_cis"],
+                                                        ["topchef_ge_cis", "topchef_ge_trans"]]
+        # identical metadata is the same object, which is right: it would be the same collection
+        again = st.write_collection("TOPCHeF heart failure QTLs", {"year": 2026})
+        assert again == st.load("experiments", "topchef_ge_cis")["collection"]
+        # the digest resolves to a readable document with a title
+        doc = json.loads((st.immutable / again).read_text())
+        assert doc["title"] == "TOPCHeF heart failure QTLs" and doc["parent"] is None
+        assert st.validate() == []
+
+
+@case
+def collections_nest_and_a_loop_is_caught():
+    """D21: nesting via a `parent` digest. A digest cannot name an object that does not exist yet, so
+    `write_collection` requires the parent first -- but a store assembled another way can still hold
+    two documents naming each other, and that has to fail rather than spin."""
+    with tempfile.TemporaryDirectory() as d:
+        st = build_store(Path(d))
+        top = st.write_collection("A consortium", {"year": 2026})
+        mid = st.write_collection("One release of it", {"year": 2026}, parent=top)
+        leaf = st.write_collection("A re-analysis", {"year": 2027}, parent=mid)
+        assert st.collection_chain(leaf) == [leaf, mid, top]
+        raises("is not in the store", st.write_collection, "x", None, None, "A" * 32 + ".json")
+        # a hand-made loop: two documents naming each other
+        a_name = "A" * 32 + ".json"
+        b = st.put(json.dumps({"title": "b", "parent": a_name}).encode(), "json")
+        (st.immutable / a_name).write_text(json.dumps({"title": "a", "parent": b}))
+        raises("loops at", st.collection_chain, a_name)
+        # and an experiment naming a broken chain is a validation failure
+        exp = st.load("experiments", "topchef_ge_cis")
+        exp["collection"] = a_name
+        (Path(d) / "experiments" / "topchef_ge_cis.json").write_text(json.dumps(exp))
+        st.write_store("test", [])
+        assert any("loops at" in f for f in st.validate()), st.validate()
+
+
+@case
+def the_experiment_map_must_agree_but_members_need_not():
+    """Two halves of D19 and D24. `store.json`'s map is generated from the documents, so validate
+    checks they agree -- that is what keeps a derived index honest. It does **not** check that
+    experiments sharing a collection agree with each other: a collection is provenance, not a
+    compatibility claim, and one publication can release two assemblies (MESA does)."""
+    with tempfile.TemporaryDirectory() as d:
+        st = build_store(Path(d))
+        p = Path(d) / "store.json"
+        doc = json.loads(p.read_text())
+        doc["experiments"]["topchef_ge_cis"]["kind"] = "gwas"
+        p.write_text(json.dumps(doc))
+        assert any("kind 'gwas', the document says 'qtl_cis'" in f for f in st.validate()), st.validate()
+        st.write_store("test", [])                    # regenerating fixes it
+        assert st.validate() == []
+        # a kind outside the closed enum is refused; `phenotype_type` stays open by contrast
+        exp = st.load("experiments", "topchef_ge_trans")
+        exp["kind"] = "caqtl_cis"
+        (Path(d) / "experiments" / "topchef_ge_trans.json").write_text(json.dumps(exp))
+        st.write_store("test", [])
+        assert any("not in ('qtl_cis', 'qtl_trans', 'gwas')" in f for f in st.validate()), st.validate()
+        exp["kind"], exp["phenotype_type"] = "qtl_trans", "protein_somalogic"
+        (Path(d) / "experiments" / "topchef_ge_trans.json").write_text(json.dumps(exp))
+        st.write_store("test", [])
+        assert st.validate() == [], "a new phenotype_type is data, not a format change"
+        # members disagreeing on their variant catalog is NOT a failure (D24)
+        assert st.load("experiments", "topchef_ge_cis")["collection"] == \
+            st.load("experiments", "topchef_ge_trans")["collection"]
 
 
 @case
@@ -215,12 +292,19 @@ def build_store(root: Path, seq: dict = SEQ) -> qs.Store:
                                           "rsid": st.put(qs.file_header(8, "all", 0, 4096, 0, COLLECTION), "qbr")})
     from .test_annotation import build_fixture
     build_fixture(st, "gencode_v39")
-    for eid in ("topchef", "gtex_v8_heart_lv"):
+    # one experiment per scan, each naming its publication by digest. The two cohorts are two
+    # collections; `topchef_ge_trans` shares TOPCHeF's, which is what makes it the same collection.
+    coll = {"topchef": st.write_collection("TOPCHeF heart failure QTLs", {"year": 2026}),
+            "gtex_v8_heart_lv": st.write_collection("GTEx v8 heart left ventricle", {"year": 2020})}
+    for eid, kind, cid in (("topchef_ge_cis", "qtl_cis", "topchef"),
+                           ("topchef_ge_trans", "qtl_trans", "topchef"),
+                           ("gtex_v8_heart_lv_ge_cis", "qtl_cis", "gtex_v8_heart_lv")):
         files = {c: st.put(qs.file_header(2, c, 1, 0, 0, seq[c]) + eid.encode(), "qbe") for c in CHROMS}
         hits = {c: st.put(qs.file_header(7, c, 0, 1024, len(SITES[c][0]), seq[c]) + eid.encode(), "qbh") for c in CHROMS}
-        st.write_pointer("experiments", eid, {"id": eid, "catalog": "cat1", "catalog_identity": ident,
+        st.write_pointer("experiments", eid, {"id": eid, "kind": kind, "collection": coll[cid],
+                                              "catalog": "cat1", "catalog_identity": ident,
                                               "annotation": "gencode_v39", "hits": hits,
-                                              "results": [{"phenotype_type": "ge", "dof": None, "files": files}]})
+                                              "phenotype_type": "ge", "dof": None, "files": files})
     st.write_store("test", ["https://refget.example/store"])
     return st
 
@@ -231,7 +315,13 @@ def store_builds_and_validates():
         st = build_store(Path(d))
         assert st.validate() == []
         doc = json.loads((Path(d) / "store.json").read_text())
-        assert doc["experiments"] == ["gtex_v8_heart_lv", "topchef"] and doc["variant_catalogs"] == ["cat1"]
+        assert sorted(doc["experiments"]) == ["gtex_v8_heart_lv_ge_cis", "topchef_ge_cis", "topchef_ge_trans"]
+        assert doc["experiments"]["topchef_ge_trans"]["kind"] == "qtl_trans"
+        # the two TOPCHeF scans share one collection digest; GTEx has its own
+        byc = doc["experiments"]
+        assert byc["topchef_ge_cis"]["collection"] == byc["topchef_ge_trans"]["collection"]
+        assert byc["gtex_v8_heart_lv_ge_cis"]["collection"] != byc["topchef_ge_cis"]["collection"]
+        assert doc["variant_catalogs"] == ["cat1"]
         vidx = qs.file_header(9, "all", 2, 512, 0, COLLECTION)
         assert st.put(vidx, "qbx") == st.load("variant_catalogs", "cat1")["vidx"]      # idempotent
 
@@ -249,14 +339,14 @@ def pointer_needs_objects_first():
 def validate_catches_damage():
     with tempfile.TemporaryDirectory() as d:
         st = build_store(Path(d))
-        exp = st.load("experiments", "topchef")
+        exp = st.load("experiments", "topchef_ge_cis")
         # corrupt one object's bytes
-        (st.immutable / exp["results"][0]["files"]["chr1"]).write_bytes(qs.file_header(2, "chr1", 1, 0, 0, SEQ["chr1"]))
+        (st.immutable / exp["files"]["chr1"]).write_bytes(qs.file_header(2, "chr1", 1, 0, 0, SEQ["chr1"]))
         # point a results file at the wrong genome
         wrong = st.put(qs.file_header(2, "chr2", 1, 0, 0, SEQ["chr1"]), "qbe")
-        exp["results"][0]["files"]["chr2"] = wrong
-        exp["results"][0]["files"]["chr3"] = wrong
-        (Path(d) / "experiments" / "topchef.json").write_text(json.dumps(exp))
+        exp["files"]["chr2"] = wrong
+        exp["files"]["chr3"] = wrong
+        (Path(d) / "experiments" / "topchef_ge_cis.json").write_text(json.dumps(exp))
         fails = st.validate()
         assert any("do not match its name" in f for f in fails), fails
         assert any("header seq_digest" in f and "chr2" in f for f in fails), fails
@@ -271,25 +361,25 @@ def validate_checks_hits_indexes_and_catalog_identity():
         d = Path(d)
         st = build_store(d)
         assert st.validate() == []
-        exp = st.load("experiments", "topchef")
+        exp = st.load("experiments", "topchef_ge_cis")
         exp["hits"]["chr2"] = st.put(qs.file_header(7, "chr2", 0, 1024, 5, SEQ["chr1"]), "qbh")    # wrong sequence and count
         exp["hits"]["chr1"] = st.put(qs.file_header(2, "chr1", 0, 0, 0, SEQ["chr1"]), "qbh")      # wrong kind
         exp["hits"]["chr9"] = exp["hits"]["chr2"]
         exp["catalog_identity"] = qs.sha512t24u(b"another variant catalog")
-        (d / "experiments" / "topchef.json").write_text(json.dumps(exp))
+        (d / "experiments" / "topchef_ge_cis.json").write_text(json.dumps(exp))
         doc = st.load("variant_catalogs", "cat1")
         doc["vidx"] = st.put(qs.file_header(9, "all", 2, 512, 0, SEQ["chr1"]), "qbx")            # not the collection
         doc["rsid"] = st.put(qs.file_header(8, "chr1", 0, 4096, 0, COLLECTION), "qbr")            # not `all`
         (d / "variant_catalogs" / "cat1.json").write_text(json.dumps(doc))
         fails = st.validate()
-        want = ["topchef hits chr2: header seq_digest", "topchef hits chr1: header kind 2 != 7",
-                "topchef hits chr2: header covers 5 variants", "topchef hits chr1: header covers 0 variants",
-                "topchef hits chr9: chr9 not in variant catalog table", "topchef: catalog_identity",
+        want = ["topchef_ge_cis hits chr2: header seq_digest", "topchef_ge_cis hits chr1: header kind 2 != 7",
+                "topchef_ge_cis hits chr2: header covers 5 variants", "topchef_ge_cis hits chr1: header covers 0 variants",
+                "topchef_ge_cis hits chr9: chr9 not in variant catalog table", "topchef_ge_cis: catalog_identity",
                 "cat1 vidx: header seq_digest", "cat1 rsid: header chromosome 'chr1' != 'all'"]
         for w in want:
             assert any(w in f for f in fails), (w, fails)
         assert len(fails) == len(want), fails
-        assert not any("gtex_v8_heart_lv" in f for f in fails), fails
+        assert not any("gtex_v8_heart_lv_ge_cis" in f for f in fails), fails
 
 
 @case
@@ -336,7 +426,7 @@ def identity_digest_must_recompute():
         doc = st.load("variant_catalogs", "cat1")
         doc["identity_digest"] = qs.sha512t24u(b"some other variant catalog")
         (d / "claimed" / "variant_catalogs" / "cat1.json").write_text(json.dumps(doc))
-        for eid in ("topchef", "gtex_v8_heart_lv"):            # the experiments copy the claim
+        for eid in ("topchef_ge_cis", "topchef_ge_trans", "gtex_v8_heart_lv_ge_cis"):   # they copy the claim
             exp = st.load("experiments", eid)
             exp["catalog_identity"] = doc["identity_digest"]
             (d / "claimed" / "experiments" / f"{eid}.json").write_text(json.dumps(exp))
@@ -377,7 +467,7 @@ def codecs_do_not_mix():
     """Who may name which codec by module.
 
     The v0 line and the v1/v2 line never meet: the v0 reader tools import only packfmt_v0, and the
-    store modules never import it. `verify_v0` and `bench_store` compare the two formats and are the
+    store modules never import it. Only the v0 reader and the TOPCHeF acceptance gate read v0, and they are the
     only modules allowed both.
 
     Within the v1/v2 line the rule is tighter, and it is the one that matters: **a builder imports

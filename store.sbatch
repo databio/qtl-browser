@@ -7,14 +7,15 @@
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=32G
 #
-# A qtlb v1 store from contract tables: annotation (step 6), then per experiment a catalog (step 5)
-# and results (step 7), then Store.validate. Writes only $QTLB_STORE. Chromosomes from QTLB_CHROMS
-# (default chr21,chr22). EXPERIMENTS is a space-separated list of `id:tables_dir[:annotation]`; each
-# experiment gets its own variant catalog `<id>_grch38`. A tables dir holding trans.parquet or gwas.parquet
-# gets the experiment's trans and GWAS objects too. An experiment with no annotation named takes the one
-# its adapter recorded (ingestion.json `source.gene_annotation`: gencode_v39 for the eQTL Catalogue),
-# else gencode_v34. ANNOTATION_GTFS maps each annotation id to its GTF; each one an experiment uses is
-# built once. The default is the TOPCHeF smoke build, which also runs the v0 comparison.
+# A qtlstore (format version 2, qtlstore.FORMAT_VERSION) from contract tables: annotation, then per
+# cohort a variant catalog and one experiment per scan (cis and trans per phenotype type, and a GWAS
+# when the tables hold gwas.parquet, each its own experiment under a shared collection), then
+# Store.validate. Writes only $QTLB_STORE. Chromosomes from QTLB_CHROMS (default chr21,chr22; a subset
+# build changes the shape of the trans data, so measure on `all`). EXPERIMENTS is a space-separated list
+# of `id:tables_dir[:annotation]`; `id` is the stem the experiment ids are derived from, and each cohort
+# gets its own variant catalog `<id>_grch38`. An experiment with no annotation named takes the one its
+# adapter recorded (ingestion.json `source.gene_annotation`: gencode_v39 for the eQTL Catalogue), else
+# gencode_v34. ANNOTATION_GTFS maps each annotation id to its GTF; each one a cohort uses is built once.
 # QTLB_CHROMS=all builds every chromosome; give it more room: `sbatch --time=6:00:00 --mem=64G`.
 # Every phase logs `phase <name>: <s> s wall, <KB> KB peak RSS` (/usr/bin/time).
 set -uo pipefail
@@ -82,5 +83,6 @@ for p in sorted((Path(sys.argv[1]) / "experiments").glob("*.json")):
 EOF
 # CROSSCAT="catalogA catalogB": the cross-catalog lookup check between two variant catalogs
 [ -n "${CROSSCAT:-}" ] && T crosscat uv run python -m pipeline.qtlstore crosscat --store "$STORE" $CROSSCAT
-[ -z "${SKIP_V0:-}" ] && T verify-v0 uv run python -m pipeline.verify_v0 --store "$STORE" --id topchef --genes "${GENES:-40}"
+# which codec wrote every object, read from the bytes rather than trusted from the build
+T which-codec uv run python -m pipeline.which_codec --store "$STORE"
 echo "finished $(date -Is)"

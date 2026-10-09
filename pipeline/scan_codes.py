@@ -139,20 +139,19 @@ def check_limits(doc: dict) -> list[str]:
     for `beta_over_se` -- it never bounded the quantity it breaches -- and a 0.0 limit there is read
     as "not stated" rather than as a breach of zero."""
     out, unstated = [], []
-    for r in doc.get("results") or []:
-        for scope, entry in (("cis", r), ("trans", r.get("trans") or {})):
-            p = entry.get("precision") or {}
-            lim, got = p.get("theoretical_limit") or {}, p.get("measured_worst") or {}
-            for field, g in got.items():
-                if field == "rows_compared" or field not in lim:
-                    continue
-                where = f"{r.get('phenotype_type')} {scope} {field}"
-                if lim[field] == 0.0:
-                    if g > 0.0:
-                        unstated.append(f"{where}: measured {g:.6g}, no limit stated")
-                    continue
-                if g > lim[field]:
-                    out.append(f"{where}: measured {g:.6g} exceeds the limit {lim[field]:.6g}")
+    # one experiment is one scan, so there is one precision block per document
+    p = doc.get("precision") or {}
+    lim, got = p.get("theoretical_limit") or {}, p.get("measured_worst") or {}
+    for field, g in got.items():
+        if field == "rows_compared" or field not in lim:
+            continue
+        where = f"{doc.get('id')} {field}"
+        if lim[field] == 0.0:
+            if g > 0.0:
+                unstated.append(f"{where}: measured {g:.6g}, no limit stated")
+            continue
+        if g > lim[field]:
+            out.append(f"{where}: measured {g:.6g} exceeds the limit {lim[field]:.6g}")
     return {"breaches": out, "unstated": unstated}
 
 
@@ -165,6 +164,9 @@ def scan(objects: Objects, exp_id: str, chroms: list[str] | None = None, log=lam
     read without being told. Reading a v2 block at the v1 layout would not raise -- it would count
     beta codes as if they were SE codes and report a store full of reserved values."""
     doc = objects.pointer("experiments", exp_id)
+    if doc.get("kind") != "qtl_cis":
+        raise ValueError(f"experiments/{exp_id}: kind {doc.get('kind')!r}; only a cis scan has nominal blocks "
+                         f"to sweep (a trans scan's frames and a GWAS's blocks are checked by validate)")
     if objects.store:
         index = results.load_index(qs.Store(objects.store), doc)
     else:
@@ -176,7 +178,8 @@ def scan(objects: Objects, exp_id: str, chroms: list[str] | None = None, log=lam
                                              cols["n_var"], cols["has_nominal"]):
         if nominal and n and (chroms is None or chrom in chroms):
             want.setdefault((ptype, chrom), []).append((off, n))
-    files = {r["phenotype_type"]: r["files"] for r in doc["results"]}
+    # one experiment is one scan, so its `files` are its own; the index carries one phenotype type
+    files = {doc["phenotype_type"]: doc["files"]}
     out = {}
     for key in sorted(want, key=lambda k: (k[0], list(files[k[0]]).index(k[1]))):
         ptype, chrom = key

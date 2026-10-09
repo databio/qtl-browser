@@ -1,7 +1,12 @@
 """qtlstore v2 codec: p, beta and se all stored, nothing derived.
 
-`plans/2026-10-07-qtlstore-v2.md` is the design and the evidence. This module is the cis results
-block; trans frames and GWAS blocks follow once this is verified against a real build.
+`plans/2026-10-07-qtlstore-v2.md` is the design and the evidence. Three object layouts, one per
+result kind: the cis block, the trans frame and the GWAS block, each carrying the same 6-byte triple.
+The trans frame and the GWAS block stay separate on purpose: they differ in byte 16 (the variant's
+chromosome in a frame, which spans chromosomes; the N-table index in a GWAS block, which is one
+chromosome) and in framing (one frame per phenotype; fixed runs of 2,048 rows with a position
+index), and `plans/2026-10-07-experiment-model.md` D20 records what merging them cost when it was
+tried.
 
 Everything that does not change is imported from `packfmt_v1` rather than copied, so the diff
 between the formats is exactly the delta: zstd framing, the details JSON rules, the nlp quantizer and
@@ -218,6 +223,39 @@ def measured_worst(p, beta, se, nlp_d, beta_d, se_d) -> dict:
     return out
 
 
+# ---- credible-set records, shared by all three layouts -----------------------------------------
+def cs_records(cs_row, cs_pip, cs_id, n: int, what: str) -> np.ndarray:
+    """The 12-byte `(row, pip, cs_id)` records of one scope, validated: rows index this scope's
+    `n` rows, `(row, cs_id)` pairs strictly ascend, pips lie in [0, 1]. Empty when `cs_row` is None.
+
+    One section shape for the cis block, the trans frame and the GWAS block, because fine-mapping
+    output is the same thing wherever it came from (experiment-model F1, v2 gap G11): a fine-mapped
+    GWAS locus is routine and is exactly what colocalization wants, and before this the only place
+    it could go was the cis block."""
+    k = 0 if cs_row is None else len(cs_row)
+    cs = np.zeros(k, dtype=CS_DTYPE)
+    if not k:
+        return cs
+    if n == 0:
+        raise ValueError(f"{what}: credible-set records on a scope with no rows")
+    rows = pf._int_column(cs_row, "cs_row", 0, n - 1, -1, k)
+    ids = pf._int_column(cs_id, "cs_id", 0, 127, -1, k)
+    pip = pf._float_column(cs_pip, "cs_pip", k)
+    if np.any(rows < 0) or np.any(ids < 0):
+        raise ValueError(f"{what}: null credible-set row or cs_id")
+    if any((int(rows[i]), int(ids[i])) >= (int(rows[i + 1]), int(ids[i + 1])) for i in range(k - 1)):
+        raise ValueError(f"{what}: credible-set (row, cs_id) pairs must be strictly ascending")
+    if not np.all((pip >= 0) & (pip <= 1)):
+        raise ValueError(f"{what}: pip outside [0, 1] or null")
+    cs["row"], cs["pip"], cs["cs_id"] = rows, pip.astype(np.float32), ids
+    return cs
+
+
+def _check_cs(cs: np.ndarray, n: int, what: str) -> None:
+    if cs.size and (np.any(cs["row"] >= n) or np.any(cs["cs_id"] > 127)):
+        raise ValueError(f"{what}: credible-set row or cs_id out of range")
+
+
 # ---- cis block ---------------------------------------------------------------------------------
 def encode_gene_block(details: dict, var_start: int | None, p, beta, se,
                       cs_row, cs_pip, cs_id, level: int, *, flags: int = 0,
@@ -355,7 +393,7 @@ def decode_gene_block(buf: bytes, *, expect_blk_len: int | None = None,
 # ---- trans frame -------------------------------------------------------------------------------
 MAGIC_TRANS = b"QTT3"      # v1 is QTT2; the version digit is the only difference, as QGB0 -> QGB2
 TRANS_HEADER_LEN = 48
-_TRANS_HEADER = struct.Struct("<4sIddddII")
+_TRANS_HEADER = struct.Struct("<4sIddddII")     # magic, n, 4 scales, heap_len, n_cs (v1's reserved u32)
 TRANS_ROW_BYTES = 18
 assert _TRANS_HEADER.size == TRANS_HEADER_LEN
 # columns in payload order; 4+4+2+2+2+2+1+1 = 18
@@ -365,8 +403,9 @@ TRANS_COLUMNS = (("delta", "<u4", 4), ("rs_number", "<u4", 4), ("af_code", "<u2"
 assert sum(w for _, _, w in TRANS_COLUMNS) == TRANS_ROW_BYTES
 
 
-def encode_trans_frame(ordinal, pos, rs_number, af_code, ref, alt, p, beta, se, level: int) -> bytes:
-    """One phenotype's trans rows as one zstd frame: `48 + 18n + heap_len`.
+def encode_trans_frame(ordinal, pos, rs_number, af_code, ref, alt, p, beta, se, level: int, *,
+                       cs_row=None, cs_pip=None, cs_id=None) -> bytes:
+    """One phenotype's trans rows as one zstd frame: `48 + 18n + 12k + heap_len`.
 
     The v1 frame stored `(nlp, beta)` and had the reader rebuild `se = |beta| / t(nlp, dof)` -- the
     mirror image of the cis side's missing beta, and with the same consequences: a null `dof` cost
@@ -377,6 +416,9 @@ def encode_trans_frame(ordinal, pos, rs_number, af_code, ref, alt, p, beta, se, 
     A trans row carries its own variant identity because it can be anywhere in the genome: 12 of its
     18 bytes. Position is delta coded, absolute on the first row of each chromosome and from the row
     before otherwise, which is why rows must be sorted by `(ordinal, pos, ref, alt)`.
+
+    Credible sets (`cs_row` into this frame's rows, `cs_pip`, `cs_id`) are optional and take v1's
+    reserved header `u32` as their count, so a frame without them is byte for byte what it was.
     """
     ordinal = np.asarray(ordinal, dtype=np.int64)
     n = len(ordinal)
@@ -411,14 +453,15 @@ def encode_trans_frame(ordinal, pos, rs_number, af_code, ref, alt, p, beta, se, 
             raise ValueError(f"trans frame: allele pair {r!r}/{t!r} is not two non-empty ASCII strings")
         heap.append(f"{r}\t{t}\n")
     heap_b = "".join(heap).encode("ascii")
+    cs = cs_records(cs_row, cs_pip, cs_id, n, "trans frame")
     cols = {"delta": delta, "rs_number": np.where(np.asarray(rs_number, dtype=np.int64) < 0, 0,
                                                   np.asarray(rs_number, dtype=np.int64)),
             "af_code": np.asarray(af_code), "nlp_code": nlp_q, "beta_code": beta_q, "se_code": se_q,
             "ordinal": ordinal, "allele": codes}
     payload = b"".join(
-        [_TRANS_HEADER.pack(MAGIC_TRANS, n, nlp_max, beta_max, lse_min, lse_max, len(heap_b), 0)]
-        + [np.asarray(cols[c]).astype(t).tobytes() for c, t, _ in TRANS_COLUMNS] + [heap_b])
-    assert len(payload) == TRANS_HEADER_LEN + TRANS_ROW_BYTES * n + len(heap_b)
+        [_TRANS_HEADER.pack(MAGIC_TRANS, n, nlp_max, beta_max, lse_min, lse_max, len(heap_b), cs.size)]
+        + [np.asarray(cols[c]).astype(t).tobytes() for c, t, _ in TRANS_COLUMNS] + [cs.tobytes(), heap_b])
+    assert len(payload) == TRANS_HEADER_LEN + TRANS_ROW_BYTES * n + CS_RECORD_LEN * cs.size + len(heap_b)
     return zstd_frame(payload, level)
 
 
@@ -427,12 +470,12 @@ def decode_trans_frame(frame: bytes, what: str = "trans frame") -> dict:
     p = zstd_unframe(frame, None, what)
     if len(p) < TRANS_HEADER_LEN:
         raise ValueError(f"{what}: shorter than its header")
-    magic, n, nlp_max, beta_max, lse_min, lse_max, heap_len, reserved = _TRANS_HEADER.unpack_from(p, 0)
-    if magic != MAGIC_TRANS or reserved or n < 1:
-        raise ValueError(f"{what}: bad magic, reserved field or row count")
-    if len(p) != TRANS_HEADER_LEN + TRANS_ROW_BYTES * n + heap_len:
+    magic, n, nlp_max, beta_max, lse_min, lse_max, heap_len, k = _TRANS_HEADER.unpack_from(p, 0)
+    if magic != MAGIC_TRANS or n < 1:
+        raise ValueError(f"{what}: bad magic or row count")
+    if len(p) != TRANS_HEADER_LEN + TRANS_ROW_BYTES * n + CS_RECORD_LEN * k + heap_len:
         raise ValueError(f"{what}: payload length {len(p)} != {TRANS_HEADER_LEN} + "
-                         f"{TRANS_ROW_BYTES}n + heap_len")
+                         f"{TRANS_ROW_BYTES}n + {CS_RECORD_LEN}k + heap_len")
     for name, v in (("nlp_max", nlp_max), ("beta_max", beta_max), ("lse_min", lse_min), ("lse_max", lse_max)):
         if not math.isfinite(v):
             raise ValueError(f"{what}: {name} is not finite")
@@ -442,6 +485,9 @@ def decode_trans_frame(frame: bytes, what: str = "trans frame") -> dict:
     for name, t, w in TRANS_COLUMNS:
         col[name] = np.frombuffer(p, t, n, o)
         o += w * n
+    cs = np.frombuffer(p, CS_DTYPE, k, o)
+    o += CS_RECORD_LEN * k
+    _check_cs(cs, n, what)
     ordinal = col["ordinal"].astype(np.int64)
     if ordinal.min() < 1 or np.any(np.diff(ordinal) < 0):
         raise ValueError(f"{what}: chromosome ordinals not >= 1 and non-decreasing")
@@ -462,18 +508,19 @@ def decode_trans_frame(frame: bytes, what: str = "trans frame") -> dict:
         pairs[i] = tuple(rec.split("\t"))
     nlp = dequantize_nlp(col["nlp_code"], nlp_max)
     af = np.where(col["af_code"] == pf.AF_NULL, np.nan, col["af_code"] / pf.AF_MAXQ)
-    return {"n": n, "nlp_max": nlp_max, "beta_max": beta_max, "lse_min": lse_min, "lse_max": lse_max,
+    return {"n": n, "n_cs": k, "nlp_max": nlp_max, "beta_max": beta_max, "lse_min": lse_min, "lse_max": lse_max,
             "ordinal": ordinal, "pos": pos, "rs_number": col["rs_number"].astype(np.int64),
             "af_code": col["af_code"], "af": af, "nlp_code": col["nlp_code"], "nlp": nlp,
             "p": p_from_nlp(nlp), "beta_code": col["beta_code"],
             "beta": dequantize_beta(col["beta_code"], beta_max),
             "se_code": col["se_code"], "se": dequantize_se(col["se_code"], lse_min, lse_max),
+            "cs_row": cs["row"], "cs_pip": cs["pip"], "cs_id": cs["cs_id"],
             "ref": [x[0] for x in pairs], "alt": [x[1] for x in pairs]}
 
 
 # ---- GWAS block --------------------------------------------------------------------------------
-GWAS_HEADER_LEN = 40
-_GWAS_HEADER = struct.Struct("<IIdddd")
+GWAS_HEADER_LEN = 48
+_GWAS_HEADER = struct.Struct("<III4xdddd")    # n, heap_len, n_cs, 4 pad so the scales are 8-aligned
 GWAS_ROW_BYTES = 18
 assert _GWAS_HEADER.size == GWAS_HEADER_LEN
 GWAS_COLUMNS = (("position_delta", "<u4", 4), ("rs_number", "<u4", 4), ("af_code", "<u2", 2),
@@ -508,8 +555,9 @@ def encode_gwas_columns(codes: dict, ref: list, alt: list, level: int) -> bytes:
                              codes["n_code"], codes["rs_number"], ref, alt, level)
 
 
-def encode_gwas_block(position, p, beta, se, af, n_code, rs_number, ref, alt, level: int) -> bytes:
-    """One GWAS block of B consecutive rows as one zstd frame: `40 + 18n + heap_len`.
+def encode_gwas_block(position, p, beta, se, af, n_code, rs_number, ref, alt, level: int, *,
+                      cs_row=None, cs_pip=None, cs_id=None) -> bytes:
+    """One GWAS block of B consecutive rows as one zstd frame: `48 + 18n + 12k + heap_len`.
 
     v1 stored this losslessly -- `i32` beta at `rint(b * 1e4)`, `u16` se likewise, and p as a `u16`
     mantissa with an `i8` exponent -- and `gwas_codes` refused any source carrying more precision
@@ -519,15 +567,19 @@ def encode_gwas_block(position, p, beta, se, af, n_code, rs_number, ref, alt, le
     its exception.
 
     The uncompressed row gets smaller -- 9 bytes of lossless p/beta/se become 6 codes, so at
-    B = 2048 the payload goes 43,016 -> 36,904 bytes, -14.2%, and the four f64 scales cost
-    0.0156 B/row -- but **the stored object does not**. Measured on the DCM GWAS, chr21/22, the same
-    349,950 rows: v1 13.290 B/row against v2 13.585, +2.2%. Quantized codes spread their entropy
-    across all 16 bits, where v1's `rint(x * 1e4)` leaves structure for zstd to find, and that costs
-    more than the three bytes saved. The reason to do it anyway is uniformity, not size.
+    B = 2048 the payload goes 43,016 -> 36,912 bytes, -14.2%, and the four f64 scales and the
+    credible-set count cost 0.02 B/row -- but **the stored object does not**. Measured on the DCM
+    GWAS, chr21/22, the same 349,950 rows: v1 13.290 B/row against v2 13.585, +2.2%. Quantized codes
+    spread their entropy across all 16 bits, where v1's `rint(x * 1e4)` leaves structure for zstd to
+    find, and that costs more than the three bytes saved. The reason to do it anyway is uniformity,
+    not size.
 
     `af` is the raw frequency; it is coded `rint(af * 65534)` here rather than v1's `rint(af * 1e4)`,
     which aligns the GWAS side with the variant catalog and improves its af limit from 5.0e-05 to
     7.63e-06 (plan D8).
+
+    Credible sets (`cs_row` into this block's rows, `cs_pip`, `cs_id`) are optional. A fine-mapped
+    GWAS locus had nowhere to go before (gap G11); now it sits in the block a locus read fetches.
     """
     pos = np.asarray(position, dtype=np.int64)
     n = pos.size
@@ -566,13 +618,15 @@ def encode_gwas_block(position, p, beta, se, af, n_code, rs_number, ref, alt, le
                 raise ValueError(f"gwas {nm}: row {i} allele {s!r} is not an ASCII string without tab or newline")
         heap.append(f"{ref[i]}\t{alt[i]}\n")
     heap_b = "".join(heap).encode("ascii")
+    cs = cs_records(cs_row, cs_pip, cs_id, n, "gwas block")
     rs = np.asarray(rs_number, dtype=np.int64)
     cols = {"position_delta": deltas, "rs_number": np.where(rs < 0, 0, rs), "af_code": af_q,
             "nlp_code": nlp_q, "beta_code": beta_q, "se_code": se_q,
             "n_code": np.asarray(n_code), "allele": allele}
-    payload = b"".join([_GWAS_HEADER.pack(n, len(heap_b), nlp_max, beta_max, lse_min, lse_max)]
-                       + [np.asarray(cols[c]).astype(t).tobytes() for c, t, _ in GWAS_COLUMNS] + [heap_b])
-    assert len(payload) == GWAS_HEADER_LEN + GWAS_ROW_BYTES * n + len(heap_b)
+    payload = b"".join([_GWAS_HEADER.pack(n, len(heap_b), cs.size, nlp_max, beta_max, lse_min, lse_max)]
+                       + [np.asarray(cols[c]).astype(t).tobytes() for c, t, _ in GWAS_COLUMNS]
+                       + [cs.tobytes(), heap_b])
+    assert len(payload) == GWAS_HEADER_LEN + GWAS_ROW_BYTES * n + CS_RECORD_LEN * cs.size + len(heap_b)
     return zstd_frame(payload, level)
 
 
@@ -582,14 +636,14 @@ def decode_gwas_block(frame: bytes, n_values, *, expect_rows: int | None = None,
     buf = zstd_unframe(frame, None, what)
     if len(buf) < GWAS_HEADER_LEN:
         raise ValueError(f"{what}: shorter than its header")
-    n, heap_len, nlp_max, beta_max, lse_min, lse_max = _GWAS_HEADER.unpack_from(buf, 0)
+    n, heap_len, k, nlp_max, beta_max, lse_min, lse_max = _GWAS_HEADER.unpack_from(buf, 0)
     if n < 1:
         raise ValueError(f"{what}: row count {n}")
     if expect_rows is not None and n != expect_rows:
         raise ValueError(f"{what}: {n} rows, index says {expect_rows}")
-    if len(buf) != GWAS_HEADER_LEN + GWAS_ROW_BYTES * n + heap_len:
+    if len(buf) != GWAS_HEADER_LEN + GWAS_ROW_BYTES * n + CS_RECORD_LEN * k + heap_len:
         raise ValueError(f"{what}: payload length {len(buf)} != {GWAS_HEADER_LEN} + "
-                         f"{GWAS_ROW_BYTES}n + heap_len")
+                         f"{GWAS_ROW_BYTES}n + {CS_RECORD_LEN}k + heap_len")
     for name, v in (("nlp_max", nlp_max), ("beta_max", beta_max), ("lse_min", lse_min), ("lse_max", lse_max)):
         if not math.isfinite(v):
             raise ValueError(f"{what}: {name} is not finite")
@@ -599,6 +653,9 @@ def decode_gwas_block(frame: bytes, n_values, *, expect_rows: int | None = None,
     for name, t, w in GWAS_COLUMNS:
         col[name] = np.frombuffer(buf, t, n, o)
         o += w * n
+    cs = np.frombuffer(buf, CS_DTYPE, k, o)
+    o += CS_RECORD_LEN * k
+    _check_cs(cs, n, what)
     nv = np.asarray(n_values, dtype=np.int64)
     if np.any(col["n_code"] >= nv.size):
         raise ValueError(f"{what}: n_code outside the index's table of {nv.size} values")
@@ -616,7 +673,7 @@ def decode_gwas_block(frame: bytes, n_values, *, expect_rows: int | None = None,
     # `rows` is the row count and `n` the per-row sample size, as in v1's GWAS decode. The trans and
     # cis decoders use `n` for the row count, but a GWAS row is the one place both quantities exist,
     # and a caller that got the wrong one here would index a scalar or mask with a count.
-    return {"rows": n, "nlp_max": nlp_max, "beta_max": beta_max, "lse_min": lse_min, "lse_max": lse_max,
+    return {"rows": n, "n_cs": k, "nlp_max": nlp_max, "beta_max": beta_max, "lse_min": lse_min, "lse_max": lse_max,
             "position": pos, "rs_number": col["rs_number"].astype(np.int64),
             "af_code": col["af_code"],
             "af": np.where(col["af_code"] == pf.AF_NULL, np.nan, col["af_code"] / pf.AF_MAXQ),
@@ -624,4 +681,5 @@ def decode_gwas_block(frame: bytes, n_values, *, expect_rows: int | None = None,
             "beta_code": col["beta_code"], "beta": dequantize_beta(col["beta_code"], beta_max),
             "se_code": col["se_code"], "se": dequantize_se(col["se_code"], lse_min, lse_max),
             "n_code": col["n_code"], "n": nv[col["n_code"].astype(np.int64)],
+            "cs_row": cs["row"], "cs_pip": cs["pip"], "cs_id": cs["cs_id"],
             "ref": [x[0] for x in pairs], "alt": [x[1] for x in pairs]}

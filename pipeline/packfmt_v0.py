@@ -1,8 +1,8 @@
 """Reference codec for the frozen qtlb v0 pack format (the v0 SPEC, in the analysis repo's history).
 
 Not a pipeline step, and it writes no files. The v0 build that used its encoders is gone; what is
-left reads the frozen v0 build to check v1 against it: `verify_v0`, `bench_store`, the TOPCHeF
-acceptance gate (`adapters/verify_topchef`), and `packtool` (the command-line inspector) use the
+left reads the frozen v0 build to check the contract tables against it: the TOPCHeF acceptance
+gate (`adapters/verify_topchef`) and `packtool` (the command-line inspector) use the
 decoders and quantizers.
 
 Float64 throughout. Only the Python writer rounds (`np.rint`, round half to even); readers only

@@ -770,6 +770,7 @@ def run(cfg: Config, force: bool = False) -> None:
     report |= {
         "trans": trans_rep,
         "trans_eqtl_excluded": excluded,
+        "trans_excluded": trans_excluded_by_type(excluded),
         "phenotype_coverage": coverage(cfg),
         "experiment_id": EXPERIMENT_ID,
         "source": {"zenodo": cfg["zenodo_dir"], "archives": sorted({a for t in TYPES for a in ARCHIVE[t].values()})},
@@ -822,6 +823,16 @@ def trans_excluded(cfg: Config) -> dict:
             "reason": TRANS_EXCLUSION_REASON}
 
 
+def trans_excluded_by_type(excluded: dict) -> dict:
+    """The same record in the contract's per-type shape, `{phenotype_type: {...} | None}`: one trans
+    experiment per type means each reports only its own exclusions, and the sQTL rows lose nothing."""
+    return {"ge": {"variants": excluded["variants"], "rows": excluded["trans_eqtl_rows"],
+                   "rows_in_source": excluded["trans_eqtl_rows_total"],
+                   "phenotypes_with_excluded_rows": excluded["genes_with_excluded_rows"],
+                   "reason": excluded["reason"]},
+            "leafcutter": None}
+
+
 def coverage(cfg: Config) -> dict:
     """Per phenotype type: phenotypes, groups, how many have nominal rows, and where each
     `permuted.n_variants` came from (CONTRACT.md, the ingestion report)."""
@@ -859,6 +870,7 @@ def _trans_step(cfg: Config) -> None:
     if report_path(cfg).exists():
         r = json.loads(report_path(cfg).read_text())
         r["trans"], r["trans_eqtl_excluded"] = rep, excluded
+        r["trans_excluded"] = trans_excluded_by_type(excluded)
         r.setdefault("rows", {})["trans"] = pq.read_metadata(trans_path(cfg)).num_rows
         # the trans-only phenotypes join `phenotypes` (run `--step phenotypes` first), so its count moves
         r["rows"]["phenotypes"] = pq.read_metadata(phenotypes_path(cfg)).num_rows

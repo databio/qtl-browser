@@ -64,30 +64,21 @@ def build(store_root: Path, version: int, *, name: str = "topchef", annot_id: st
                       "min": round((time.time() - t0) / 60, 1)}
 
     t0 = time.time()
-    log(f"== experiment {exp_id} (codec v{codec.FORMAT_VERSION})")
-    e = results.build(st, exp_id, tables, cat_id, annot_id, chroms, codec=codec)
-    out["experiment"] = {
-        "id": exp_id, "min": round((time.time() - t0) / 60, 1),
-        "n_blocks": {k: v.get("n_blocks") for k, v in _result_types(e).items()},
-        "precision": {k: v.get("precision") for k, v in _result_types(e).items()},
-        "trans": {k: (v.get("trans") or {}).get("precision") for k, v in _result_types(e).items()},
-        "gwas": {k: (e.get("gwas") or {}).get(k) for k in ("n_rows", "block_rows", "n_values")} if e.get("gwas") else None,
-    }
+    log(f"== experiments from {exp_id} (codec v{codec.FORMAT_VERSION})")
+    exps = results.build(st, exp_id, tables, cat_id, annot_id, chroms, codec=codec,
+                         collections=cfg.cfg.get("collections"))
+    out["experiments"] = {
+        eid: {"kind": d["kind"],
+              **({"phenotype_type": d["phenotype_type"]} if "phenotype_type" in d else {}),
+              **({"n_rows": d["n_rows"]} if "n_rows" in d else {}),
+              "precision": d.get("precision")}
+        for eid, d in sorted(exps.items())}
+    out["collection"] = next(iter({d["collection"] for d in exps.values()}), None)
+    out["minutes"] = round((time.time() - t0) / 60, 1)
 
     st.write_store(name, _refget_urls(cfg), version)
     out["bytes"] = sum(p.stat().st_size for p in (store_root / "immutable").glob("*") if p.is_file())
     return out
-
-
-def _result_types(doc: dict) -> dict:
-    """`{phenotype_type: entry}` across the shapes an experiment pointer uses, so the summary carries
-    the precision block whichever one this experiment has."""
-    r = doc.get("results")
-    if isinstance(r, list):
-        return {x.get("phenotype_type", str(i)): x for i, x in enumerate(r)}
-    if isinstance(r, dict):
-        return r
-    return {}
 
 
 def _refget_urls(cfg) -> list[str]:

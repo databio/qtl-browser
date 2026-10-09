@@ -132,3 +132,55 @@ eqtl_catalogue:
     gene_annotation: gencode_v39           # Ensembl 105
     n_samples: 382
     significance: {column: p_perm, op: "<", threshold: 0.05}
+
+# The publications the experiments came from (SPEC section 8, collections). Keyed by the experiment
+# stem a cohort's scans are derived from (`topchef` -> topchef_ge_cis, ...) or by a GWAS experiment's
+# id. `build_store` passes these to the builders, which write one content-addressed collection
+# document per entry and name it from every member experiment; an entry missing here falls back to
+# what the adapter recorded. The PDFs are in data/raw/papers/ (not in git).
+collections:
+  topchef:
+    title: "TOPCHeF heart cis and trans eQTL and sQTL (Murray et al. 2026)"
+    citation:
+      title: "Integration of dilated cardiomyopathy genomics with transcriptomics from the human heart implicates regulatory molecular mechanisms"
+      first_author: "Connor S. Murray"
+      last_author: "Matthew R. G. Taylor"
+      year: 2026
+      venue: "medRxiv"
+      doi: "10.64898/2026.01.12.26343934"
+      posted: "2026-01-13"
+    source:
+      record: "zenodo_21382723"
+      description: "TensorQTL cis and trans e/sQTL summary statistics, cis SuSiE credible sets"
+  dcm_jurgens2024_biobanks:
+    title: "Dilated cardiomyopathy GWAS, Jurgens et al. 2024 (biobanks-only meta-analysis)"
+    citation:
+      title: "Genome-wide association study reveals mechanisms underlying dilated cardiomyopathy and myocardial resilience"
+      first_author: "Sean J. Jurgens"
+      year: 2024
+      venue: "Nature Genetics"
+      volume: 56
+      pages: "2636-2645"
+      doi: "10.1038/s41588-024-01975-5"
+    source:
+      record: "CVD Knowledge Portal release Jurgens2024_DCM_EU"
+      url: "https://kp4cd.org/dataset_downloads/mi"
+      file: "Jurgens_DCM_GWAS_META_BiobanksOnly.tsv.gz"
+      fetched: "2026-09-04"
+      note: "the biobanks-only set (5,022 cases / 932,941 controls), which the preprint's figures were drawn from; the full META is parked locally"
+
+# The bucket the browsers read (pipeline/upload.py). Credentials are never here: `B2_ACCESS_KEY_ID`
+# and `B2_SECRET_ACCESS_KEY` come from the environment or the gitignored .env at the repo root
+# (`pass show cloud-file-service/b2_access_key_id` and `.../b2_secret_access_key` in databio/secrets).
+# The key prefix is applied only inside the bucket calls, so every key the tool prints is a store
+# path: `immutable/<name>`, `experiments/<id>.json`, `store.json`.
+storage:
+  default_profile: b2
+  single_put_max_bytes: 4000000000       # one PUT per object, so the ETag is the MD5; largest object today is 285 MB
+  profiles:
+    b2:
+      provider: b2
+      endpoint: https://s3.us-west-002.backblazeb2.com
+      bucket: cloud-databio
+      key_prefix: qtl-browser/
+      public_url: https://cloud2.databio.org/qtl-browser
