@@ -3,7 +3,7 @@
 Measures what a gene page costs: requests, bytes, and time until the locus plot is drawn. It runs
 the real app in headless Chromium (Playwright), so React, DuckDB-WASM in its worker, and the
 Mosaic plots all run as they do for a visitor. Plans that change how the gene page reads data run
-the same pages with a new `--label` and compare against the committed baseline.
+the same pages with a new `--label` and compare against a baseline run kept in `results/`.
 
 ```bash
 npm run bench -- --target live --label baseline            # 3 runs, all pages, all scenarios
@@ -238,8 +238,8 @@ indicative; counts and bytes are the stable part.
 ## Outputs
 
 - `out/<label>-<target>-<iso>.json`: raw per-request logs (gitignored).
-- `results/<label>-<target>.json` and `.md`: the summary (committed). The markdown has one table
-  per scenario, one row per page and window.
+- `results/<label>-<target>.json` and `.md`: the summary (gitignored, like `out/`; the numbers a
+  plan relies on go in its log). The markdown has one table per scenario, one row per page and window.
 - `compare.mjs <before.json> <after.json>` prints a markdown table per scenario (`cold`, `warm`,
   `nav`, `pair`) with each metric
   as `before -> after (change %)` for page ids present in both, with `–` for a metric a run did

@@ -1,10 +1,8 @@
 """Codec for qtlb **v1** (SPEC.md at the repo root): the byte-level pieces every v1 object shares.
 
-The v1 store modules (`qtlstore`, `catalog`, `annotation`, `results`) import this module and never
-`packfmt_v0`; the v0 reader tools (`packtool`, the TOPCHeF gate) import only `packfmt_v0`. The
-two share code by copy: where v1 reuses a v0 layout unchanged (variant
-pages, result blocks, quantizers, zstd framing, SNP codes) the functions here are the v0 ones,
-byte for byte, and a v1 store rebuilt after the split is identical object for object.
+The store modules (`qtlstore`, `catalog`, `annotation`, `results`) import this module. Where v1
+reused a v0 layout unchanged (variant pages, result blocks, quantizers, zstd framing, SNP codes) the
+functions here were the v0 ones, byte for byte; the v0 codec itself is retired (git history).
 
 What lives here: the quantizers and the slope derivation (SPEC.md section 13), zstd framing (section
 1), the variant page header and allele codes (section 5), the results block (section 8), and the

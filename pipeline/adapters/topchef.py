@@ -4,8 +4,8 @@ This module is the only place that knows what the TOPCHeF release looks like on 
 holds which result, that a nominal file is named `topchef_<chr>_MaxPC70.cis_qtl_pairs.<chr>.parquet`,
 that the effect column is `slope` and not `beta`, that a splice phenotype id is
 `chr:start:end:clu_<n>_<strand>:<gene>.<version>`, and that the alleles come as `A1`/`A2` with no
-stated orientation. The v0 steps still call in here for those facts rather than spelling them a
-second time, so there is one definition of "where the eQTL nominal rows live" in the pipeline.
+stated orientation. The shared-table steps (`steps_variants`) call in here for those facts rather
+than spelling them a second time, so there is one definition of "where the eQTL nominal rows live".
 
 Outputs go to `_tables/topchef/`: `sites.parquet`, `nominal/chr=<c>/data.parquet`,
 `permuted.parquet`, `credible_sets.parquet`, `phenotypes.parquet`, and `ingestion.json` with the
@@ -137,7 +137,7 @@ def significance(cfg: Config) -> dict:
 
 def dof(cfg: Config) -> dict[str, int]:
     """Student-t degrees of freedom, published by this study, by contract phenotype type."""
-    d = cfg["packs"]["dof"]
+    d = cfg["topchef"]["dof"]
     return {"ge": int(d["eqtl"]), "leafcutter": int(d["sqtl"])}
 
 
@@ -551,8 +551,7 @@ def credible_sets(cfg: Config) -> None:
 
 # ---- nominal -----------------------------------------------------------------------------------
 # One row group per phenotype: every reader of this table filters on the phenotype, and a reader
-# that pulls a whole row group should not get its neighbours too. Same reasoning, and the same
-# encodings, as the v0 build intermediates (`steps_nominal`).
+# that pulls a whole row group should not get its neighbours too.
 NOMINAL_ENCODING = {"pos": "DELTA_BINARY_PACKED",
                     **{c: "BYTE_STREAM_SPLIT" for c in ("beta", "se", "pvalue")}}
 NOMINAL_STATS = ["phenotype_type", "phenotype_id", "gene_id", "pos"]
@@ -602,10 +601,8 @@ def _nominal_chrom(args) -> tuple[str, int, int]:
             continue
         gene = ("n.phenotype_id" if qtl_type == "e"
                 else "split_part(split_part(n.phenotype_id, ':', 5), '.', 1)")
-        # Every tested phenotype keeps every row, leafcutter included. `sqtl_nominal` governs only the
-        # v0 `_tables/cis_sqtl_nominal` intermediate; the v0 sQTL packs stream this same raw file
-        # for every tested intron, so a contract table trimmed to the
-        # significant introns would leave most introns with `has_nominal = false` that v0 serves.
+        # Every tested phenotype keeps every row, leafcutter included: a contract table trimmed to
+        # the significant introns would leave most introns with `has_nominal = false`.
         for lo, hi in _gene_chunks(con, src, gene, NOMINAL_CHUNK_ROWS):
             part = out.with_name(f"sorted.{len(parts):03d}.tmp.parquet")
             con.execute(f"""COPY (
@@ -777,7 +774,7 @@ def run(cfg: Config, force: bool = False) -> None:
         "phenotype_types": sorted(PHENOTYPE_TYPE.values()),
         "dof": dof(cfg),
         "significance": significance(cfg),
-        "sqtl_nominal": "all",          # every tested intron; `cfg["sqtl_nominal"]` is the v0 intermediate's
+        "sqtl_nominal": "all",          # every tested intron
         "rows": {"sites": st.num_rows,
                  "permuted": pq.read_metadata(permuted_path(cfg)).num_rows,
                  "credible_sets": pq.read_metadata(credible_sets_path(cfg)).num_rows,

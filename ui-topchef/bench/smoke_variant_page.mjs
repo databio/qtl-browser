@@ -11,7 +11,10 @@ const results = []
 const check = (ok, msg) => { results.push([ok, msg]); console.log(`${ok ? 'PASS' : 'FAIL'} ${msg}`) }
 
 const store = await (await fetch(`${BASE}/data/store.json`)).json()
-const docs = Object.values(await Promise.all(Object.keys(store.experiments).map(async id => (await fetch(`${BASE}/data/experiments/${id}.json`)).json())))
+// the study the app opens (its default VITE_COLLECTION_OF and VITE_GWAS), not every cohort in the store
+const studyIds = Object.keys(store.experiments).filter(id =>
+  store.experiments[id].collection === store.experiments.topchef_ge_cis.collection || id === 'dcm_jurgens2024_biobanks')
+const docs = Object.values(await Promise.all(studyIds.map(async id => (await fetch(`${BASE}/data/experiments/${id}.json`)).json())))
 const cisOf = type => docs.find(d => d.kind === 'qtl_cis' && d.phenotype_type === type)
 const cat = await (await fetch(`${BASE}/data/variant_catalogs/${cisOf('ge').catalog}.json`)).json()
 const qtl = docs.filter(d => d.kind === 'qtl_cis' || d.kind === 'qtl_trans')
@@ -68,9 +71,10 @@ const rowsOf = loc => loc.locator('tbody tr').evaluateAll(trs => trs.map(tr => [
   check(leads.length === 21 && cs.length === 50 && ld && /^-0\.412 ± 0\.032$/.test(ld[3]) && ld[4] === '1.0e-4' && ld[5] === 'eGene',
     `rs34599497: ${leads.length} lead rows, ${cs.length} credible-set rows; AP000346.2 eQTL lead beta ${ld?.[3]}, perm p ${ld?.[4]}`)
   // rsID block and page (no header reads), each experiment's hits table and frame, then the lead
-  // blocks for their betas: its 1 eQTL lead block, and its 20 intron lead blocks in 4 runs of blocks < 64 KB apart
+  // blocks for their betas: its 1 eQTL lead block, and its 20 intron lead blocks in 7 runs of blocks
+  // < 64 KB apart (v2 block offsets: four of the gaps are 75-77 KB, just over the limit)
   const k = kinds(reqs)
-  const want = ['ge', ...Array(4).fill('leafcutter'), ...HITS(8), 'rsid', 'variants'].sort().join(',')
+  const want = ['ge', ...Array(7).fill('leafcutter'), ...HITS(8), 'rsid', 'variants'].sort().join(',')
   check(k === want, `rs34599497: requests ${k.split(',').length}: rsID block, variants page, 4 hits tables + frames, lead blocks in runs (got ${k})`)
   check((await page.locator('h1').first().innerText()).trim() === 'rs34599497', 'rs34599497: header title')
   check(await page.getByText('chr22:23,680,950 (GRCh38)').count() === 1 && await page.getByText('T / C', { exact: true }).count() === 1,

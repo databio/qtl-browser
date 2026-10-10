@@ -177,8 +177,8 @@ def orient_to_ref(ref_base, effect_allele, other_allele, beta, af) -> dict:
         9,998,282, so our 1,282,725 palindromic sites never join. Cis `af` averages 0.2420 with median
         0.1318 over SNPs, a minor/ALT distribution, not a REF one. EVIDENCE.md A.11.
 
-    `beta` rides along with `af` by construction: `steps_nominal` copies `n.af` and `n.slope` unchanged
-    from one tensorQTL nominal row, and tensorQTL codes both against the same dosage allele.
+    `beta` rides along with `af` by construction: the adapter copies `af` and `slope` unchanged from
+    one tensorQTL nominal row, and tensorQTL codes both against the same dosage allele.
 
     So reorienting a TOPCHeF v0 store to ref/alt is a relabelling. It is **not** a sign flip. A rebuild
     whose slopes come out negated genome-wide is wrong, not "oriented".

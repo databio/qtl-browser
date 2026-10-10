@@ -1,10 +1,9 @@
-"""Build the shared input tables under `_tables/`: the extracted Zenodo files, the variant table
-with rsIDs, the refget reference and allele check, and the v0 tables the TOPCHeF adapter and its
-acceptance gate read. The qtlb v1 store itself is built by the adapters and store modules
-(pipeline/README.md), not here.
+"""Build the shared input tables the TOPCHeF adapter reads under `_tables/`: the extracted Zenodo
+files, the variant table with rsIDs, the refget reference and the allele check. The store itself is
+built by the adapters and store modules (pipeline/README.md), not here.
 
     uv run python -m pipeline build                    # all steps, skipping ones already done
-    uv run python -m pipeline build --step nominal --force
+    uv run python -m pipeline build --step variants_refcheck --force
     uv run python -m pipeline steps                    # list steps in order
 """
 import argparse
@@ -12,19 +11,15 @@ import inspect
 import sys
 import time
 
-from . import steps_extract, steps_gtf, steps_nominal, steps_refget, steps_tables, steps_variants
+from . import steps_extract, steps_refget, steps_variants
 from .common import Config, log
 
 STEPS = [
     ("extract", steps_extract.run),
-    ("gtf", steps_gtf.run),
     ("variants_collect", steps_variants.collect),
     ("variants_rsid", steps_variants.rsid),
     ("refget_store", steps_refget.refget_store),
     ("variants_refcheck", steps_refget.variants_refcheck),
-    ("permutation_tables", steps_tables.permutation_tables),
-    ("credible_sets", steps_tables.credible_sets),
-    ("nominal", steps_nominal.run),
 ]
 
 

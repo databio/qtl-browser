@@ -8,7 +8,7 @@ store builds anywhere the tables are.
 
 ```bash
 # adapters (Slurm; details below)
-QTLB_DERIVED=<tree> sbatch adapter.sbatch                          # TOPCHeF adapter + gate + contract check
+QTLB_DERIVED=<tree> sbatch adapter.sbatch                          # TOPCHeF adapter + contract check
 
 # the store: one command from the configured TOPCHeF tables to a validated store (about 10 min
 # genome-wide; without --keep it deletes the directory first, so never aim it at a combined store)
@@ -30,18 +30,15 @@ uv run python -m pipeline.upload plan --store <store>
 uv run python -m pipeline.upload push --store <store> --yes && uv run python -m pipeline.upload check --store <store>
 uv run python -m pipeline.upload prune --store <store> [--yes]
 
-# the shared input tables the TOPCHeF adapter and its gate read (build.sbatch)
+# the shared input tables the TOPCHeF adapter reads (build.sbatch)
 uv run python -m pipeline steps                                    # list steps in order
 uv run python -m pipeline build                                    # run what is not done yet
-uv run python -m pipeline build --step nominal --force
+uv run python -m pipeline build --step variants_refcheck --force
 
 # tests (no data needed)
 uv run python -m pipeline.test_qtlstore      # also test_packfmt_v2, test_catalog, test_annotation, test_results, test_upload,
-                                             # test_dof, test_genemap, test_gtf, test_refcheck, test_overlap,
+                                             # test_dof, test_genemap, test_refcheck, test_overlap,
                                              # adapters.test_topchef, adapters.test_eqtl_catalogue
-uv run python -m pipeline.test_packfmt --synthetic && uv run python -m pipeline.test_packtool   # the v0 reader
-
-uv run python -m pipeline.figures manhattan | density 5 10 | gwas 5 | themes                  # quick-look PNGs from the v0 tables
 ```
 
 ## The build: adapters, store, checks, upload
@@ -52,16 +49,15 @@ cis scan with its results blocks, search index and hits; a trans scan with its t
 and hits; a GWAS with its blocks, index and bin summary), every experiment naming the collection it
 was published in, sharing annotations. The builders (`qtlstore`, `catalog`, `annotation`,
 `results`, `gwas`) write version 2 unless told `--version 1`, take the codec as a parameter and
-import `packfmt_v1` only for the pieces every version shares; nothing current imports
-`packfmt_v0.py`. Each adapter writes into its own `QTLB_DERIVED` tree; nothing here writes into the
+import `packfmt_v1` only for the pieces every version shares. Each adapter writes into its own `QTLB_DERIVED` tree; nothing here writes into the
 frozen v0 tree (`adapter.sbatch` refuses it). Measure on a genome-wide build: a chr21/22 subset
 changes the shape of the trans data, not just its size.
 
 | Step | Command | Module |
 |---|---|---|
-| Adapter + TOPCHeF gate + contract check | `QTLB_DERIVED=<tree> sbatch adapter.sbatch` | `adapters/topchef.py`, `adapters/verify_topchef.py`, `adapters/contract_check.py` |
+| TOPCHeF adapter + contract check | `QTLB_DERIVED=<tree> sbatch adapter.sbatch` | `adapters/topchef.py`, `adapters/contract_check.py` |
 | eQTL Catalogue adapter + contract check | `ADAPTER=eqtl_catalogue QTLB_DERIVED=<tree> sbatch adapter.sbatch` | `adapters/eqtl_catalogue.py` |
-| One step alone | `STEPS=gate` or `STEPS=contract` (or `"adapter contract"`) with the same variables | |
+| One step alone | `STEPS=adapter` or `STEPS=contract` with the same variables | |
 | One TOPCHeF table | `STEPS=adapter QTLB_DERIVED=<tree> sbatch adapter.sbatch --step phenotypes --step trans` (trans needs the trans-only phenotypes, so both) | `adapters/topchef.py` |
 | DCM GWAS into the TOPCHeF tables | `ADAPTER=dcm_gwas STEPS="adapter contract" QTLB_DERIVED=<tree> sbatch adapter.sbatch` | `adapters/dcm_gwas.py` |
 | Store build, one cohort, locally | `uv run python -m pipeline.build_store --store <store> --validate` (`--tables`, `--sites`, `--gtf` override the configured paths; `--keep` adds to an existing store) | `build_store.py` |
@@ -79,8 +75,6 @@ Outside Slurm the same modules run directly, e.g.
 `uv run python -m pipeline.adapters.contract_check $QTLB_DERIVED/_tables/topchef` (prints one
 PASS/FAIL line per `CONTRACT.md` rule, exits 1 on any failure).
 
-- **Gate** (TOPCHeF only): every contract number against the frozen v0 build, bit for bit, slope sign
-  included. `GENES` sets the per-chromosome pack sample (default 20).
 - **Store build** (`build_store.py`, or `store.sbatch` per cohort): an annotation (named in
   `EXPERIMENTS`, else the adapter's `ingestion.json` `source.gene_annotation`, else `gencode_v34`;
   GTFs from `ANNOTATION_GTFS`, with its per-chromosome genes and exon models and its gene lookup,
@@ -155,8 +149,8 @@ summed over the two cis scans.
 
 ### Configuration
 
-Paths, the significance rule, worker counts, the eQTL Catalogue experiments and the gate's sample
-genes live in `config.yaml`. Nothing is hard-coded in the steps.
+Paths, the significance rule, worker counts, the experiments of each adapter, the collections and
+the coloc lists live in `config.yaml`. Nothing is hard-coded in the steps.
 
 Subset runs: `QTLB_CHROMS=chr21,chr22` narrows the chromosome list and `QTLB_DERIVED` moves the
 whole output tree, step markers included. Always set both, and never point either at the frozen v0
@@ -170,23 +164,18 @@ after that the digest is required to match.
 
 ## Input tables (`python -m pipeline build`)
 
-The TOPCHeF adapter reads the variant table and the reference allele check from `_tables/`, and its
-acceptance gate compares against the v0 tables there. These steps build them. Each leaves a marker
-in `data/derived/.done/` and is skipped on the next run unless `--force` is given. On Rivanna the
-frozen v0 tree (`/scratch/ns5bc/qtl-browser/derived/`) already holds them, and an adapter tree
-symlinks its `_tables` inputs.
+The TOPCHeF adapter reads the variant table and the reference allele check from `_tables/`. These
+steps build them. Each leaves a marker in `data/derived/.done/` and is skipped on the next run unless
+`--force` is given. On Rivanna the frozen v0 tree (`/scratch/ns5bc/qtl-browser/derived/`) already
+holds them.
 
 | Step | Module | Reads | Writes |
 |---|---|---|---|
 | extract | `steps_extract` | Zenodo `*.tar.gz` | per-chromosome parquet unpacked next to the archives |
-| gtf | `steps_gtf` | GENCODE v34 GTF | `_tables/gene_annotation.parquet`, `_tables/exons.parquet` (sorted by gene, small row groups) |
 | variants_collect | `steps_variants` | every cis file, then both trans files | `_tmp/variants_raw.parquet`: distinct (chr, position, A1, A2) with `in_cis`. 8.87M cis variants plus 343k positions seen only in the genome-wide trans scan; trans_eQTL has no allele columns, so its positions get null alleles unless trans_sQTL has them |
 | variants_rsid | `steps_variants` | dbSNP b157 VCF via `bcftools query -T` on those positions | `_tables/variants.parquet`, sorted by (chr, position, A1, A2), with an exact / position / none match flag (allele-less rows can only match by position) and `rsid` always `'rs' || rs_number` (`arg_min`, not two separate `min`s). The two `_tmp/dbsnp_*` caches are rebuilt when older than `variants_raw.parquet` |
 | refget_store | `steps_refget` | the reference FASTA named by `reference.fasta`, or an existing refgetstore | `_tables/reference.json`: the seqcol collection digest, its three attribute digests, and every chromosome's sha512t24u sequence digest, length and md5. Builds the local store from the FASTA when there is none, and fails when a name in `reference.chromosomes` is not in the collection |
 | variants_refcheck | `steps_refget` | `_tables/variants.parquet`, `_tables/reference.json`, the refgetstore | `_tables/refcheck/<chr>.parquet`, one row per variant saying which allele the reference carries (`a1`, `a2`, `both`, `neither`, `unchecked`), and `_checks/refcheck/summary.json`, the counts per class and chromosome split cis against trans-only, with strand-flip and on-N diagnostics and example mismatches (EVIDENCE.md A.10). Fails when the cis match fraction is below `reference.allele_check.min_match_fraction` |
-| permutation_tables | `steps_tables` | cis permutation files, SuSiE, trans, annotation | `_tables/genes.parquet`, `_tables/splice_phenotypes.parquet` |
-| credible_sets | `steps_tables` | SuSiE files | `_tables/credible_sets.parquet` |
-| nominal | `steps_nominal` | cis nominal files, one process per chromosome | `_tables/cis_eqtl_nominal/chr=*/bin=*/`, `_tables/cis_sqtl_nominal/chr=*/bin=*/`: one file per `nominal_bin_genes` tested genes (by TSS rank, the `bin` column of `genes`), one row group per gene, delta/byte-stream-split encodings, rsIDs as `rs_number`. With `sqtl_nominal: significant` the sQTL side keeps only introns flagged `is_sqtl` |
 
 ## Earlier formats
 
@@ -195,18 +184,13 @@ bucket until the version 2 release. `packfmt_v1.py` still reads it: `results.rea
 `results.read_trans` and `gwas.read_window` pick the codec from each object's header, and the
 builders write it with `--version 1` for an object-for-object comparison.
 
-The v0 pack build is gone (it is in git history at commit `c62bca3`). The frozen v0 build on Rivanna
-(`/scratch/ns5bc/qtl-browser/derived/`: `immutable/`, `manifest.json`, `_tables/`) stays as the
-reference the TOPCHeF acceptance gate compares the contract tables against. The v0 format is
-described in the `analysis` repo at `qtlb-format/docs/` (`PACKS.md`, historical; the v0 `SPEC.md`
-at commit `fe5a606`; `EVIDENCE.md`). What reads it here:
-
-- `packfmt_v0.py`: the v0 codec. The TOPCHeF gate decodes v0 packs with it. No builder imports it
-  (`test_qtlstore.py` checks).
-- `packtool.py`: a CLI and API over `packfmt_v0` for looking inside v0 packs. The gate uses its
-  readers (`read_block`, `find_gene_block`, `list_blocks`, `variant_rows`).
-- `test_packfmt.py`, `test_packtool.py`: round-trip tests on synthetic data; `test_packfmt` without
-  `--synthetic` also runs a real-data case that needs the v0 tables.
+v0 is retired. The pack build is in git history at commit `c62bca3`; its codec (`packfmt_v0.py`),
+reader (`packtool.py`), the TOPCHeF acceptance gate that compared the contract tables against it
+(`adapters/verify_topchef.py`), the steps that wrote its tables (`steps_gtf`, `steps_tables`,
+`steps_nominal`) and `figures.py` are in history at `8e1fb44`. The frozen v0 build on Rivanna
+(`/scratch/ns5bc/qtl-browser/derived/`) still holds the shared input tables; nothing reads its packs.
+The v0 format is described in the `analysis` repo at `qtlb-format/docs/` (`PACKS.md`, historical;
+the v0 `SPEC.md` at commit `fe5a606`; `EVIDENCE.md`).
 
 The v0-against-v1 comparison and benchmark (`verify_v0.py`, `bench_store.py`, `bench_store.sbatch`)
 are in git history before 2026-10-09; they read the version 1 single-document store and nothing

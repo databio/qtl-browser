@@ -13,7 +13,10 @@ const REF = process.env.SMOKE_REF ? JSON.parse(readFileSync(process.env.SMOKE_RE
 const results = []
 const check = (ok, msg) => { results.push([ok, msg]); console.log(`${ok ? 'PASS' : 'FAIL'} ${msg}`) }
 const store = await (await fetch(`${BASE}/data/store.json`)).json()
-const docs = await Promise.all(Object.keys(store.experiments).map(async id => (await fetch(`${BASE}/data/experiments/${id}.json`)).json()))
+// the study the app opens (its default VITE_COLLECTION_OF and VITE_GWAS), not every cohort in the store
+const studyIds = Object.keys(store.experiments).filter(id =>
+  store.experiments[id].collection === store.experiments.topchef_ge_cis.collection || id === 'dcm_jurgens2024_biobanks')
+const docs = await Promise.all(studyIds.map(async id => (await fetch(`${BASE}/data/experiments/${id}.json`)).json()))
 const TRANS = new Set(docs.filter(d => d.kind === 'qtl_trans').map(d => d.file))
 check(TRANS.size === 2, `${store.name} has ${TRANS.size} trans experiments (ge, leafcutter), one object each`)
 

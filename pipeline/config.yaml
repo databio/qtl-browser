@@ -29,64 +29,15 @@ reference:
 sig_column: pval_perm
 sig_threshold: 0.05
 
-# parallelism and memory for the nominal re-encoding step
+# parallel workers and DuckDB limits for the adapters (and workers for the upload)
 workers: 3
 duckdb_memory_limit: 6GB
 duckdb_threads: 4
 
-# tested genes per nominal build-intermediate file, by TSS rank (the `bin` column of genes). The
-# TOPCHeF acceptance gate reads those files as the v0 eQTL rows.
-nominal_bin_genes: 100
-
-# which introns get rows in the _tables/cis_sqtl_nominal build intermediate: `all` (10.8 GB) or
-# `significant` (1.8 GB, the 13,540 introns with pval_perm < 0.05). The TOPCHeF adapter and the gate
-# read every intron from the raw file instead. Every intron keeps its permutation row regardless.
-sqtl_nominal: significant
-
-# the preprint's named lead variants: steps_refget.spot_check confirms the allele check's call at each
-# position against the reference bytes. The rsIDs are a record of what the paper names; nothing checks them.
-paper_variants:
-  chr1:2212668: rs2503715      # SKI
-  chr1:236689867: rs4659701    # ACTN2
-  chr7:128829863: rs73238147   # FLNC
-  chr10:73661450: rs10824026   # MYOZ1 / SYNPO2L (paper eQTL text says 73,646,383, a typo; that is rs3740293. sQTL text and dbSNP agree on 73,661,450)
-  chr4:113537246: rs734348     # CAMK2D
-  chr16:918717: rs9889137      # LMF1
-
-# The frozen v0 pack format. `dof` is TOPCHeF's published Student-t degrees of freedom, which the
-# TOPCHeF adapter reports; the gate (adapters/verify_topchef.py) reads the DuckDB limits and the sample
-# genes; test_packfmt's real-data case reads the page size and zstd level.
-packs:
-  duckdb_memory_limit: 4GB
-  duckdb_threads: 4
-  dof: {eqtl: 435, sqtl: 480}      # Student-t degrees of freedom; readers derive slope from slope_se and p
-  variant_page_size: 512            # variants per page in the variants file
-  zstd_level: 19
-  # sample genes for the gate's pack comparison
-  check_genes:
-    - ENSG00000128591       # FLNC, bin 7, 6,050 variants
-    - ENSG00000229618       # AC011287.1, largest chr7 window, 10,419 variants
-    - ENSG00000121716       # PILRB, smallest chr7 p (8e-133), large-step case
-    - ENSG00000286192       # AC069288.1, sQTL-only, zero pairs
-    - ENSG00000157933       # SKI, chr1
-    - ENSG00000077522       # ACTN2, chr1
-    - ENSG00000142798       # HSPG2, chr1
-    - ENSG00000268575       # AL031282.2, chr1, sQTL only
-    - ENSG00000131374       # TBC1D5, chr3, wider intron run
-    - ENSG00000145349       # CAMK2D, chr4
-    - ENSG00000049656       # CLPTM1L, chr5
-    - ENSG00000204314       # PRRT1, chr6
-    - ENSG00000177791       # MYOZ1, chr10
-    - ENSG00000166317       # SYNPO2L, chr10
-    - ENSG00000103227       # LMF1, chr16
-    - ENSG00000238039       # AC244197.2, chrX
-  # sQTL sample genes for the gate: every intron of these genes
-  sqtl_check_genes:
-    - ENSG00000145349       # CAMK2D, chr4, 14 introns
-    - ENSG00000166317       # SYNPO2L, chr10, 7 introns
-    - ENSG00000103227       # LMF1, chr16, 9 introns
-    - ENSG00000142798       # HSPG2, chr1, 40 introns (the most for one gene)
-    - ENSG00000268575       # AL031282.2, chr1, sQTL only, 27 introns
+# TOPCHeF's published Student-t degrees of freedom, which the adapter records in each experiment's
+# `dof` as provenance; v2 stores beta, so nothing decodes through it
+topchef:
+  dof: {eqtl: 435, sqtl: 480}
 
 # ARIC plasma cis-pQTL adapter (pipeline/adapters/aric_pqtl.py): one entry per cohort. Paths are
 # relative to `raw` (QTLB_ARIC_ROOT overrides that root). The two cohorts are disjoint sets of

@@ -466,11 +466,8 @@ def validate_degrades_honestly():
 def codecs_do_not_mix():
     """Who may name which codec by module.
 
-    The v0 line and the v1/v2 line never meet: the v0 reader tools import only packfmt_v0, and the
-    store modules never import it. Only the v0 reader and the TOPCHeF acceptance gate read v0, and they are the
-    only modules allowed both.
-
-    Within the v1/v2 line the rule is tighter, and it is the one that matters: **a builder imports
+    The v0 codec is gone, with the tools that read v0; nothing may import it. The rule that matters
+    is the v1/v2 one: **a builder imports
     packfmt_v1 only**. v1 is its default `codec=pf`, and v2 reaches it as a parameter or not at all.
     A builder that also imported packfmt_v2 by name could encode part of an object with one codec
     and part with another -- which is exactly what happened when `build_trans` kept calling the v1
@@ -489,7 +486,9 @@ def codecs_do_not_mix():
             elif isinstance(node, ast.Import):
                 out |= {a.name.rsplit(".", 1)[-1] for a in node.names if "packfmt" in a.name}
         return out
-    assert not (here / "packfmt.py").exists(), "pipeline/packfmt.py is gone: use packfmt_v0 or packfmt_v1"
+    assert not (here / "packfmt.py").exists() and not (here / "packfmt_v0.py").exists(), "the v0 codec is gone"
+    for p in sorted(here.rglob("*.py")):
+        assert "packfmt_v0" not in codecs(str(p.relative_to(here))), f"{p.name} imports the retired v0 codec"
     for m in ("catalog.py", "annotation.py", "results.py", "gwas.py", "test_catalog.py"):
         if (here / m).exists():
             assert codecs(m) <= {"packfmt_v1"}, f"{m} imports {codecs(m)}: a builder takes its codec as a parameter"
@@ -497,8 +496,6 @@ def codecs_do_not_mix():
         if (here / m).exists():
             assert codecs(m) <= {"packfmt_v1", "packfmt_v2"}, f"{m} imports {codecs(m)}"
     assert "codec_for" in (here / "qtlstore.py").read_text(), "qtlstore.codec_for is the version -> codec registry"
-    for m in ("packtool.py", "common.py", "test_packfmt.py", "test_packtool.py", "adapters/verify_topchef.py"):
-        assert codecs(m) <= {"packfmt_v0"}, f"{m} imports {codecs(m)}"
 
 
 def main() -> int:

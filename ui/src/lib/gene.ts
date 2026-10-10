@@ -117,8 +117,7 @@ function leadRow(block: ResultBlock | null, range: VariantRange | null) {
 /** The genes row the gene page prints: the annotation's fields, the eQTL block's details (group
  *  lead, credible sets), the search index's tested significance value and the lead's own nominal
  *  row. The store holds no q-value: the Zenodo release publishes none either, and the one the v0
- *  site showed was this repo's own Benjamini-Hochberg over `pval_beta` (pipeline/steps_tables.py),
- *  which the contract drops. */
+ *  site showed was this repo's own Benjamini-Hochberg over `pval_beta`, which the contract drops. */
 function geneRow(hit: SearchHit, block: ResultBlock | null, range: VariantRange | null): Gene {
   const d = block?.details, g = d?.group ?? null, lead = g?.lead ?? null, row = leadRow(block, range)
   return {

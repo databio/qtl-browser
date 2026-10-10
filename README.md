@@ -18,7 +18,7 @@ layout.
 |---|---|
 | `SPEC.md` | The qtlstore format (version 2): store layout and object names, the file header, variant catalogs, annotations, allele orientation, experiments and collections, results, search index, hits, trans, GWAS, precision, and what `Store.validate` checks. |
 | `pipeline/` | Python code that builds the store. Adapters turn each study into standard input tables (`pipeline/CONTRACT.md`); `qtlstore.py`, `catalog.py`, `annotation.py`, `results.py` and `gwas.py` write the store, `build_store.py` runs them in one command, `upload.py` puts the result in the bucket. `pipeline/README.md` explains every step. |
-| `*.sbatch` | Slurm jobs for Rivanna: `adapter.sbatch` (adapter, TOPCHeF gate, contract check), `store.sbatch` (store build, validate, codec check), `build.sbatch` (shared input tables). |
+| `*.sbatch` | Slurm jobs for Rivanna: `adapter.sbatch` (adapter, contract check), `store.sbatch` (store build, validate, codec check), `build.sbatch` (shared input tables). |
 | `ui-topchef/` | The TOPCHeF browser app at https://topchef.databio.org: Vite, React, TypeScript, Tailwind 4 and DaisyUI 5, DuckDB-WASM, Mosaic plots. |
 | `ui-topchef/bench/` | Browser smoke suites for the gene, variant and trans pages, and a Playwright harness that measures what a gene page costs. |
 | `ui/` | The general multi-study browser, forked from `ui-topchef/` and being generalised: the experiment becomes part of the route rather than a build-time constant. Deployed to its own Worker, with no custom domain yet. |
@@ -37,8 +37,7 @@ are, in about ten minutes genome-wide:
    variant catalog, one experiment per scan and the overlap index from the configured tables, then
    validates; `sbatch store.sbatch` does the same on Rivanna for several cohorts.
 3. **Checks.** `Store.validate` and `which_codec` run inside both; `scan_codes` sweeps every code
-   in a cis scan's blocks on demand; the TOPCHeF acceptance gate and the contract check run inside
-   `adapter.sbatch`.
+   in a cis scan's blocks on demand; the contract check runs inside `adapter.sbatch`.
 4. **Upload.** `uv run python -m pipeline.upload plan --store DIR`, then `push --yes`, then
    `check`; see Deploy below.
 

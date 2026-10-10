@@ -22,8 +22,7 @@ This document is the byte-level contract for what the builders write today:
 `qtlstore.FORMAT_VERSION` is 2 and is what every builder writes unless told otherwise; `SUPPORTED_VERSIONS`
 is `(1, 2)`, because the live bucket holds a version 1 store until the version 2 release. The
 builders import `packfmt_v1` only for the shared pieces and take the codec as a parameter
-(`test_qtlstore.codecs_do_not_mix`); `pipeline/packfmt_v0.py` is the v0 codec and nothing current
-imports it.
+(`test_qtlstore.codecs_do_not_mix`, which also fails if anything imports the retired v0 codec).
 
 When this document and the code disagree, one of them is wrong and both are fixed in the same
 change. Section 18 lists what is still open.
@@ -1265,10 +1264,9 @@ The v0 spec (sections 1-15, byte layouts for GWAS, trans and paged hits included
 analysis repo's git history at `qtlb-format/docs/SPEC.md`, commit `fe5a606`. Its Appendix A is now
 `qtlb-format/docs/EVIDENCE.md`. The frozen v0 build is on Rivanna at
 `/scratch/ns5bc/qtl-browser/derived/`: the packs in `immutable/`, `manifest.json`, and the v0 tables
-in `_tables/`. The TOPCHeF acceptance gate (`pipeline/adapters/verify_topchef.py`) compares the
-contract tables against the v0 tables there, through the v0 reader `packtool.py`; nothing else
-current reads the packs. The code that built v0 is in this repo's git history at commit `c62bca3`,
-and the v0-against-v1 comparison tools at commits before 2026-10-09.
+in `_tables/`; nothing current reads the packs. The code that built v0 is in this repo's git history
+at commit `c62bca3`; the v0 reader, codec and the TOPCHeF acceptance gate that compared the contract
+tables against v0 at `8e1fb44`; the v0-against-v1 comparison tools at commits before 2026-10-09.
 
 ## 18. Open
 

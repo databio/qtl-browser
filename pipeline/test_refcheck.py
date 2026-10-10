@@ -72,65 +72,7 @@ def store_round_trip():
         assert len(rec.metadata.sha512t24u) == 32 and len(meta.digest) == 32
 
 
-class _Cfg:
-    """Just enough Config for `spot_check`: a `_tables` dir and `paper_variants`."""
-
-    def __init__(self, derived: Path, paper_variants: dict):
-        self.derived = derived
-        self.tables = derived / "_tables"
-        self._d = {"paper_variants": paper_variants}
-
-    def __getitem__(self, k):
-        return self._d[k]
-
-
-def spot_check_cases():
-    """`spot_check` compares a stored call against bytes read back from the store, and complains
-    when they disagree."""
-    import pyarrow as pa
-    from gtars.refget import RefgetStore
-    from .common import write_parquet
-
-    with tempfile.TemporaryDirectory() as d:
-        d = Path(d)
-        fa = d / "t.fa"
-        fa.write_text(">chrT test\n" + bytes(SEQ).decode().lower() + "\n")
-        store = RefgetStore.on_disk(str(d / "store"))
-        store.set_quiet(True)
-        meta, _ = store.add_sequence_collection_from_fasta(str(fa))
-        (rec,) = list(store.get_collection(meta.digest))
-        seqs = {"chrT": {"digest": rec.metadata.sha512t24u, "length": rec.metadata.length}}
-
-        # position 1 is A (A1), position 2 is C (A2); the third row lies about position 6
-        rows = [(1, "A", "G", "a1"), (2, "T", "C", "a2"), (6, "A", "T", "a1")]
-        write_parquet(pa.table({
-            "chr": pa.array(["chrT"] * len(rows), pa.string()),
-            "position": pa.array([r[0] for r in rows], pa.int32()),
-            "A1": pa.array([r[1] for r in rows], pa.string()),
-            "A2": pa.array([r[2] for r in rows], pa.string()),
-            "in_cis": pa.array([True] * len(rows), pa.bool_()),
-            "match": pa.array([r[3] for r in rows], pa.string()).dictionary_encode(),
-        }), rg.refcheck_table(_Cfg(d, {}), "chrT"), 1000)
-
-        results = []
-        def check(ok, msg):
-            results.append((ok, msg))
-
-        rg.spot_check(_Cfg(d, {"chrT:1": "rs1", "chrT:2": "rs2"}), seqs, store, check)
-        assert results[-1][0], results[-1][1]
-
-        results.clear()
-        rg.spot_check(_Cfg(d, {"chrT:6": "rs6"}), seqs, store, check)
-        assert not results[-1][0], "a wrong call was not caught"
-        assert "called a1" in results[-1][1], results[-1][1]
-
-        # a position with no row in the table is a failure, not a silent skip
-        results.clear()
-        rg.spot_check(_Cfg(d, {"chrT:99": "rs99"}), seqs, store, check)
-        assert not results[-1][0], "a missing variant was not caught"
-
-
-CASES = [classify_cases, threshold, store_round_trip, spot_check_cases]
+CASES = [classify_cases, threshold, store_round_trip]
 
 
 def main() -> int:

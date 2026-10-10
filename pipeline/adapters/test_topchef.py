@@ -130,7 +130,7 @@ def source_paths_and_the_experiment_facts():
     """The file names and study constants the v0 steps now read from here instead of spelling out."""
     class Cfg:
         def __init__(self):
-            self.cfg = {"packs": {"dof": {"eqtl": 435, "sqtl": 480}},
+            self.cfg = {"topchef": {"dof": {"eqtl": 435, "sqtl": 480}},
                         "sig_column": "pval_perm", "sig_threshold": 0.05}
 
         def __getitem__(self, k):
@@ -148,7 +148,7 @@ def source_paths_and_the_experiment_facts():
         "cis_eQTL_nominal/topchef_chr7_MaxPC70.cis_qtl_pairs.chr7.parquet")
     assert str(tc.source_file(cfg, "s", "susie", "chr7")).endswith(
         "cis_sQTL_SuSiE/topchefSplice_chr7_MaxPC25.SuSiE_summary.parquet")
-    # the contract leafcutter nominal reads the raw file the v0 sQTL packs streamed, every tested intron
+    # the contract leafcutter nominal reads the raw file, every tested intron
     assert str(tc.source_file(cfg, "s", "nominal", "chr7")).endswith(
         "cis_sQTL_nominal/topchefSplice_chr7_MaxPC25.cis_qtl_pairs.chr7.parquet")
     assert len(tc.cis_sources()) == 6 and "trans_eQTL" not in tc.cis_sources()

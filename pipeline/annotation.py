@@ -83,16 +83,13 @@ import sys
 from pathlib import Path
 
 import pyarrow as pa
-import pyarrow.parquet as pq
 
 from . import qtlstore as qs
 from .packfmt_v1 import zstd_frame, zstd_unframe
 
-# GTF attributes are `key "value";` for strings and bare `key value;` for numbers. `steps_gtf` reads
-# only the quoted form, which is why every `exon_number` in v0's exons.parquet is 0: GENCODE writes
-# `exon_number 1;` unquoted, the regex misses it, and `a.get("exon_number", 0)` supplies the
-# default. Both forms are read here. Quoted values are extracted exactly as steps_gtf extracts them,
-# so symbol and biotype cannot differ for reasons that have nothing to do with this design.
+# GTF attributes are `key "value";` for strings and bare `key value;` for numbers. GENCODE writes
+# `exon_number 1;` unquoted, so a parser reading only the quoted form (as v0's did) gets 0 for every
+# exon's number. Both forms are read here.
 ATTR = re.compile(r'(\S+)\s+(?:"([^"]*)"|([^";]*?))\s*;')
 EXT = "arrow.zst"
 ZSTD_LEVEL = 19                        # matches config.yaml packs.zstd_level
@@ -131,7 +128,7 @@ def _split_version(gid: str) -> tuple[str, int]:
 def parse_gtf(path: Path) -> dict[str, pa.Table]:
     """A GENCODE/Ensembl GTF -> `{"genes": table, "exons": table}`.
 
-    `_PAR_Y` records are dropped, as in `steps_gtf`: they are a second copy of a pseudoautosomal
+    `_PAR_Y` records are dropped: they are a second copy of a pseudoautosomal
     gene placed on chrY under the same unversioned `gene_id`, so keeping them would make `gene_id`
     non-unique and break every join in the store.
 
@@ -448,68 +445,6 @@ def gtf_source(sources_yaml: Path, gtf: Path) -> dict:
     return out | {"md5": hashlib.md5(data).hexdigest(), "size": len(data)}
 
 
-# ---- migration check --------------------------------------------------------------------------
-# Proves the annotation object holds exactly what the v0 tables hold, which is what licenses step 7
-# to delete the annotation columns from `search_index`, the results packs and the small tables.
-# It dies with those tables.
-def verify(gtf: Path, tables_dir: Path) -> int:
-    """Compare a fresh parse against `gene_annotation.parquet`, `genes.parquet` and `exons.parquet`.
-    Returns the number of mismatches; prints one line per comparison."""
-    t = parse_gtf(Path(gtf))
-    bad = 0
-    mine = {r["gene_id"]: r for r in t["genes"].to_pylist()}
-
-    for name, cols in (("gene_annotation.parquet", ("gene_id_version", "symbol", "chr", "start", "end", "strand",
-                                                    "tss", "biotype")),
-                       ("genes.parquet", ("symbol", "chr", "start", "end", "strand", "tss", "biotype"))):
-        path = Path(tables_dir) / name
-        if not path.exists():
-            print(f"SKIP {name}: not present")
-            continue
-        old = pq.read_table(path, columns=["gene_id", *cols]).to_pylist()
-        diffs: dict[str, int] = {}
-        example: dict[str, tuple] = {}
-        for r in old:
-            m = mine.get(r["gene_id"])
-            if m is None:
-                diffs["missing gene"] = diffs.get("missing gene", 0) + 1
-                example.setdefault("missing gene", (r["gene_id"], None, None))
-                continue
-            for c in cols:
-                got = f"{m['gene_id']}.{m['version']}" if c == "gene_id_version" else m["name" if c == "symbol" else c]
-                if got != r[c]:
-                    diffs[c] = diffs.get(c, 0) + 1
-                    example.setdefault(c, (r["gene_id"], r[c], got))
-        extra = len(mine) - len(old)
-        bad += sum(diffs.values()) + abs(extra)
-        detail = "; ".join(f"{c}: {n} differ, e.g. {example[c]}" for c, n in sorted(diffs.items()))
-        print(f"{'FAIL' if diffs or extra else 'OK  '} {name}: {len(old)} rows vs {len(mine)} genes"
-              f"{f', {extra:+d} row difference' if extra else ''}{'; ' + detail if detail else ''}")
-
-    path = Path(tables_dir) / "exons.parquet"
-    if not path.exists():
-        print("SKIP exons.parquet: not present")
-        return bad
-    # exon_number is compared apart from the rest: v0 reads only quoted GTF attributes, so every
-    # exon_number in exons.parquet is the 0 default rather than the exon's ordinal (see ATTR).
-    cols = ["gene_id", "transcript_id", "chr", "start", "end", "strand"]
-    old = pq.read_table(path, columns=[*cols, "exon_number"])
-    a = sorted(zip(*(old.column(c).to_pylist() for c in cols)))
-    b = sorted(zip(*(t["exons"].column(c).to_pylist() for c in cols)))
-    if a == b:
-        print(f"OK   exons.parquet: {len(a)} rows identical as a multiset (exon_number excluded)")
-    else:
-        only_old, only_new = set(a) - set(b), set(b) - set(a)
-        bad += len(only_old) + len(only_new)
-        print(f"FAIL exons.parquet: {len(a)} old vs {len(b)} new; {len(only_old)} only old, {len(only_new)} only new;"
-              f" e.g. {sorted(only_old)[:1] or sorted(only_new)[:1]}")
-    zeros = old.column("exon_number").to_pylist().count(0)
-    mine_zeros = t["exons"].column("exon_number").to_pylist().count(0)
-    print(f"NOTE exons.parquet exon_number: {zeros} of {old.num_rows} are 0 in v0, {mine_zeros} here"
-          f"{' (v0 never parsed the unquoted attribute)' if zeros == old.num_rows else ''}")
-    return bad
-
-
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -524,18 +459,11 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--store", required=True, type=Path)
     s.add_argument("--id", required=True)
     s.add_argument("--version", type=int, default=qs.FORMAT_VERSION, choices=qs.SUPPORTED_VERSIONS)
-    v = sub.add_parser("verify", help="compare a fresh parse against the v0 _tables (migration check)")
-    v.add_argument("--gtf", required=True, type=Path)
-    v.add_argument("--tables", required=True, type=Path)
     args = ap.parse_args(argv)
     if args.cmd == "add-split":
         doc = add_split(qs.Store(args.store), args.id, version=args.version)
         print(json.dumps({"lookup": doc["lookup"], "chroms": len(doc["chroms"])}))
         return 0
-    if args.cmd == "verify":
-        bad = verify(args.gtf, args.tables)
-        print(f"{'MISMATCHES: ' + str(bad) if bad else 'all comparisons agree'}")
-        return 1 if bad else 0
     doc = build(qs.Store(args.store), args.id, args.gtf, gtf_source(args.sources, args.gtf), version=args.version)
     print(json.dumps(doc, indent=1))
     return 0

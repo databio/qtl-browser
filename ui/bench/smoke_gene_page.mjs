@@ -13,7 +13,7 @@ import { fileURLToPath } from 'node:url'
 const BASE = process.env.SMOKE_BASE ?? 'http://localhost:4173'
 const UI = fileURLToPath(new URL('..', import.meta.url))
 const READY = '.plot-host:not(.invisible) svg g[aria-label="dot"] > *'
-const ROUNDING = /are rounded \(p within [\d.]+%\)\. Exact values: Zenodo\./
+const ROUNDING = /^Values are rounded\.$/   // the bounds are in its tooltip (components/rounding-note.tsx)
 const CIS_COLS = ['position', 'rsid', 'A1', 'A2', 'tss_distance', 'af', 'ma_samples', 'ma_count', 'pval_nominal', 'beta', 'beta_se', 'pip', 'cs_id']
 const results = []
 const check = (ok, msg) => { results.push([ok, msg]); console.log(`${ok ? 'PASS' : 'FAIL'} ${msg}`) }
@@ -22,7 +22,10 @@ let dataTotal = 0
 
 // the object each per-gene request reads, by name from the store's pointers: one document per scan
 const store = await (await fetch(`${BASE}/data/store.json`)).json()
-const docs = Object.fromEntries(await Promise.all(Object.keys(store.experiments).map(async id => [id, await (await fetch(`${BASE}/data/experiments/${id}.json`)).json()])))
+// the study the app opens (its default VITE_COLLECTION_OF and VITE_GWAS), not every cohort in the store
+const studyIds = Object.keys(store.experiments).filter(id =>
+  store.experiments[id].collection === store.experiments.topchef_ge_cis.collection || id === 'dcm_jurgens2024_biobanks')
+const docs = Object.fromEntries(await Promise.all(studyIds.map(async id => [id, await (await fetch(`${BASE}/data/experiments/${id}.json`)).json()])))
 const cisOf = type => Object.values(docs).find(d => d.kind === 'qtl_cis' && d.phenotype_type === type)
 const res = { ge: cisOf('ge').files, leafcutter: cisOf('leafcutter').files }
 const cat = await (await fetch(`${BASE}/data/variant_catalogs/${cisOf('ge').catalog}.json`)).json()
@@ -57,7 +60,7 @@ async function open(path, { ready = true } = {}) {
     if (u.pathname.startsWith('/data/')) {
       reqs.push(u.pathname); dataTotal++
       // only pointers and content-addressed objects are ever read
-      if (!/^\/data\/(store\.json|(experiments|variant_catalogs|annotations)\/[\w.-]+\.json|immutable\/[A-Za-z0-9_-]{32}\.[a-z0-9.]+)$/.test(u.pathname)) badPaths.push(`${path}: ${u.pathname}`)
+      if (!/^\/data\/(store\.json|(experiments|variant_catalogs|annotations|overlaps|colocs)\/[\w.-]+\.json|immutable\/[A-Za-z0-9_-]{32}\.[a-z0-9.]+)$/.test(u.pathname)) badPaths.push(`${path}: ${u.pathname}`)
     }
   })
   const done = r => { if (net.delete(r)) { inflight--; last = Date.now() } }
