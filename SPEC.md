@@ -67,8 +67,8 @@ against the Python decoders on both collections.
 
 ```
 <store>/
-  store.json                    mutable: name, format version, refget URLs, the ids at each pointer level,
-                                and for experiments their kind and collection
+  store.json                    mutable: name, format version, refget URLs, the sequence collection, the
+                                ids at each pointer level, and for experiments their kind and collection
   immutable/<digest>.<ext>      every object; <digest> = sha512t24u of the object's bytes. Collection
                                 documents live here too, as <digest>.json
   variant_catalogs/<id>.json    mutable pointer: one variant catalog
@@ -93,6 +93,7 @@ is the old one with every old object still present, and a reader mid-session kee
 
 ```json
 {"name": "topchef", "format_version": 2, "refget": [],
+ "collection_digest": "EiFob05aCWgVU_B_Ae0cypnQut3cxUP1",
  "experiments": {
    "topchef_ge_cis":           {"kind": "qtl_cis",   "collection": "T9HbqRhi22izfYL7gVk-NUfsLP2OpRhd.json"},
    "topchef_ge_trans":         {"kind": "qtl_trans", "collection": "T9HbqRhi22izfYL7gVk-NUfsLP2OpRhd.json"},
@@ -109,7 +110,11 @@ is the old one with every old object still present, and a reader mid-session kee
 experiment's `kind` and `collection` so a reader can group experiments by publication and route by
 kind from the first file it fetches, without opening any pointer; `validate` checks every entry
 against its document. The other id lists are sorted. `refget` is a list of refgetstore URLs,
-written `[]` today **(future: filled)**. An experiment names its variant catalog in its own key
+written `[]` today **(future: filled)**. `collection_digest` is the store's sequence collection,
+the seqcol digest every position in the store sits on: a build writes the configured one, every
+variant catalog's `collection_digest` must equal it, and `write_store` refuses a catalog on another.
+A source on another assembly is re-anchored by its adapter before it enters the store. A store with
+no variant catalog records `null`. An experiment names its variant catalog in its own key
 `catalog` (section 8).
 
 ## 3. Object names
@@ -547,8 +552,9 @@ followed to its root and the depth is capped at 16. A cycle is impossible among 
 since each name depends on the other's bytes; the loop guard exists only so the walk terminates on
 a store whose bytes no longer match their names, which `validate` reports separately. **Members
 need not agree on anything**: a collection records who published what together, not that the
-results are comparable, and one publication can release a GRCh37 scan beside a GRCh38 one. A reader
-putting two experiments on one axis compares their catalogs itself.
+results are comparable. Its members share the store's sequence collection (section 2) but not
+necessarily a catalog, so a reader putting two experiments on one axis compares their catalogs
+itself.
 
 `store.json` carries every experiment's `collection` (section 2), so grouping is a `GROUP BY` over the
 first file fetched and a collections page costs one fetch per distinct document, each of which
@@ -1128,8 +1134,10 @@ empty failure list with non-empty notes is a partial pass.**
 2. Every object any pointer names exists and its bytes hash to its name.
 3. Every variant catalog chromosome's `.qbv` header parses, and its chromosome and `seq_digest` equal the
    table entry.
-4. With a refgetstore: every variant catalog `seq_digest` is a sequence the store holds, at the recorded
-   `length`. Without one: a note. (Without this check a variant catalog that carries the same wrong digest
+4. `store.json` names a `collection_digest` whenever it lists a variant catalog, and every variant
+   catalog's `collection_digest` equals it. With a refgetstore: the store holds that collection, and
+   every variant catalog `seq_digest` is a sequence the store holds, at the recorded `length`.
+   Without one: a note. (Without this check a variant catalog that carries the same wrong digest
    everywhere passes the rest.)
 5. `identity_digest` is a 32-character digest; with a site reader (`catalog.read_sites`) it
    recomputes from the decoded variants files. Without one: a note.
@@ -1219,9 +1227,10 @@ Version 2 against version 1, the store live in the bucket until the release:
 | experiment | one document per cohort: `results[]` per phenotype type, each with a `trans` entry, and a `gwas` field | one document per scan, `kind` closed, a GWAS its own experiment |
 | collections | none; `source.zenodo` | a content-addressed document named by every member's `collection` field |
 | `store.json` `experiments` | a sorted list of ids | a map of id to `{kind, collection}` |
+| `store.json` reference | none; each catalog names its own collection | `collection_digest`, which every catalog must equal |
 | search index | one per cohort, both types and both scopes, 21 columns, one ordinal space, a trans-only residue | one per experiment with its own columns and ordinal space; trans parts by the gene's chromosome and an unplaced residue |
 | hits | one object per chromosome holding leads, credible sets and trans records together | per experiment: a cis scan's hold leads and credible sets, a trans scan's hold trans records |
-| validate | headers against pointers | also every header's version against `store.json`, the experiments map, the collection chains |
+| validate | headers against pointers | also every header's version against `store.json`, the experiments map, the collection chains, every catalog against `store.json`'s sequence collection |
 | genome-wide TOPCHeF store | 2.94 GB without a GWAS | 4.53 GB with the DCM GWAS; cis blocks +49%, the price of the stored beta |
 
 Version 1 against v0:

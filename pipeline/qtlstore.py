@@ -307,10 +307,16 @@ class Store:
             cur = doc.get("parent")
         return out
 
-    def write_store(self, name: str, refget: list[str], version: int = FORMAT_VERSION) -> Path:
+    def write_store(self, name: str, refget: list[str], version: int = FORMAT_VERSION, *,
+                    collection: str | None = None) -> Path:
         """store.json last: it lists whatever pointers exist now. `version` must be the version every
         object's header declares -- `validate` compares the two, which is what turns a store built
         half with one codec and half with another into a failure rather than a surprise.
+
+        `collection` is the store's sequence collection, the seqcol digest every position in it sits
+        on; a build passes the configured one. Every variant catalog must name it, so a catalog on
+        another reference stops the write. Without one, the catalogs' own is taken when they agree,
+        and a store with no catalogs records none.
 
         Experiments are a **map**, not a list, carrying each one's `kind` and `collection` (D19). It
         is generated from the documents on disk, like every other entry here, so it is a derived
@@ -326,8 +332,17 @@ class Store:
         for p in sorted((self.root / "experiments").glob("*.json")):
             doc = json.loads(p.read_text())
             exps[p.stem] = {"kind": doc.get("kind"), "collection": doc.get("collection")}
+        named = {cid: self.load(CATALOGS, cid).get("collection_digest") for cid in ids[CATALOGS]}
+        if collection is None and len(set(named.values())) > 1:
+            raise ValueError(f"store.json: variant catalogs span sequence collections {named}")
+        collection = collection or next(iter(named.values()), None)
+        off = {cid: c for cid, c in named.items() if c != collection}
+        if off:
+            raise ValueError(f"store.json: variant catalogs {off} are not on the store's sequence collection "
+                             f"{collection}")
         return _write_json(self.root / "store.json", {"name": name, "format_version": version,
-                                                      "refget": refget, "experiments": exps, **ids})
+                                                      "refget": refget, "collection_digest": collection,
+                                                      "experiments": exps, **ids})
 
     def load(self, level: str, pid: str) -> dict:
         return json.loads((self.root / level / f"{pid}.json").read_text())
@@ -340,6 +355,7 @@ class Store:
         and rsID indexes with chromosome `all` and the variant catalog's collection digest --, a GWAS bin summary
         decodes and passes `gwas.check_bins` on chromosomes that have GWAS files, every trans object's
         frames tile it and each gene's frames are one contiguous range (`results.check_trans_layout`), every variant catalog
+        is on `store.json`'s `collection_digest` and the refgetstore holds that collection, every variant catalog
         chromosome is a sequence the refgetstore holds at the recorded length, and every variant catalog identity
         digest recomputes from the variant catalog's own sites.
 
@@ -380,8 +396,12 @@ class Store:
                     elif sha512t24u_file(obj) != OBJECT_NAME.match(n)["digest"]:
                         fails.append(f"{lvl}/{pid}: object {n} bytes do not match its name")
         fails += self._check_experiment_map(st, docs)
+        fails += self._check_store_collection(st, store)
         for (lvl, pid), doc in docs.items():
             if lvl == CATALOGS:
+                if doc.get("collection_digest") != st.get("collection_digest"):
+                    fails.append(f"variant_catalogs/{pid}: collection_digest {doc.get('collection_digest')!r} != "
+                                 f"store.json collection_digest {st.get('collection_digest')!r}")
                 for c in doc["chromosomes"]:
                     fails += self._check_header(f"variant_catalogs/{pid} {c['name']}", c["file"], c["name"], c["seq_digest"],
                                                 KIND_VARIANTS)
@@ -518,8 +538,9 @@ class Store:
 
         Deliberately absent: any check that the experiments sharing a collection agree with one
         another (D24). A collection records who published what together, not that the results are
-        comparable -- one release can hold two assemblies. A reader that puts two experiments on one
-        axis has to compare their catalogs itself; the store will not do it for them."""
+        comparable. Every experiment sits on the store's one sequence collection, but two can still
+        sit on different catalogs, so a reader that puts two experiments on one axis compares their
+        catalogs itself."""
         fails = []
         m = st.get("experiments")
         if m is None:
@@ -592,6 +613,24 @@ class Store:
             return refget
         from .steps_refget import open_store
         return open_store(refget)
+
+    def _check_store_collection(self, st: dict, store) -> list[str]:
+        """The store's one sequence collection: named whenever there is a variant catalog, a
+        32-character digest, and a collection the refgetstore holds. Each catalog is compared to it
+        in `validate`."""
+        coll = st.get("collection_digest")
+        if coll is None:
+            return ["store.json: no collection_digest, but the store has variant catalogs"] if st.get(CATALOGS) else []
+        if not isinstance(coll, str) or not DIGEST.match(coll):
+            return [f"store.json: collection_digest {coll!r} is not a 32-character sha512t24u"]
+        if store is None:
+            self.notes.append("store.json: collection_digest not checked, no refgetstore configured")
+            return []
+        try:
+            store.get_collection(coll)
+        except Exception:                         # noqa: BLE001 -- gtars raises on an unknown digest
+            return [f"store.json: collection_digest {coll} is not in the refgetstore"]
+        return []
 
     def _check_sequences(self, pid: str, doc: dict, store) -> list[str]:
         """Every chromosome of a variant catalog names a sequence the refgetstore really holds, at the length the
@@ -666,7 +705,8 @@ def remove_experiment(store: Store, exp_id: str) -> dict:
     st = json.loads((store.root / "store.json").read_text())
     doc = json.loads(p.read_text())
     p.unlink()
-    store.write_store(st["name"], st.get("refget", []), st.get("format_version", FORMAT_VERSION))
+    store.write_store(st["name"], st.get("refget", []), st.get("format_version", FORMAT_VERSION),
+                      collection=st.get("collection_digest"))
     return {"experiment": exp_id, "objects_now_unreferenced_candidates": len(object_names(doc))}
 
 

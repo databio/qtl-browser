@@ -53,6 +53,8 @@ export type ExperimentKind = 'qtl_cis' | 'qtl_trans' | 'gwas'
 
 export interface StoreDoc {
   name: string; format_version: number; refget: string[]
+  /** the seqcol digest every position in the store sits on; every catalog names it (SPEC section 2) */
+  collection_digest: string | null
   [CATALOG_DIR]: string[]; annotations: string[]; overlaps?: string[]
   /** coloc lists, one per declared pair of experiments (SPEC section 20) */
   colocs?: string[]

@@ -38,7 +38,7 @@ SEQ = {c: qs.sha512t24u(s.encode()) for c, s in SEQS.items()}
 LEN = {c: len(s) for c, s in SEQS.items()}
 # the sites a variant catalog's identity digest is computed over, one entry per chromosome
 SITES = {"chr1": ([1, 2, 3], "ACG", "GTA"), "chr2": ([7, 9], "TT", "AC")}
-COLLECTION = qs.sha512t24u(b"test collection")        # stands in for the seqcol digest in the index headers
+COLLECTION = "RVToyhvgSjIlMOMoxD7Wq6xkr9pfwhiJ"        # seqcol digest of SEQS as `refgetstore` writes them
 
 
 def refgetstore(path: Path):
@@ -51,6 +51,7 @@ def refgetstore(path: Path):
     store = RefgetStore.on_disk(str(path))
     store.set_quiet(True)
     store.add_sequence_collection_from_fasta(str(fa))
+    assert store.get_collection(COLLECTION).digest == COLLECTION
     return store
 
 
@@ -307,6 +308,28 @@ def build_store(root: Path, seq: dict = SEQ) -> qs.Store:
                                               "phenotype_type": "ge", "dof": None, "files": files})
     st.write_store("test", ["https://refget.example/store"])
     return st
+
+
+@case
+def a_store_has_one_sequence_collection():
+    """store.json names the reference every position sits on, and a catalog on another is refused
+    when the store is written and failed by validate if store.json is edited past that."""
+    with tempfile.TemporaryDirectory() as d:
+        st = build_store(Path(d))
+        doc = json.loads((Path(d) / "store.json").read_text())
+        assert doc["collection_digest"] == COLLECTION
+        other = "B" * 32
+        raises("not on the store's sequence collection", st.write_store, "test", [], collection=other)
+        cat = st.load("variant_catalogs", "cat1")
+        st.write_pointer("variant_catalogs", "cat2", {**cat, "id": "cat2", "collection_digest": other})
+        raises("span sequence collections", st.write_store, "test", [])
+        (Path(d) / "variant_catalogs" / "cat2.json").unlink()
+        # store.json edited by hand to another reference: every catalog fails against it
+        (Path(d) / "store.json").write_text(json.dumps({**doc, "collection_digest": other}))
+        fails = st.validate()
+        assert any("variant_catalogs/cat1: collection_digest" in f for f in fails), fails
+        (Path(d) / "store.json").write_text(json.dumps({**doc, "collection_digest": None}))
+        assert any("no collection_digest" in f for f in st.validate())
 
 
 @case

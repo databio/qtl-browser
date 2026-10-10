@@ -80,7 +80,7 @@ def build(store_root: Path, version: int, *, name: str = "topchef", annot_id: st
     from . import coloc
     out["colocs"] = {d["id"]: d["n"] for d in coloc.add_configured(st, cfg, log=log)}
 
-    st.write_store(name, _refget_urls(cfg), version)
+    st.write_store(name, _refget_urls(cfg), version, collection=cfg["reference"]["collection"])
     out["bytes"] = sum(p.stat().st_size for p in (store_root / "immutable").glob("*") if p.is_file())
     return out
 

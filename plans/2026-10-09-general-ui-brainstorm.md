@@ -38,6 +38,27 @@ leaves; the ones only Sam can answer are collected at the end.
   its rsID the catalog's. The bin object's digest changes, with SPEC section 10's "equals v0"
   wording and the store-check reference. Pairing a GWAS with a QTL experiment on another catalog joins the two windows by
   `(pos, ref, alt)`; the track itself needs no join.
+- **Sam, 2026-10-09: pages belong to a collection.** Gene, variant and locus pages are scoped to
+  the collection (study) they were reached from, with a tab per experiment (scan) in it, as the
+  TOPCHeF app's gene page has eQTL, sQTL and trans; presence across collections waits, so the
+  release needs no gene presence index. The page scope is the **leaf** collection, the one
+  experiments name: its scans share a catalog and annotation in every store so far. Collections
+  nest through `parent` (SPEC section 8; unused today): a parent is a browse level listing its
+  children and any experiments that name it, with no gene pages of its own. The landing page lists
+  the root collections. A reader finds parents by following `parent` from the leaf documents
+  `store.json` names, one fetch each. Editing a parent changes its digest and so every descendant's
+  and every member experiment's pointer; a `set-collection` command would rewrite the chain at once.
+- **Sam, 2026-10-09: every GWAS in the store is eligible for every study.** A GWAS's collection
+  says only which publication it came from; no curated pairing, and no shared-catalog rule for
+  collections (D24 stands). A study page offers every GWAS experiment, the visitor's choice in the
+  URL; with one, it is the one. Coloc lists already name their pair, so the picker marks the GWAS
+  that have a list for this study. The store has one sequence collection but a catalog per cohort
+  (`topchef_grch38`, `gtex_v8_heart_lv_grch38`), so the browser's coloc and LocusCompare join a
+  window by `(pos, ref, alt)` rather than by vidx; today the reader refuses a GWAS on another
+  catalog, so GTEx runs with `VITE_GWAS=`.
+- **Sam, 2026-10-09: the audience is the public.** The landing page and the app choose no default
+  experiment; they help a visitor explore the datasets in the store, at the collection and
+  experiment level first.
 - **Sam, 2026-10-09: collections are addressed by their digest.** No separate key: one inside the
   document would be in the digest anyway, so it buys nothing.
 
@@ -69,10 +90,10 @@ From `pipeline/config.yaml` and `plans/2026-10-06-pqtl-sources.md`:
 | GTEx v8 heart LV | cis `ge`, cis `leafcutter` (2) | gene expression, intron | heart LV | `gtex_v8_heart_lv_grch38` | GENCODE v39 |
 | DCM GWAS (Jurgens 2024) | 1 GWAS | disease | none | `topchef_grch38` | none |
 | ARIC plasma pQTL | EA, AA (2+) | protein (SomaScan aptamer) | plasma | own catalogs | GENCODE v34 |
-| MESA | eQTL GRCh37, pQTL GRCh38 | expression, protein | blood | GRCh37 and GRCh38 | ? |
+| MESA | eQTL GRCh37, pQTL GRCh38 | expression, protein | blood | the store's collection (eQTL re-anchored) | ? |
 
 So about a dozen experiments, three or more phenotype types, at least three annotations, five or
-more catalogs, two ancestries, and possibly two assemblies. The design should hold at 50
+more catalogs and two ancestries, all on one sequence collection. The design should hold at 50
 experiments without rework, though a dozen is the honest near term.
 
 ## 1. Navigation model
@@ -92,7 +113,7 @@ Three ways in, not exclusive:
    naturally, since nothing loads until a search, but it has the full fan-out cost.
 
 A likely shape is entity-first pages with facets, plus collection and experiment pages as browse
-and landing pages that link into the entity pages pre-filtered (`/gene/FLNC?c=topchef`). The facet
+and landing pages that link into the entity pages pre-filtered (`/c/<digest>/gene/FLNC`). The facet
 state is the experiment set of model 2, made implicit.
 
 **Questions:** which way in does a typical visitor take: a gene name, an rsID, a paper? Should
@@ -104,16 +125,16 @@ facets default to "everything", or to something narrower once the store is large
 citation, member scans, tissue, n. No study loaded. Store-level counts come from `store.json` and
 collection docs alone.
 
-**Collection page** (`/collection/<key>`). The publication: citation, source, member experiments
+**Collection page** (`/c/<digest>`). The publication: citation, source, member experiments
 with kind, phenotype type, significance rule, n, and counts (tested, significant). Links to each
 experiment page and to entity pages filtered to this collection. The natural place for a study's
 own extras (TOPCHeF's coloc table), if the general app carries them at all.
 
-**Experiment page** (`/experiment/<id>`). One scan: its counts, its rule, dof, precision, a
+**Experiment page** (`/c/<digest>?tab=<id>`). One scan: its counts, its rule, dof, precision, a
 genome-wide overview of lead signals (from the search index: the lead p per phenotype, as a
 Manhattan of phenotypes), and its gene table (today's Genes page, per experiment).
 
-**Gene page** (`/gene/<ensembl id>`). The heart of the redesign.
+**Gene page** (`/c/<digest>/gene/<ensembl id | symbol>`). The heart of the redesign.
 
 - Header: symbol, id, coordinates per annotation (they differ between GENCODE releases).
 - **Presence**: the experiments where the gene is present (tested), grouped by collection, and
@@ -122,17 +143,17 @@ Manhattan of phenotypes), and its gene table (today's Genes page, per experiment
   gene-level `ge`, n introns, n aptamers), best p, lead variant, significant by that experiment's
   rule, credible sets. Only expanded experiments cost requests.
 - **Detail**: selecting expanded experiments draws locus plots. Options: one experiment at a time (today's page);
-  stacked plots on a shared x axis (same assembly only); a LocusCompare-style scatter between two
-  experiments joined by site through the overlap index; a GWAS track from any GWAS whose catalog
-  joins through the overlap index.
+  stacked plots on a shared x axis; a LocusCompare-style scatter between two
+  experiments joined by site through the overlap index; a GWAS track from any GWAS in the store,
+  joined by `(pos, ref, alt)` in the window.
 - Trans: experiments where the gene is a trans target, and its trans hits.
 
-**Variant page** (`/variant/<rsid | site>`). Presence from the overlap index: which catalogs hold
+**Variant page** (`/c/<digest>/variant/<rsid | site>`). Presence from the overlap index: which catalogs hold
 the site, so which experiments tested it, in one read. Expanding an experiment reads its hits frame
 (cis and trans records); a forest plot of the variant's effect on the same gene or
 protein across experiments; optionally a PheWAS-style plot across every phenotype it touches.
 
-**Locus or region page** (`/region/<chr:start-end>`). A track view: genes, then one row per
+**Locus or region page** (`/c/<digest>/region/<chr:start-end>`). A track view: genes, then one row per
 experiment showing its lead signals in the window (from hits or the search index), then GWAS tracks.
 Full nominal stats per experiment in a window cost one block per phenotype per experiment, so the
 region view would show leads by default and expand to full stats per row.
@@ -158,12 +179,13 @@ with multi-gene aptamers, needs checking against its tables.
 **Variants across catalogs.** Same assembly: the overlap index answers membership and vidx exactly.
 A variant page has to tell *not in this catalog* from *in the catalog with no significant record*
 (hits only hold significant and credible-set records; nominal stats need the block of a specific
-phenotype). Different assembly (MESA's GRCh37 eQTL): a different seqcol collection, so no overlap.
-Either liftover at build time (a new catalog, a pipeline decision), or the UI shows GRCh37
-experiments only on their own pages.
+phenotype).
 
-**Questions:** is GRCh37 data worth supporting, or is it lifted at build time and never seen as
-GRCh37 by the UI?
+**One reference per store.** Every catalog is refchecked against the store's one refget
+collection, named by its seqcol digest, and the overlap index refuses catalogs on two. A source on
+another assembly, such as MESA's eQTL, is re-anchored to that collection by its adapter (v2 plan,
+G6), so the UI never sees a second assembly and every
+experiment shares one coordinate system. That is what makes any GWAS usable with any study.
 
 ## 4. Comparing effects
 
@@ -212,14 +234,35 @@ the 26.
 
 ## 5. URL and state
 
-- Entity routes are experiment-free: `/gene/:id`, `/variant/:id`, `/region/:loc`.
-- Facets in the query string: `?c=<collection>` or `?e=<experiment,...>`, `?type=ge,leafcutter`.
-  Shareable; empty means everything.
-- **Collections by digest**: `/collection/<digest>`. No format change. A metadata edit gives the
-  collection a new digest, so a link to the old one finds nothing in the current `store.json`; the
-  page can say so and offer the collection list.
-- Selected experiment rows on a gene page, locus window, active tab: in the URL too, so a link
-  reproduces the view (today's TOPCHeF app already keeps the window in the URL).
+**Sam, 2026-10-09: the collection digest is in the URL.** Every page below the landing page sits
+under the collection it belongs to:
+
+| Route | Page |
+|---|---|
+| `/` | root collections as cards |
+| `/c/<digest>` | a collection: its child collections, or its experiments with counts and links |
+| `/c/<digest>/genes` | the gene table, a tab per experiment |
+| `/c/<digest>/gene/<id>` | gene page; `<id>` an Ensembl id or a symbol, as today |
+| `/c/<digest>/variant/<id>` | variant page; rsID or `chr:pos:ref:alt` |
+| `/c/<digest>/region/<chr:start-end>` | locus page |
+| `/about` | the browser and the store |
+
+- `<digest>` is the full 32-character collection digest, the name of its object without `.json`.
+  No short form: a prefix needs a uniqueness rule and buys only a shorter link.
+- View state in the query string, so a link reproduces the view: `?tab=<experiment id>` (the scan
+  shown, as `tab` is today), `?gwas=<experiment id>` (the GWAS chosen for coloc, LocusCompare and
+  the track), and the locus window as today.
+- **Sam, 2026-10-10: experiments by id.** An experiment is a mutable pointer
+  (`experiments/<id>.json`) with no digest of its own, and its id is the URL's name for it; a
+  rebuilt experiment keeps its links.
+- A parent collection's route shows only its children; an entity route under a parent finds no
+  experiments and says so.
+- **A stale digest.** Any edit to a collection's metadata, a citation's page numbers included,
+  gives it, its descendants and their links new digests, and a public link to the old one finds
+  nothing in the current `store.json`. **Sam, 2026-10-09:** the page says the collection is not in
+  this store and offers the collection list. No map of superseded digests: a running log of
+  versions is more to manage than the broken links cost.
+- `ui-topchef/` keeps its routes (`/gene/:id` and so on, the collection fixed by its build).
 
 ## 6. Performance at N experiments
 
@@ -257,8 +300,12 @@ today; the collection `source` is free-form. Options: structured fields on the e
 UI facets on without the format knowing the vocabulary. Ontology terms (UBERON for tissue, EFO for
 traits) would make them comparable with other resources.
 
-**Question:** which facets matter: tissue, ancestry, phenotype type, assay, study? Ontology ids, or
-plain labels?
+**Sam, 2026-10-10: optional facets on the experiment document, as plain labels.** `organ`, `tissue`,
+`cell_type`, `ancestry`, `n_samples`, `assay`, `sex`, and `trait` for a GWAS (today it has only a
+`title`; a QTL experiment's phenotype is `phenotype_type`). Not on the collection: one publication
+spans tissues (GTEx) and ancestries (ARIC); a collection card shows the union of its experiments'
+values. No ontology ids. Each is a SPEC addition and a config entry per experiment; `kind`,
+`phenotype_type`, annotation and assembly are already in the store.
 
 ## 8. Code shared with ui-topchef
 
@@ -275,8 +322,8 @@ What would be shared: `store-decode.ts`, a per-experiment store reader, `signifi
 the plot primitives (`LocusPlot`, `GeneTrack`). TOPCHeF would then read its pinned collection
 through the same per-experiment reader, which changes how it opens the store (see section 6).
 
-**Question:** A or B, and does ui-topchef move onto the shared reader now or stay on its copy until
-the general UI settles?
+**Sam, 2026-10-10: skipped.** Each app keeps its own copy (C) through PR #5; a fix to shared code
+goes into both by hand.
 
 ## 9. Prior art worth looking at before designing
 
@@ -287,14 +334,9 @@ screenshots and notes on what each does with "many studies, one gene".
 
 ## 10. What this means for the release
 
-The release plan (`plans/2026-10-09-v2-release.md`) assumed the general app's changes go in PR #5.
-With the UX redo, that no longer fits one PR. Options for `ui/` in the release:
-
-- deploy the v2 mirror as it stands (fixes the general Worker, which has been broken since
-  2026-10-07; it shows TOPCHeF only, since it opens `topchef_ge_cis`);
-- or leave `ui/` out of the release, and its Worker broken, until the redesign lands.
-
-The GTEx rebuild, the upload and the TOPCHeF deploy do not depend on either.
+**Sam, 2026-10-09: PR #5 carries everything, the general UI included.** The branch merges once the
+redesigned `ui/` is built; the store upload and both deploys follow the merge. The general Worker
+stays broken (since 2026-10-07) until then.
 
 ## Questions for Sam
 
@@ -305,8 +347,7 @@ The GTEx rebuild, the upload and the TOPCHeF deploy do not depend on either.
    LocusCompare, effect forest plots, coloc between QTL experiments: which first?
 4. **Format work** (sections 6, 7): a gene presence index (presence alone or with significance),
    structured facet metadata.
-5. **GRCh37** (section 3): supported in the UI, or lifted at build time?
-6. **Code sharing** (section 8): path alias or workspace package, and when TOPCHeF moves onto it.
-7. **The release** (section 10): ship the v2 mirror to the general Worker now as a stopgap, or hold
-   `ui/` out of PR #5?
+5. **A second assembly** (section 3): settled, re-anchored to the store's collection by the adapter.
+6. **Code sharing** (section 8): skipped; each app keeps its own copy.
+7. **The release** (section 10): settled, PR #5 carries the general UI.
 8. **Prior art** (section 9): any of these you like or dislike, or others you have in mind?
