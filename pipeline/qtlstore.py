@@ -230,6 +230,38 @@ COLLECTION_EXT = "json"
 COLLECTION_FIELDS = ("title", "citation", "source", "parent")
 MAX_COLLECTION_DEPTH = 16          # a parent chain this deep is a mistake, not a hierarchy
 
+# Optional facets on an experiment document (SPEC section 8): plain labels a browser filters and
+# describes by, no ontology ids. On the experiment, not the collection, because one publication can
+# span tissues (GTEx) and ancestries (ARIC). Every key is optional; an absent key means "not stated".
+FACET_KEYS = ("organ", "tissue", "cell_type", "ancestry", "n_samples", "assay", "sex", "condition", "trait")
+
+
+def check_facets(facets) -> list[str]:
+    """What is wrong with an experiment's `facets`, as strings (empty = fine): an object whose keys
+    are FACET_KEYS, `n_samples` a positive integer and every other value a non-empty string."""
+    if not isinstance(facets, dict):
+        return [f"facets is {type(facets).__name__}, not an object"]
+    out = [f"facets: unknown key {k!r}" for k in facets if k not in FACET_KEYS]
+    for k, v in facets.items():
+        if k == "n_samples":
+            if isinstance(v, bool) or not isinstance(v, int) or v < 1:
+                out.append(f"facets: n_samples {v!r} is not a positive integer")
+        elif k in FACET_KEYS and (not isinstance(v, str) or not v.strip()):
+            out.append(f"facets: {k} {v!r} is not a non-empty string")
+    return out
+
+
+def with_facets(doc: dict, facets: dict | None) -> dict:
+    """The experiment document with `facets` set to the given ones (dropped when there are none),
+    after checking them. Builders and `set-facets` both go through here."""
+    out = {k: v for k, v in doc.items() if k != "facets"}
+    if facets:
+        bad = check_facets(facets)
+        if bad:
+            raise ValueError(f"experiments/{doc.get('id')}: " + "; ".join(bad))
+        out["facets"] = dict(facets)
+    return out
+
 
 class Store:
     def __init__(self, root: Path):
@@ -425,6 +457,8 @@ class Store:
                 fails += coloc.check(self, pid, doc, docs)
             if lvl != "experiments":
                 continue
+            if "facets" in doc:
+                fails += [f"experiments/{pid}: {x}" for x in check_facets(doc["facets"])]
             cat = docs.get((CATALOGS, doc["catalog"]))
             if cat is None:
                 fails.append(f"experiments/{pid}: variant catalog {doc['catalog']!r} not in store")
@@ -462,6 +496,7 @@ class Store:
             if doc.get("search_index") and (self.immutable / doc["search_index"]).exists():
                 from . import results
                 fails += results.check_split(self, doc, cat)
+                fails += results.check_leads(self, doc, cat)
             # the GWAS bin summary (an Arrow object, no header): schema, bins, chromosomes with GWAS rows
             bins = doc.get("bins") if doc.get("kind") == "gwas" else None
             if bins and (self.immutable / bins["file"]).exists():
@@ -710,6 +745,54 @@ def remove_experiment(store: Store, exp_id: str) -> dict:
     return {"experiment": exp_id, "objects_now_unreferenced_candidates": len(object_names(doc))}
 
 
+def _rewrite_store_json(store: Store) -> None:
+    """store.json again, with its own name, refget URLs, version and sequence collection."""
+    st = json.loads((store.root / "store.json").read_text())
+    store.write_store(st["name"], st.get("refget", []), st.get("format_version", FORMAT_VERSION),
+                      collection=st.get("collection_digest"))
+
+
+def collection_members(store: Store, key: str) -> list[str]:
+    """The experiments config.yaml's `collections[key]` describes: a GWAS whose id is the key, or
+    the QTL scans derived from the cohort stem `key` (their `source.experiment_id`)."""
+    out = []
+    for p in sorted((store.root / "experiments").glob("*.json")):
+        doc = json.loads(p.read_text())
+        src = doc.get("source") if isinstance(doc.get("source"), dict) else {}
+        if doc.get("id") == key or (doc.get("kind") in QTL_KINDS and src.get("experiment_id") == key):
+            out.append(p.stem)
+    return out
+
+
+def set_collection(store: Store, key: str, meta: dict) -> dict:
+    """Write the collection document config.yaml's `collections[key]` describes, point its member
+    experiments at it, and rewrite store.json. The old document stays until `gc`. A changed title,
+    citation or source is a new digest, so every link to the old one stops resolving (SPEC section 8)."""
+    members = collection_members(store, key)
+    if not members:
+        raise ValueError(f"collections.{key}: no experiment in the store is derived from it")
+    name = store.write_collection(meta["title"], citation=meta.get("citation"), source=meta.get("source"),
+                                  parent=meta.get("parent"))
+    old = set()
+    for eid in members:
+        doc = store.load("experiments", eid)
+        old.add(doc.get("collection"))
+        store.write_pointer("experiments", eid, {**doc, "collection": name})
+    _rewrite_store_json(store)
+    return {"key": key, "collection": name, "was": sorted(o for o in old if o), "experiments": members}
+
+
+def set_facets(store: Store, facets: dict) -> dict:
+    """Give every experiment config.yaml's `facets[id]` names those facets, replacing what it had;
+    an experiment the map does not name keeps its own. Refuses an id the store does not hold."""
+    missing = sorted(eid for eid in facets if not (store.root / "experiments" / f"{eid}.json").exists())
+    if missing:
+        raise ValueError(f"facets: no experiments {missing} in the store")
+    for eid, f in sorted(facets.items()):
+        store.write_pointer("experiments", eid, with_facets(store.load("experiments", eid), f))
+    return {"experiments": sorted(facets)}
+
+
 def referenced(store: Store) -> set[str]:
     """Every object any pointer file on disk names (listed in store.json or not: a pointer present but
     unlisted still protects its objects)."""
@@ -793,15 +876,20 @@ def main(argv: list[str] | None = None) -> int:
         remove-experiment ID       drop experiments/ID.json and rewrite store.json (objects stay until gc)
         gc [--dry-run]             delete immutable objects no pointer names
         crosscat A B               the cross-catalog lookup check between variant catalogs A and B
+        set-collection KEY         write config.yaml's collections.KEY and repoint its experiments
+        set-facets                 write config.yaml's facets into the experiment documents
     """
     import argparse
-    ap = argparse.ArgumentParser(description="qtlstore maintenance: validate, remove-experiment, gc, crosscat")
+    ap = argparse.ArgumentParser(description="qtlstore maintenance: validate, remove-experiment, gc, crosscat, "
+                                             "set-collection, set-facets")
     sub = ap.add_subparsers(dest="cmd", required=True)
-    for name in ("validate", "remove-experiment", "gc", "crosscat"):
+    for name in ("validate", "remove-experiment", "gc", "crosscat", "set-collection", "set-facets"):
         p = sub.add_parser(name)
         p.add_argument("--store", required=True, type=Path)
         if name == "remove-experiment":
             p.add_argument("id")
+        if name == "set-collection":
+            p.add_argument("key")
         if name == "gc":
             p.add_argument("--dry-run", action="store_true")
         if name == "crosscat":
@@ -819,6 +907,17 @@ def main(argv: list[str] | None = None) -> int:
         return 1 if fails else 0
     if a.cmd == "remove-experiment":
         print(json.dumps(remove_experiment(st, a.id)))
+        return 0
+    if a.cmd in ("set-collection", "set-facets"):
+        from .common import Config
+        cfg = Config().cfg
+        if a.cmd == "set-collection":
+            meta = (cfg.get("collections") or {}).get(a.key)
+            if not meta:
+                raise SystemExit(f"config.yaml has no collections.{a.key}")
+            print(json.dumps(set_collection(st, a.key, meta)))
+        else:
+            print(json.dumps(set_facets(st, cfg.get("facets") or {})))
         return 0
     if a.cmd == "gc":
         print(json.dumps(gc(st, a.dry_run)))

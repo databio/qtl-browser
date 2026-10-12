@@ -41,5 +41,5 @@ export function LocusSkeleton({ chr }: { chr?: string }) {
 
 /** LocusCompare square: same frame, GWAS on x and QTL on y. */
 export function CompareSkeleton() {
-  return <Frame height={SCATTER_H} yTitle="QTL −log₁₀ p" xTitle="DCM GWAS −log₁₀ p" />
+  return <Frame height={SCATTER_H} yTitle="QTL −log₁₀ p" xTitle="GWAS −log₁₀ p" />
 }

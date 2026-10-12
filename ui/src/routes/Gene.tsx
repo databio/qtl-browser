@@ -8,7 +8,7 @@ import { SectionPanel } from '@/components/section-panel'
 import { KvTable } from '@/components/kv-table'
 import { Tooltip } from '@/components/tooltip'
 import { Segmented } from '@/components/segmented'
-import { DetailSkeleton, Empty, TableSkeleton, TabSkeleton, Unavailable } from '@/components/states'
+import { DetailSkeleton, Empty, TableSkeleton, TabSkeleton } from '@/components/states'
 import { ErrorPage } from '@/components/error-page'
 import { toastError } from '@/lib/toast'
 import CredibleSetTable from '@/components/CredibleSetTable'
@@ -16,16 +16,18 @@ import CisTable from '@/components/CisTable'
 import { type LocusColoc } from '@/lib/coloc-abf'
 import TransTable from '@/components/TransTable'
 import LocusPlot, { LocusLegend } from '@/components/LocusPlot'
-import { colocListed, useColocLists } from '@/lib/coloc'
+import { colocListing, colocSource, useColocLists } from '@/lib/coloc'
+import { GwasPicker } from '@/components/GwasTrack'
 import { ensemblGene, geneCards, gtexGene, openTargetsGene, ucsc } from '@/lib/links'
-import { useSignificance, useStoreInfo } from '@/contexts/store-context'
+import { useCollectionCrumbs, useIndex, useSignificance, useStoreInfo } from '@/contexts/store-context'
 import { CopyButton } from '@/components/copy-button'
 import { fmtBp, fmtInt, fmtNum, fmtP, fmtPhenotype, fmtBetaSE } from '@/lib/format'
 import { resolveGene, type GeneDetail, type SplicePhenotype,
   type CredibleSetRow, type Gene as GeneRow, type SearchHit } from '@/lib/queries'
 import { loadGene, type GenePack } from '@/lib/gene'
 import { geneTransTable } from '@/lib/trans'
-import { getStore } from '@/lib/store'
+import { EQTL_TYPE, getStore, SQTL_TYPE } from '@/lib/store'
+import { gwasName } from '@/lib/describe'
 
 const getStoreHasTrans = () => getStore().then(s => s.hasTrans)
 import { dropTable, getDB } from '@/lib/db'
@@ -46,10 +48,16 @@ export default function Gene() {
   const [params, setParams] = useSearchParams()
   const sig = useSignificance()
   const colocs = useColocLists()
+  const m = useStoreInfo()
+  const ix = useIndex()
+  const home = useCollectionCrumbs()
   const [hit, setHit] = useState<SearchHit | null | undefined>(undefined)
   // a gene tested for sQTL but not eQTL opens on its sQTL tab; any other tab value (old
   // `?tab=trans` links) falls back to eQTL
-  const tab: Tab = params.get('tab') === 'sqtl' ? 'sqtl' : params.get('tab') === 'eqtl' ? 'eqtl' : (hit && !hit.tested && hit.has_results ? 'sqtl' : 'eqtl')
+  // a tab per cis scan the study has (both until it has opened)
+  const scans = { eqtl: m ? m.cis.has(EQTL_TYPE) : true, sqtl: m ? m.cis.has(SQTL_TYPE) : true }
+  const asked: Tab = params.get('tab') === 'sqtl' ? 'sqtl' : params.get('tab') === 'eqtl' ? 'eqtl' : (hit && !hit.tested && hit.has_results ? 'sqtl' : 'eqtl')
+  const tab: Tab = scans[asked] ? asked : asked === 'eqtl' ? 'sqtl' : 'eqtl'
   const [gp, setGp] = useState<GenePack | null>(null)
   const [detail, setDetail] = useState<GeneDetail | null>(null)
   // the gene's trans rows as an in-memory table, read once per gene alongside the other requests
@@ -67,7 +75,18 @@ export default function Gene() {
     resolveGene(id).then(async h => {
       if (!alive) return
       setHit(h)
-      if (!h?.has_results) return
+      if (!h) return
+      // a trans experiment has no cis block to read: its page is the gene's trans associations
+      if ((await getStore()).cis.size === 0) {
+        try {
+          const t = await geneTransTable(h)
+          if (!alive) { dropTable(t); return }
+          table = t
+          setTransTable(t)
+        } catch (e) { if (alive) toastError('The trans associations could not be loaded.', e) }
+        return
+      }
+      if (!h.has_results) return
       performance.mark('gene:hit', { detail: h.gene_id })
       // the eQTL block and variants range requests leave together (or come from the cache)
       const pack = loadGene(h)
@@ -99,28 +118,41 @@ export default function Gene() {
   if (hit === null) return <Page><Empty label={`No gene matches “${id}”.`} /></Page>
 
   const sym = hit.symbol ?? hit.gene_id
+  const coloc = (trait: string) => {
+    const l = colocListing(colocs, hit.gene_id, trait)
+    return l && m?.gwas ? `${trait} colocalizes with ${gwasName(m.gwas, ix)} (${l.doc.threshold}), as reported by ${colocSource(l)}` : null
+  }
+  const colocE = coloc('eQTL'), colocS = coloc('sQTL')
+  // a trans experiment (no cis scan): the gene's trans associations of that scan, and nothing else
+  const transOnly = m != null && m.cis.size === 0
+  const transTypes = transOnly ? [...m!.trans.keys()].map(t => (t === SQTL_TYPE ? 's' : 'e') as 'e' | 's') : []
   const tabs = [
     { value: 'eqtl' as Tab, label: 'eQTL' },
     { value: 'sqtl' as Tab, label: `sQTL${sig.assessed && hit.n_sqtl_sig ? ` (${hit.n_sqtl_sig})` : ''}` },
-  ]
+  ].filter(t => scans[t.value])
   return (
     <Page>
       <PageHeader
-        crumbs={[{ to: '/genes', label: 'Genes' }, { label: sym }]}
+        crumbs={[...home, { to: '/genes', label: 'Genes' }, { label: sym }]}
         title={sym}
         meta={hit.gene_id}
         description={<span className="mt-1 flex flex-wrap items-center gap-1.5">
           {sig.assessed && hit.is_egene && <Chip cls="badge-primary" tip={`Significant cis-eQTL: ${sig.ruleText}`}>eGene</Chip>}
           {sig.assessed && hit.n_sqtl_sig > 0 && <Chip cls="badge-secondary" tip={`Introns with a significant cis-sQTL (${sig.ruleText})`}>{hit.n_sqtl_sig} sQTL intron{hit.n_sqtl_sig > 1 ? 's' : ''}</Chip>}
-          {colocListed(colocs, hit.gene_id, 'eQTL') && <Chip cls="badge-accent" tip="eQTL colocalizes with the Jurgens et al. 2024 DCM GWAS (coloc PP.H4 > 0.8)">DCM coloc · eQTL</Chip>}
-          {colocListed(colocs, hit.gene_id, 'sQTL') && <Chip cls="badge-accent badge-outline" tip="sQTL colocalizes with the Jurgens et al. 2024 DCM GWAS (coloc PP.H4 ≥ 0.8)">DCM coloc · sQTL</Chip>}
-          {!hit.has_results && <Chip cls="badge-ghost" tip="Filtered out before QTL mapping (expression or mappability)">not tested</Chip>}
-          {hit.has_results && !hit.tested && <Chip cls="badge-ghost" tip="Tested for splicing QTL only; filtered out of the expression analysis">no eQTL test</Chip>}
+          {colocE && <Chip cls="badge-accent" tip={colocE}>coloc · eQTL</Chip>}
+          {colocS && <Chip cls="badge-accent badge-outline" tip={colocS}>coloc · sQTL</Chip>}
+          {!transOnly && !hit.has_results && <Chip cls="badge-ghost" tip="Filtered out before QTL mapping (expression or mappability)">not tested</Chip>}
+          {/* only an eQTL scan can say a gene was left out of it */}
+          {scans.eqtl && m != null && hit.has_results && !hit.tested && <Chip cls="badge-ghost" tip="Filtered out of the expression analysis">no eQTL test</Chip>}
         </span>}
-        actions={hit.has_results ? <Segmented nav value={tab} onChange={t => setParams({ tab: t })} options={tabs} /> : undefined}
+        actions={hit.has_results && tabs.length > 1 ? <Segmented nav value={tab} onChange={t => setParams({ tab: t })} options={tabs} /> : undefined}
       />
-      {!hit.has_results ? (
-        <Empty label={`${sym} is annotated in GENCODE v34 but was not tested for QTL (filtered out by expression or mappability).`} />
+      {transOnly ? (
+        <div className="space-y-8">
+          {transTypes.map(t => <TransSection key={t} table={transTable} qtlType={t} fileStem={`${sym}_trans_${t}qtl`} />)}
+        </div>
+      ) : !hit.has_results ? (
+        <Empty label={`${sym} is annotated in ${m?.annotation.id ?? 'the gene annotation'} but was not tested for QTL in this experiment.`} />
       ) : (
         <>
           {tab === 'eqtl' && (detail && gp ? <EqtlTab hit={hit} gp={gp} d={detail} transTable={transTable} /> : <TabSkeleton plot chr={hit.chr} />)}
@@ -163,11 +195,8 @@ function GeneTable({ g }: { g: GeneRow }) {
 }
 
 /**
- * coloc.abf against the Jurgens 2024 DCM GWAS, computed here from the two windows the page has
- * already downloaded (lib/coloc-abf.ts) -- no extra request, and about a millisecond.
- *
- * The preprint used coloc.abf, so these are comparable to its table; at coloc's default priors
- * they reproduce its gene list exactly (every listed gene above 0.8, every other below 0.65).
+ * coloc.abf against the chosen GWAS, computed here from the two windows the page has already
+ * downloaded (lib/coloc-abf.ts) -- no extra request, and about a millisecond.
  *
  * How far the shared-variant posterior is spread is the locus plot's business, not this table's:
  * the dots are sized by it. That matters for reading PP.H4, because a posterior smeared over tens
@@ -177,7 +206,8 @@ function GeneTable({ g }: { g: GeneRow }) {
 function ColocSection({ qtlType, gp, phenotypeId }: {
   qtlType: 'e' | 's'; gp: GenePack; phenotypeId?: string
 }) {
-  const hasGwas = useStoreInfo()?.hasGwas ?? false
+  const gwas = useStoreInfo()?.gwas ?? null
+  const ix = useIndex()
   const [res, setRes] = useState<LocusColoc | null | 'running' | 'failed'>('running')
   useEffect(() => {
     let alive = true
@@ -190,11 +220,12 @@ function ColocSection({ qtlType, gp, phenotypeId }: {
 
   return (
     <SectionPanel title="GWAS colocalization"
-      description="coloc.abf against the Jurgens et al. 2024 DCM GWAS. Values are computed in-browser.">
-      {!hasGwas ? <Unavailable what="DCM GWAS data" />
+      description={gwas ? `coloc.abf against ${gwasName(gwas, ix)}. Values are computed in-browser.` : 'Choose a GWAS to compute coloc.abf in-browser.'}
+      action={<GwasPicker />}>
+      {!gwas ? null
         : res === 'running' ? <TableSkeleton columns={[{ w: 'w-16' }, { w: 'w-12', align: 'right' }]} rows={5} />
         : res === 'failed' ? <Empty label="The GWAS window could not be loaded." />
-        : res === null ? <Empty label="No variants in this window are shared with the DCM GWAS." />
+        : res === null ? <Empty label="No variants in this window are shared with the GWAS." />
         : (
           /* labelWidth: these labels are longer than the page's other KvTables and the values are
              short numbers, so the label column gets the room the value column does not need */
@@ -373,11 +404,13 @@ function SqtlIntrons({ hit, gp, d, transTable, phens }: { hit: SearchHit; gp: Ge
  *  intron, since a gene's trans sQTL rows can hit different introns. */
 function TransSection({ table, qtlType, fileStem }: { table: string | null; qtlType: 'e' | 's'; fileStem: string }) {
   const what = qtlType === 'e' ? 'expression' : 'splicing'
-  const hasTrans = useStoreInfo()?.hasTrans ?? false
+  // a study with no trans scan of this type has no section for it
+  const scanned = useStoreInfo()?.trans.has(qtlType === 'e' ? EQTL_TYPE : SQTL_TYPE) ?? false
+  if (!scanned) return null
   return (
     <SectionPanel title="trans associations"
       description={<>Every variant outside the cis window associated with this gene's {what}{qtlType === 's' && <> <b className="font-medium text-base-content/80">(any intron)</b></>}. Click a row to open the variant. <RoundingNote kind="trans" /></>}>
-      {hasTrans ? <TransTable table={table} qtlType={qtlType} fileStem={fileStem} /> : <Unavailable what={`trans ${qtlType === 'e' ? 'eQTL' : 'sQTL'} results`} />}
+      <TransTable table={table} qtlType={qtlType} fileStem={fileStem} />
     </SectionPanel>
   )
 }

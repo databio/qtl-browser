@@ -386,7 +386,7 @@ export default function LocusPlot({ spec, onCount, onLegend, onActions, onCredib
       <div ref={compareCol} className="shrink-0" style={{ width: SCATTER_H }}>
         {!hasGwas
           ? <div className="flex h-full items-center rounded-lg border border-base-300 p-4 text-center text-sm text-base-content/60" style={{ height: SCATTER_H }}>
-              QTL versus DCM GWAS: not available in this data release yet.</div>
+              Choose a GWAS to compare it with this locus.</div>
           : state === 'ready' && tableName && link && brushSel
           ? <LocusCompare table={tableName} dark={dark} size={Math.min(SCATTER_H, Math.max(width, 200))} yDomain={[0, yMax]} link={link} brush={brushSel} click={click} lookup={lookup} hasColoc={nColoc > 0} />
           : <CompareSkeleton />}

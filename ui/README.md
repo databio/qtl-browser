@@ -5,13 +5,22 @@ with the same stack, store and decoders. `../ui-topchef/` is the site at https:/
 This one deploys to its own Worker, `qtl-browser` (`wrangler.jsonc`), on every push to main that
 touches `ui/` (`.github/workflows/deploy-ui.yml`). It has no custom domain yet.
 
-Today `src/` is the TOPCHeF app's code, version 2 reader included, so it opens one collection like
-the TOPCHeF app does. It stops being a copy with the redesign: navigation by collection and
-experiment with no default entry point, gene and variant pages that start from where a gene or
-variant is present and expand per experiment, coloc and LocusCompare against a GWAS the visitor
-picks, and none of what only applies to TOPCHeF. The design is
-`plans/2026-10-09-general-ui-brainstorm.md`. Until then a change belonging in both apps is applied
-to `../ui-topchef/` and copied; `diff -rq src ../ui-topchef/src` shows what differs.
+It browses every collection in the store (`plans/2026-10-10-general-ui-first-pass.md`):
+
+| Path | Page |
+|---|---|
+| `/` | the collections as rows, studies and GWAS apart; nothing opens until one is chosen |
+| `/about` | the browser and the store |
+| `/c/<digest>` | a collection: its publication, facets and experiments, each a link |
+| `/c/<digest>/e/<id>` | an experiment: search and Top loci (a cis scan), search (a trans scan), Top loci (a GWAS) |
+| `/c/<digest>/e/<id>/genes`, `/gene/<g>`, `/variant/<v>`, `/region/<loc>` | that QTL experiment's pages |
+| `/c/<digest>/e/<id>/gwas/<gwas id>/...` | the same, with that GWAS for coloc and LocusCompare, chosen on a gene page |
+
+`<digest>` is the collection object's digest. Every page is one experiment's: the URL's prefix up
+to the GWAS is the router's basename (`src/lib/scope.ts`), so a page load holds one experiment and
+one GWAS, and choosing another is a full navigation. No GWAS is chosen until the visitor picks
+one. A GWAS on another variant catalog is matched by position and alleles. The code is not shared
+with `../ui-topchef/`: a fix to both is made in both.
 
 ## Running it
 
@@ -22,10 +31,7 @@ VITE_DATA_BASE=https://cloud2.databio.org/qtl-browser npm run dev           # th
 ```
 
 `QTL_DATA_DIR` is read when the dev server starts, so pointing it at another store needs a
-restart. `VITE_COLLECTION_OF` names the experiment whose collection opens (default
-`topchef_ge_cis`) and `VITE_GWAS` the GWAS beside it (default `dcm_jurgens2024_biobanks`, empty for
-none). The reader refuses a GWAS on another variant catalog, so GTEx opens with
-`VITE_COLLECTION_OF=gtex_v8_heart_lv_ge_cis VITE_GWAS=`.
+restart. Open the dev fault page inside an experiment, `/c/<digest>/e/<id>/dev/faults`.
 
 `npx tsc -b` type-checks. `npm run store-check` validates a local store against the Python
-decoders (`bench/README.md`). The bench and smoke suites describe the TOPCHeF pages.
+decoders (`bench/README.md`). The smoke suites open each of TOPCHeF's four experiments, and GTEx's eQTL experiment against the DCM GWAS.

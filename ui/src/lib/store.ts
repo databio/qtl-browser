@@ -9,12 +9,13 @@
  * build time, and a header is checked wherever it arrives inside bytes read anyway (whole objects,
  * the gene lookup's directory, a hits file's frame table).
  *
- * One experiment is one scan (SPEC section 8): TOPCHeF is four -- eQTL and sQTL, cis and trans --
- * in one collection, and the DCM GWAS a fifth in its own. This app pins its study at build time:
- * `VITE_COLLECTION_OF` names one experiment, and every experiment in `store.json` sharing that
- * experiment's `collection` is the study; `VITE_GWAS` names the GWAS shown beside it, since the
- * two are different publications and the pairing is this deployment's choice, not a fact in the
- * store. A gene or variant page reads per-chromosome objects of each experiment it shows (SPEC
+ * One experiment is one scan (SPEC section 8), and a collection the publication its scans came
+ * from. The landing page reads `store.json` and the collection and experiment documents
+ * (`getIndex`); a page inside a collection opens that collection's QTL experiments as one study
+ * (`getStore`), with the GWAS the visitor chose, if any (lib/scope.ts). A GWAS may sit on another
+ * catalog than the study: its blocks carry their own positions and alleles, so the two are matched
+ * by `(position, ref, alt)` and only the store's one sequence collection has to agree. A gene or
+ * variant page reads per-chromosome objects of each experiment it shows (SPEC
  * sections 6 and 8): its genes, exon models and search index parts, and one gene lookup bucket to
  * find a gene's chromosome. Nothing on a first gene page reads a whole-genome table; the gene list
  * and the search box read the whole-genome genes table and the cis experiments' search indexes the
@@ -25,24 +26,19 @@ import { checkNames, decodeArrowObject, decodeGwasBins, decodeLookupDir, DIGEST,
   lookupDirLen, lookupKey, OBJECT_NAME, parseFileHeader, type GwasBin } from './store-decode'
 import type { SignificanceRule } from './significance'
 import { beforeFetch, FAULT, faultHits } from './faults'
+import { SCOPE } from './scope'
 
 /** The one data host. An empty `VITE_DATA_BASE` means "same origin" (`/data`), which is what the
  *  local dev server and preview serve. */
 export const DATA_BASE: string =
   (import.meta.env.VITE_DATA_BASE as string | undefined)?.replace(/\/$/, '') || `${window.location.origin}/data`
 
-/** The experiment whose collection is this app's study: every experiment sharing its `collection`
- *  value in `store.json` is opened with it. One member rather than a digest, because a collection
- *  document's name is the digest of its bytes and changes when its title or citation is edited. */
-export const COLLECTION_OF: string = (import.meta.env.VITE_COLLECTION_OF as string | undefined) || 'topchef_ge_cis'
-
-/** The GWAS experiment shown beside the study, or '' for none. A different publication, so it is
- *  named rather than derived. */
-export const GWAS_ID: string = (import.meta.env.VITE_GWAS as string | undefined) ?? 'dcm_jurgens2024_biobanks'
-
-/** The phenotype types the gene page's two tabs read (TOPCHeF's `ge` and `leafcutter`). */
+/** The phenotype types the gene page's two tabs read (`ge` and `leafcutter`). */
 export const EQTL_TYPE = 'ge'
 export const SQTL_TYPE = 'leafcutter'
+
+/** A phenotype type's short label: eQTL, sQTL, or the type itself. */
+export const phenotypeLabel = (t: string): string => (t === EQTL_TYPE ? 'eQTL' : t === SQTL_TYPE ? 'sQTL' : t)
 
 // ---- pointer documents ------------------------------------------------------------------------
 
@@ -117,6 +113,14 @@ interface ExperimentBase {
   allele_orientation_source: string | null
   precision: Precision | null
   source?: Record<string, unknown>
+  /** optional labels (SPEC section 8); an absent key is "not stated" */
+  facets?: Facets
+}
+
+/** An experiment's optional facets: plain labels, `n_samples` a count. */
+export interface Facets {
+  organ?: string; tissue?: string; cell_type?: string; ancestry?: string; n_samples?: number
+  assay?: string; sex?: string; condition?: string; trait?: string
 }
 
 /** A cis QTL scan: blocks per chromosome, leads and credible sets in `hits`, a search index with
@@ -194,7 +198,21 @@ export interface Store {
 
 // the fault hooks (lib/faults.ts) sit behind `import.meta.env.DEV` literally, so a production
 // build folds them and the module away
-async function pointer<T>(path: string): Promise<T> {
+/** Every pointer fetched this page load, by path: the index and the study read the same experiment
+ *  documents, and a page load fetches each once. A failure is forgotten so a retry refetches. */
+const pointers = new Map<string, Promise<unknown>>()
+function pointer<T>(path: string): Promise<T> {
+  let p = pointers.get(path) as Promise<T> | undefined
+  if (!p) {
+    const q = fetchPointer<T>(path)
+    pointers.set(path, q)
+    q.catch(() => { if (pointers.get(path) === q) pointers.delete(path) })
+    p = q
+  }
+  return p
+}
+
+async function fetchPointer<T>(path: string): Promise<T> {
   if (import.meta.env.DEV) {
     await beforeFetch()
     if (FAULT === 'store-404' && path === 'store.json') throw new Error(`${path}: HTTP 404`)
@@ -210,9 +228,12 @@ function faultPointer<T>(path: string, doc: T): T {
   const d = doc as Record<string, unknown>
   if (path === 'store.json') {
     if (FAULT === 'store-version') return { ...d, format_version: 1 } as T
-    if (FAULT === 'store-anchor') { const e = { ...(d.experiments as Record<string, unknown>) }; delete e[COLLECTION_OF]; return { ...d, experiments: e } as T }
+    if (FAULT === 'store-anchor') {
+      const e = Object.fromEntries(Object.entries(d.experiments as StoreDoc['experiments']).filter(([, x]) => x.collection !== SCOPE?.collection))
+      return { ...d, experiments: e } as T
+    }
   }
-  if (FAULT === 'store-names' && path === `experiments/${COLLECTION_OF}.json`)
+  if (FAULT === 'store-names' && path.startsWith('experiments/') && (d as { kind?: string }).kind === 'qtl_cis')
     return { ...d, files: { ...(d.files as Record<string, string>), chr1: 'hand-edited.qbe' } } as T
   return doc
 }
@@ -291,10 +312,10 @@ export async function fetchDecoded<T>(mark: string, detail: Record<string, unkno
 // ---- the store --------------------------------------------------------------------------------
 
 /** The ids a previous open found: the study's experiments, the GWAS, and their catalog and
- *  annotation. Kept per data host and anchor so a dev build pointed at another store cannot
- *  inherit ids from this one. */
+ *  annotation. Kept per data host, collection and GWAS so a dev build pointed at another store
+ *  cannot inherit ids from this one. */
 interface Remembered { experiments: string[]; gwas: string | null; catalog: string; annotation: string }
-const REMEMBER_KEY = `qtlstore:${DATA_BASE}:${COLLECTION_OF}:${GWAS_ID}`
+const REMEMBER_KEY = `qtlstore:${DATA_BASE}:${SCOPE?.collection ?? ''}:${SCOPE?.experiment ?? ''}:${SCOPE?.gwas ?? ''}`
 
 function remembered(): Remembered | null {
   try {
@@ -322,6 +343,69 @@ function speculative<T>(guessed: string[], path: (id: string) => string) {
   }
 }
 
+/** `store.json`, checked for the version and the experiments map: one fetch per page load, shared
+ *  by the landing page's index and a collection's study. */
+export const storeDoc = memo(async (): Promise<StoreDoc> => {
+  const store = await pointer<StoreDoc>('store.json')
+  if (store.format_version !== FORMAT_VERSION)
+    throw new Error(`store.json: format version ${store.format_version}, and this build reads version ${FORMAT_VERSION}. The data was updated; reload the page.`)
+  if (!store.experiments || typeof store.experiments !== 'object' || Array.isArray(store.experiments))
+    throw new Error('store.json: experiments is not a map of id to {kind, collection}')
+  return store
+})
+
+/** One collection as the landing and collection pages list it. */
+export interface IndexCollection {
+  /** the object name, `<digest>.json` */
+  name: string
+  digest: string
+  doc: CollectionDoc
+  /** the experiments naming it, by id */
+  experiments: ExperimentDoc[]
+  /** the collections whose `parent` it is, by object name */
+  children: string[]
+}
+
+/** Everything the landing and collection pages print: every collection with its experiments, the
+ *  parents their chains reach, every GWAS in the store, and the coloc lists' pointers. */
+export interface StoreIndex {
+  store: StoreDoc
+  collections: Map<string, IndexCollection>
+  /** collections with no parent, by title */
+  roots: IndexCollection[]
+  gwas: GwasExperiment[]
+  colocs: ColocDoc[]
+}
+
+/** The store's index: `store.json`, then every experiment pointer, collection document (with
+ *  parents, followed to the root, 16 deep at most) and coloc pointer, each one small fetch. */
+export const getIndex = memo(async (): Promise<StoreIndex> => {
+  const store = await storeDoc()
+  const ids = Object.keys(store.experiments).sort()
+  const [exps, colocs] = await Promise.all([
+    Promise.all(ids.map(id => pointer<ExperimentDoc>(`experiments/${id}.json`))),
+    Promise.all((store.colocs ?? []).map(id => pointer<ColocDoc>(`colocs/${id}.json`))),
+  ])
+  const docs = new Map<string, CollectionDoc>()
+  let want = [...new Set(exps.map(e => e.collection).filter(Boolean))]
+  for (let depth = 0; want.length && depth <= 16; depth++) {
+    const got = await Promise.all(want.map(n => fetchJsonObject<CollectionDoc>(n)))
+    want.forEach((n, i) => {
+      if (!got[i]?.title) throw new Error(`collection ${n} has no title`)
+      docs.set(n, got[i]!)
+    })
+    want = [...new Set(got.map(d => d.parent).filter((p): p is string => !!p && !docs.has(p)))]
+  }
+  const collections = new Map<string, IndexCollection>()
+  for (const [name, doc] of docs)
+    collections.set(name, { name, digest: name.replace(/\.json$/, ''), doc, experiments: exps.filter(e => e.collection === name), children: [] })
+  for (const c of collections.values()) if (c.doc.parent) collections.get(c.doc.parent)?.children.push(c.name)
+  const roots = [...collections.values()].filter(c => !c.doc.parent || !collections.has(c.doc.parent))
+    .sort((a, b) => a.doc.title.localeCompare(b.doc.title))
+  const gwas = exps.filter((e): e is GwasExperiment => e.kind === 'gwas')
+  return { store, collections, roots, gwas, colocs }
+})
+
 async function openStore(): Promise<Store> {
   // One wave where it can be. store.json is the only document whose name is known in advance;
   // the study's experiment ids, their catalog and annotation live in it and in the experiment
@@ -329,26 +413,22 @@ async function openStore(): Promise<Store> {
   // fetched in the same wave as store.json -- the normal case, since they change only when the
   // store is rebuilt -- and a wrong guess costs only the discarded requests. Pointer documents are
   // served `no-cache` with no validator, so each round trip is a full origin fetch.
+  if (!SCOPE?.experiment) throw new Error('no experiment is open on this page')
   const guess = remembered()
   const expOf = speculative<ExperimentDoc>(guess ? [...guess.experiments, ...(guess.gwas ? [guess.gwas] : [])] : [], id => `experiments/${id}.json`)
   const catOf = speculative<CatalogDoc>(guess ? [guess.catalog] : [], id => `${CATALOG_DIR}/${id}.json`)
   const annOf = speculative<AnnotationDoc>(guess ? [guess.annotation] : [], id => `annotations/${id}.json`)
-  const store = await pointer<StoreDoc>('store.json')
-  if (store.format_version !== FORMAT_VERSION)
-    throw new Error(`store.json: format version ${store.format_version}, and this build reads version ${FORMAT_VERSION}. The data was updated; reload the page.`)
-  if (!store.experiments || typeof store.experiments !== 'object' || Array.isArray(store.experiments))
-    throw new Error('store.json: experiments is not a map of id to {kind, collection}')
-  const anchor = store.experiments[COLLECTION_OF]
-  if (!anchor) throw new Error(`store.json lists no experiment "${COLLECTION_OF}"`)
-  if (!anchor.collection) throw new Error(`experiment ${COLLECTION_OF} names no collection, so there is no study to open`)
-  const collectionName = anchor.collection
-  const ids = Object.entries(store.experiments).filter(([, e]) => e.collection === collectionName).map(([id]) => id).sort()
-  for (const id of ids) {
-    const k = store.experiments[id].kind
-    if (k !== 'qtl_cis' && k !== 'qtl_trans') throw new Error(`experiment ${id} shares ${COLLECTION_OF}'s collection but is a ${k}; this app shows a QTL study`)
-  }
-  const gwasId = GWAS_ID && store.experiments[GWAS_ID] ? GWAS_ID : null
-  if (GWAS_ID && !gwasId) console.warn(`store.json lists no GWAS experiment "${GWAS_ID}"; the GWAS panels will say so`)
+  const store = await storeDoc()
+  const collectionName = SCOPE.collection
+  // the study is the one experiment the URL names (lib/scope.ts)
+  const ids = [SCOPE.experiment]
+  const listed = store.experiments[SCOPE.experiment]
+  if (!listed || listed.collection !== collectionName)
+    throw new Error(`no experiment "${SCOPE.experiment}" in collection ${SCOPE.digest}`)
+  if (listed.kind !== 'qtl_cis' && listed.kind !== 'qtl_trans')
+    throw new Error(`experiment ${SCOPE.experiment} is a ${listed.kind}; gene, variant and region pages show QTL experiments`)
+  const gwasId = SCOPE.gwas
+  if (gwasId && !store.experiments[gwasId]) throw new Error(`store.json lists no experiment "${gwasId}"`)
   if (gwasId && store.experiments[gwasId].kind !== 'gwas') throw new Error(`experiment ${gwasId} is a ${store.experiments[gwasId].kind}, not a GWAS`)
 
   const [docs, gwasDoc, collection] = await Promise.all([
@@ -365,13 +445,14 @@ async function openStore(): Promise<Store> {
     qtl.push(d as QtlExperiment)
   })
   const catalogId = qtl[0]?.catalog, annotationId = qtl[0]?.annotation
-  if (!catalogId || !annotationId) throw new Error(`the collection of ${COLLECTION_OF} holds no QTL experiment`)
+  if (!catalogId || !annotationId) throw new Error(`collection ${SCOPE.digest} holds no QTL experiment`)
   for (const d of qtl) if (d.catalog !== catalogId || d.annotation !== annotationId)
-    throw new Error(`experiment ${d.id} is on catalog ${d.catalog} and annotation ${d.annotation}; this app shows one study on one catalog (${catalogId}, ${annotationId})`)
+    throw new Error(`experiment ${d.id} is on catalog ${d.catalog} and annotation ${d.annotation}; a study page shows one catalog and one annotation (${catalogId}, ${annotationId})`)
+  // the GWAS may be on another catalog: it is matched by position and alleles (lib/gene.ts), and
+  // its index header is checked against the store's sequence collection
   let gwas: GwasExperiment | null = null
   if (gwasDoc) {
     if (gwasDoc.id !== gwasId || gwasDoc.kind !== 'gwas') throw new Error(`experiments/${gwasId}.json: id "${gwasDoc.id}" or kind ${gwasDoc.kind}`)
-    if (gwasDoc.catalog !== catalogId) throw new Error(`GWAS ${gwasId} is on catalog ${gwasDoc.catalog}, the study on ${catalogId}`)
     checkNames(gwasDoc, `experiments/${gwasId}.json`)
     gwas = gwasDoc
   }
@@ -385,10 +466,12 @@ async function openStore(): Promise<Store> {
   // name rather than trusting the path they were fetched from
   if (catalog.id !== catalogId) throw new Error(`catalog ${catalogId} answered with id "${catalog.id}"`)
   if (annotation.id !== annotationId) throw new Error(`annotation ${annotationId} answered with id "${annotation.id}"`)
-  for (const d of [...qtl, ...(gwas ? [gwas] : [])]) if (d.catalog_identity !== catalog.identity_digest)
+  for (const d of qtl) if (d.catalog_identity !== catalog.identity_digest)
     throw new Error(`experiment ${d.id}: catalog_identity ${d.catalog_identity} is not catalog ${catalog.id}'s ${catalog.identity_digest}`)
   if (catalog.orientation !== 'ref_alt') throw new Error(`catalog ${catalog.id}: orientation "${catalog.orientation}", this reader reads ref_alt`)
   if (!DIGEST.test(catalog.collection_digest)) throw new Error(`catalog ${catalog.id}: collection digest ${catalog.collection_digest}`)
+  if (catalog.collection_digest !== store.collection_digest)
+    throw new Error(`catalog ${catalog.id} is on sequence collection ${catalog.collection_digest}, the store on ${store.collection_digest}`)
   if (!annotation.chroms || !annotation.lookup) throw new Error(`annotation ${annotation.id} has no per-chromosome objects; rebuild the store with the current pipeline`)
   checkNames(catalog, `${CATALOG_DIR}/${catalog.id}.json`)
   checkNames(annotation, `annotations/${annotation.id}.json`)
@@ -530,14 +613,13 @@ export async function lookupGenes(id: string): Promise<LookupRow[]> {
   return (await lookupBucketRows(String(lookupBucket(key, d.nBuckets)))).filter(r => r.key === key)
 }
 
-/** The GWAS bin summary as rows (one whole-object read, for the landing track), or null when the
- *  GWAS has none. */
-export const gwasBins = memo(async (): Promise<GwasBin[] | null> => {
-  const s = await getStore()
-  const b = s.gwas?.bins
+/** A GWAS's bin summary as rows (one whole-object read, for a genome track), or null when the GWAS
+ *  has none. Needs no study open: a GWAS collection's own page reads it too. */
+export async function gwasBinsOf(g: GwasExperiment): Promise<GwasBin[] | null> {
+  const b = g.bins
   if (!b) return null
   return decodeGwasBins(await fetchObject(b.file), b, b.file)
-})
+}
 
 /** A coloc list (SPEC section 20): which phenotypes of one QTL experiment someone found to
  *  colocalize with one GWAS experiment, and who said so. Membership only; PP.H4 and the lead are
@@ -672,7 +754,7 @@ export const getStoreInfo = memo(async (): Promise<StoreInfo> => {
   const study = citationOf(s.collection), gwasStudy = s.gwasCollection ? citationOf(s.gwasCollection) : null
   const sources: StoreInfo['sources'] = {
     gencode: { version: version ?? s.annotation.id, description: `gene annotation (${s.annotation.id})` },
-    reference: { version: s.catalog.collection_digest, description: 'GRCh38 reference sequence collection (seqcol)' },
+    reference: { version: s.catalog.collection_digest, description: 'reference sequence collection (seqcol)' },
     catalog: { version: s.catalog.identity_digest, description: `variant catalog ${s.catalog.id}, ${s.catalog.n_sites.toLocaleString('en-US')} sites` },
     study: { version: study.doi ?? s.collectionName, description: `${study.title}; experiments ${[...s.experiments.keys()].join(', ')} (store ${s.store.name})` },
     ...(gwasStudy && s.gwas ? { gwas: { version: gwasStudy.doi ?? s.gwas.collection, description: `${gwasStudy.title}; experiment ${s.gwas.id}` } } : {}),

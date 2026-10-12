@@ -538,8 +538,11 @@ document, and experiments carrying the same name are in the same collection. Mem
 by matching, never declared, so there is no member list to keep in agreement, and the digest
 proves that the members share one copy of the citation.
 
+`title` is the collection's display name, short enough for a list or a breadcrumb ("TOPCHeF LV",
+"Jurgens 2024 DCM"); the citation and `source` carry the full description.
+
 ```json
-{"title": "Dilated cardiomyopathy GWAS, Jurgens et al. 2024 (biobanks-only meta-analysis)",
+{"title": "Jurgens 2024 DCM",
  "citation": {},
  "source": {"file": "Jurgens_DCM_GWAS_META_BiobanksOnly.tsv.gz", "config_key": "dcm_gwas",
             "n_cases": 5022, "n_controls": 932941, "rows_with_grch38_position_and_p_above_0": 12504079},
@@ -580,6 +583,7 @@ Every kind has `id`, `kind`, `collection`, `catalog`, `catalog_identity`, `allel
  "search_index": "<digest>.arrow.zst", "n_phenotypes": 19423,
  "search_index_parts": {"chr1": {"file": "<digest>.arrow.zst", "rows": 1959, "ords": [[0, 1958]]}},
  "counts": {"phenotypes": 19423, "with_rows": 19423, "significant": 10220, "significant_genes": 10220},
+ "facets": {"organ": "heart", "tissue": "left ventricle", "assay": "bulk RNA-seq", "sex": "both"},
  "unplaced": {"count": 0, "examples": []},
  "precision": {"theoretical_limit": {"neglog10p": 1.27e-03, "beta_over_se": 1.09e-03, "se_rel": 2.34e-05, "af": 7.63e-06},
                "measured_worst": {"neglog10p": 1.27e-03, "beta_over_se": 1.04e-03, "se_rel": 2.34e-05, "rows_compared": 123458053}}}
@@ -634,6 +638,12 @@ Every kind has `id`, `kind`, `collection`, `catalog`, `catalog_identity`, `allel
   the first is lying for the study. Every `significant` below means "the group's `column` passes
   the rule", and `sig_value` is the value that was tested, whichever column it came from. A trans
   scan carries no rule: the permutation pass is a cis quantity.
+- `facets`, on any kind, is optional: plain labels a reader describes and filters by, no ontology
+  ids. Its keys are `organ`, `tissue`, `cell_type`, `ancestry`, `n_samples`, `assay`, `sex`,
+  `condition` and `trait` (`qtlstore.FACET_KEYS`), each optional, and an absent key means "not
+  stated". `n_samples` is a positive integer and every other value a non-empty string; any other
+  key is refused. They sit on the experiment, not the collection, because one publication can span
+  tissues or ancestries. `trait` is a GWAS's; `assay` is a molecular phenotype's measurement.
 - `unplaced`, on a cis scan, counts its phenotypes that no nominal row, permuted group or credible
   set places on a chromosome.
 - `files` has one entry per chromosome built, including chromosomes with no blocks (a header-only
@@ -754,6 +764,8 @@ scan's index and a trans scan's carry different columns (`results.CIS_INDEX_SCHE
 | `var_start`, `n_var` | cis | uint32 | the run; null when `n_rows` is 0 |
 | `var_off`, `var_len` | cis | uint32 | variant catalog `.qbv` bytes of the pages covering the run; null likewise |
 | `w_lo`, `w_hi` | cis | int32 | positions of the run's first and last sites; null likewise |
+| `lead_nlp` | cis | float64 | the run's largest −log₁₀ nominal p **as the block decodes it** (+inf for a p of 0); null when no row of the run has a p |
+| `lead_pos` | cis | uint32 | the position of that row, the first such row in run order on a tie; null likewise |
 | `trans_off`, `trans_len` | trans | uint32 | the phenotype's frame in `file` (section 9; a gene's frames are adjacent) |
 | `n_trans` | trans | uint32 | trans rows in that frame |
 
@@ -1169,11 +1181,18 @@ empty failure list with non-empty notes is a partial pass.**
     chromosome's index rows with `rows` and `ords` describing it; a trans scan's
     `search_index_unplaced` equals its rows with no chromosome and is present exactly when there
     are any; a cis scan has no such rows (`results.check_split`).
+14. Every cis scan's index has `lead_nlp` and `lead_pos`, neither set on a row with no run, and on
+    every chromosome the row with the largest `lead_nlp` and four rows spread through the part
+    match their blocks decoded (`results.check_leads`: a sample, since the full check decodes every
+    block).
+15. Every experiment's `facets`, when present, has only `FACET_KEYS` with values of their types.
 
 `python -m pipeline.annotation add-split --store DIR --id ID` and `python -m pipeline.results
 add-split --store DIR --id ID` give a store built before 12 and 13 its derived objects, from the
 objects it already has, by the same code the builders run; the pointer is rewritten and no other
-object changes. `add-split` serves cis scans only.
+object changes. `add-split` serves cis scans only. `python -m pipeline.results add-leads --store
+DIR --id ID` does the same for 14: it reads the lead columns back out of the scan's own blocks and
+writes the index the builder would have written, byte for byte.
 
 Every header check also checks the kind: a variants file must be kind 1.
 
@@ -1202,6 +1221,12 @@ row with a null p, beta, se, af or n fails.
   an interrupted write. A collection document is an object an experiment names, so it is protected
   the same way. Files that are not object names are left alone.
 - `crosscat A B`: section 11's check.
+- `set-collection KEY`: writes the collection document config.yaml's `collections[KEY]` describes,
+  points the experiments derived from KEY at it (a GWAS whose id is KEY, or the QTL scans whose
+  `source.experiment_id` is KEY), and rewrites `store.json`. A changed title, citation or source is
+  a new digest, so links naming the old one stop resolving; the old document stays until `gc`.
+- `set-facets`: writes config.yaml's `facets` into the experiments it names, replacing their
+  `facets`; experiments it does not name keep theirs.
 
 Because objects are named by their bytes, adding or removing an experiment never changes another
 experiment's objects: building TOPCHeF alone, adding GTEx, removing GTEx and running `gc` leaves every

@@ -1,36 +1,24 @@
-/** Chromosome sizes from the seqcol API, cached per build in localStorage (as in pegasus-v2f-ui). */
+/** Chromosome sizes from the seqcol API, cached per collection in localStorage (as in pegasus-v2f-ui). */
 
 export type ChromSizes = { names: string[]; lengths: number[] }
 
 const SEQCOL_API = 'https://seqcolapi.databio.org'
-/** The seqcol collection the store's variant catalogs are anchored to (`collection_digest`), so the
- *  track's chromosome lengths and the data's positions cite one reference. `npm run store-check`
- *  fails when a store disagrees. The GRCh38 no-alt analysis set: 195 sequences, and identical to the
- *  455-sequence collection this used before on every standard chromosome. */
-const SEQCOL_DIGESTS: Record<string, string> = {
-  hg38: 'EiFob05aCWgVU_B_Ae0cypnQut3cxUP1',
-  GRCh38: 'EiFob05aCWgVU_B_Ae0cypnQut3cxUP1',
-}
-export const seqcolDigest = (genomeBuild = 'GRCh38'): string | undefined => SEQCOL_DIGESTS[genomeBuild]
 const STANDARD_CHROMS = [...Array.from({ length: 22 }, (_, i) => `chr${i + 1}`), 'chrX', 'chrY']
 
-/** The collection this reads, for citing on the About page: the names and lengths themselves, since
- *  the API's root path serves nothing. */
-export const seqcolCollectionUrl = (genomeBuild = 'GRCh38') =>
-  `${SEQCOL_API}/collection/${SEQCOL_DIGESTS[genomeBuild]}?level=2`
-const CACHE_KEY_PREFIX = 'topchef.chromSizes.'
+/** The collection's names and lengths at the seqcol API, for citing: the API's root path serves nothing. */
+export const seqcolCollectionUrl = (digest: string) => `${SEQCOL_API}/collection/${digest}?level=2`
+const CACHE_KEY_PREFIX = 'qtlb.chromSizes.'
 
-export async function fetchChromSizes(genomeBuild = 'GRCh38'): Promise<ChromSizes> {
-  const digest = SEQCOL_DIGESTS[genomeBuild]
-  if (!digest) throw new Error(`No seqcol digest known for genome build '${genomeBuild}'`)
-  // the digest is in the key: a build that cites another collection must not read lengths cached
-  // from the old one, which never expire
-  const cacheKey = `${CACHE_KEY_PREFIX}${genomeBuild}.${digest}`
+/** The standard chromosomes of the sequence collection `digest` names: the store's
+ *  `collection_digest`, so the track's lengths and the data's positions cite one reference. */
+export async function fetchChromSizes(digest: string): Promise<ChromSizes> {
+  // the digest is the key: lengths cached for one collection never answer for another
+  const cacheKey = `${CACHE_KEY_PREFIX}${digest}`
   const cached = localStorage.getItem(cacheKey)
   if (cached) {
     try { return JSON.parse(cached) as ChromSizes } catch { /* re-fetch */ }
   }
-  const resp = await fetch(`${SEQCOL_API}/collection/${digest}?level=2`)
+  const resp = await fetch(seqcolCollectionUrl(digest))
   if (!resp.ok) throw new Error(`seqcol fetch failed: ${resp.status}`)
   const data = (await resp.json()) as { names: string[]; lengths: number[] }
   const lookup = new Map<string, number>()

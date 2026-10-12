@@ -42,8 +42,9 @@ npm run bench -- --target preview --label v2 --runs 1 --self-check-page v2-PDXK-
   --pages v2-PDXK-eqtl,v2-MICAL3-sqtl,v2-GUSBP11-sqtl,v2-SMARCB1-trans,v2-variant-rs34599497,v2-variant-rs4819361-trans,v2-variant-rs34599497-scan
 ```
 
-`VITE_COLLECTION_OF` names the experiment whose collection the app opens (default `topchef_ge_cis`)
-and `VITE_GWAS` the GWAS experiment (default `dcm_jurgens2024_biobanks`). The smoke suites use
+The bench and smoke suites open TOPCHeF's collection with the DCM GWAS chosen
+(`/c/<digest>/gwas/dcm_jurgens2024_biobanks/...`, `src/lib/scope.ts`), the digest read from
+`store.json`; the gene suite also opens GTEx alone and against DCM. The smoke suites use
 chr21/chr22 genes (PDXK, MICAL3, GUSBP11, SMARCB1) and variants (rs34599497, rs4819361, rs457868);
 each suite reads the store's per-scan experiment documents to name the objects it counts requests
 against. The harness reads `store.json` where it read `manifest.json`, and counts objects by

@@ -33,6 +33,9 @@ export interface PhenotypeRow {
   sig_value: number | null
   blk_off: number | null; blk_len: number | null; var_start: number | null; n_var: number | null
   var_off: number | null; var_len: number | null; w_lo: number | null; w_hi: number | null
+  /** a cis run's strongest row: its decoded -log10 p (Infinity for a p of 0) and position; null
+   *  when no row has a p, or the index predates the columns */
+  lead_nlp: number | null; lead_pos: number | null
   trans_off: number | null; trans_len: number | null; n_trans: number | null
 }
 
@@ -41,21 +44,27 @@ export interface GeneRow { gene_id: string; version: number; name: string; bioty
 
 const SHARED_COLS = ['ord', 'phenotype_type', 'phenotype_id', 'gene_id', 'chr', 'significant', 'sig_value']
 const CIS_COLS = ['blk_off', 'blk_len', 'var_start', 'n_var', 'var_off', 'var_len', 'w_lo', 'w_hi']
+const LEAD_COLS = ['lead_nlp', 'lead_pos']
 const TRANS_COLS = ['trans_off', 'trans_len', 'n_trans']
 const GENE_COLS = ['gene_id', 'version', 'name', 'biotype', 'chr', 'tss', 'strand', 'start', 'end']
 
-/** Plain objects from an Arrow table's columns (nulls as null); columns the table lacks come out null. */
-function rowsOf<T>(t: Table | null, cols: string[], optional: string[] = [], extra: Record<string, unknown> = {}): T[] {
+/** Plain objects from an Arrow table's columns (nulls as null). `cols` must exist; `optional` come
+ *  out null; `ifPresent` are read when the table has them and null when it does not (columns a
+ *  store built before them lacks). */
+function rowsOf<T>(t: Table | null, cols: string[], optional: string[] = [], extra: Record<string, unknown> = {},
+  ifPresent: string[] = []): T[] {
   if (!t) return []
   const vecs = cols.map(c => {
     const v = t.getChild(c)
     if (!v) throw new Error(`table has no column ${c}`)
     return v
   })
+  const maybe = ifPresent.map(c => [c, t.getChild(c)] as const)
   const out: T[] = new Array(t.numRows)
   for (let i = 0; i < t.numRows; i++) {
     const o: Record<string, unknown> = { ...extra }
     for (let j = 0; j < cols.length; j++) o[cols[j]] = vecs[j].get(i) ?? null
+    for (const [c, v] of maybe) o[c] = v ? v.get(i) ?? null : null
     for (const c of optional) o[c] = null
     out[i] = o as T
   }
@@ -65,8 +74,8 @@ function rowsOf<T>(t: Table | null, cols: string[], optional: string[] = [], ext
 /** A QTL experiment's index rows: its own columns, the other scope's as null, tagged with its id. */
 function phenotypeRows(e: QtlExperiment, t: Table | null): PhenotypeRow[] {
   return e.kind === 'qtl_cis'
-    ? rowsOf<PhenotypeRow>(t, [...SHARED_COLS, ...CIS_COLS], TRANS_COLS, { experiment: e.id })
-    : rowsOf<PhenotypeRow>(t, [...SHARED_COLS, ...TRANS_COLS], CIS_COLS, { experiment: e.id })
+    ? rowsOf<PhenotypeRow>(t, [...SHARED_COLS, ...CIS_COLS], TRANS_COLS, { experiment: e.id }, LEAD_COLS)
+    : rowsOf<PhenotypeRow>(t, [...SHARED_COLS, ...TRANS_COLS], [...CIS_COLS, ...LEAD_COLS], { experiment: e.id })
 }
 
 function memoBy<T>(make: (key: string) => Promise<T>): (key: string) => Promise<T> {
@@ -175,6 +184,37 @@ export async function allHits(): Promise<SearchHit[]> {
   const s = await getStore()
   await readWhole()
   return (await Promise.all([...s.chroms.keys()].map(chromHits))).flat()
+}
+
+/** A study locus for the collection page: a phenotype's strongest cis row, with its gene. */
+export interface TopLocus {
+  gene_id: string | null; symbol: string | null; phenotype_type: string; phenotype_id: string
+  chr: string; lead_pos: number; lead_nlp: number
+}
+
+/** A study's strongest loci across its cis scans, by each phenotype's lead -log10 p (the index's
+ *  `lead_nlp`; `sig_value` cannot rank them, since a permutation p floors). One per gene, and none
+ *  within `spacing` bp of a stronger one on its chromosome, so one region does not fill the list.
+ *  Reads what the search box reads: the whole-genome genes table and each cis scan's whole index.
+ *  Empty when the indexes predate the lead columns. */
+export async function topLoci(n = 20, spacing = 1_000_000): Promise<TopLocus[]> {
+  const w = await readWhole()
+  const name = new Map<string, string>()
+  for (const gs of w.genes.values()) for (const g of gs) name.set(g.gene_id, g.name)
+  const rows = [...w.phen.values()].flat().filter(r => r.lead_nlp != null && r.lead_pos != null && r.chr != null)
+  // Infinity (a p of 0) sorts first; the comparison avoids Infinity - Infinity
+  rows.sort((a, b) => (b.lead_nlp! > a.lead_nlp! ? 1 : b.lead_nlp! < a.lead_nlp! ? -1 : 0))
+  const out: TopLocus[] = []
+  const genes = new Set<string>()
+  for (const r of rows) {
+    if (out.length >= n) break
+    if (r.gene_id && genes.has(r.gene_id)) continue
+    if (out.some(x => x.chr === r.chr && Math.abs(x.lead_pos - r.lead_pos!) < spacing)) continue
+    if (r.gene_id) genes.add(r.gene_id)
+    out.push({ gene_id: r.gene_id, symbol: r.gene_id ? name.get(r.gene_id) ?? null : null, phenotype_type: r.phenotype_type,
+      phenotype_id: r.phenotype_id, chr: r.chr!, lead_pos: r.lead_pos!, lead_nlp: r.lead_nlp! })
+  }
+  return out
 }
 
 /** The gene a URL names by Ensembl id or symbol (ASCII case ignored), preferring a gene with results,

@@ -1,6 +1,7 @@
 import { Page } from '@/components/page'
 import { PageHeader } from '@/components/page-header'
 import { FAULT, FAULT_ONLY, FAULTS, type Fault } from '@/lib/faults'
+import { SCOPE } from '@/lib/scope'
 
 /**
  * `/dev/faults`, dev builds only: one link per error surface, each a full page load with
@@ -65,7 +66,9 @@ const NOT_FOUND: { path: string; surface: string }[] = [
   { path: '/genes?x', surface: 'the gene list; type "zzzz" in the search box for "no genes match"' },
 ]
 
-const href = (t: Trigger) => t.fault === 'none' ? t.path : `${t.path}${t.path.includes('?') ? '&' : '?'}fault=${t.fault}${t.only ? `&only=${t.only}` : ''}`
+// open it inside a collection (/c/<digest>/dev/faults): the paths are that collection's pages
+const at = (path: string) => `${SCOPE?.base ?? ''}${path}`
+const href = (t: Trigger) => t.fault === 'none' ? at(t.path) : `${at(t.path)}${t.path.includes('?') ? '&' : '?'}fault=${t.fault}${t.only ? `&only=${t.only}` : ''}`
 
 export default function DevFaults() {
   return (
@@ -104,7 +107,7 @@ export default function DevFaults() {
               <thead><tr><th>Page</th><th>What it shows</th></tr></thead>
               <tbody>
                 {NOT_FOUND.map(n => (
-                  <tr key={n.path}><td className="whitespace-nowrap"><a className="link" href={n.path} target="_blank" rel="noreferrer">{n.path}</a></td><td>{n.surface}</td></tr>
+                  <tr key={n.path}><td className="whitespace-nowrap"><a className="link" href={at(n.path)} target="_blank" rel="noreferrer">{n.path}</a></td><td>{n.surface}</td></tr>
                 ))}
               </tbody>
             </table>

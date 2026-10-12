@@ -1,9 +1,11 @@
 // Smoke check of the gene page on a version 2 store, against the local preview serving the
 // genome-wide local store (bench/README.md, "Local store"). PDXK's panels and cis table, request
-// counts per tab and intron, the "show all tested introns" toggle, an sQTL-only gene, an untested
-// gene, the sQTL CSV, the trans tables and the QTL-versus-GWAS panel, the Home colocalization track,
-// the About counts, and dead code. The numbers are the genome-wide TOPCHeF store's (scripts/
-// store_reference.py's docstring says how to recompute them).
+// counts per experiment and intron, the "show all tested introns" toggle, an sQTL-only gene, an
+// untested gene, the sQTL CSV, the trans tables and the QTL-versus-GWAS panel, the collection page
+// and its experiment pages, the landing page and About, GTEx against the DCM GWAS, and dead code.
+// Each page opens inside one experiment (src/lib/scope.ts), so sQTL and trans checks go to those
+// experiments. The numbers are the genome-wide TOPCHeF store's (scripts/store_reference.py's
+// docstring says how to recompute them).
 //   node bench/smoke_gene_page.mjs
 import { chromium } from '../node_modules/playwright/index.mjs'
 import { readFileSync } from 'node:fs'
@@ -22,9 +24,15 @@ let dataTotal = 0
 
 // the object each per-gene request reads, by name from the store's pointers: one document per scan
 const store = await (await fetch(`${BASE}/data/store.json`)).json()
-// the study the app opens (its default VITE_COLLECTION_OF and VITE_GWAS), not every cohort in the store
+// TOPCHeF's collection and the DCM GWAS, not every cohort in the store
 const studyIds = Object.keys(store.experiments).filter(id =>
   store.experiments[id].collection === store.experiments.topchef_ge_cis.collection || id === 'dcm_jurgens2024_biobanks')
+// pages open inside one experiment, a cis scan with the DCM GWAS chosen (src/lib/scope.ts)
+const coll = id => store.experiments[id].collection.replace(/\.json$/, '')
+const at = (id, gwas = 'dcm_jurgens2024_biobanks') => `/c/${coll(id)}/e/${id}${gwas ? `/gwas/${gwas}` : ''}`
+const PREFIX = at('topchef_ge_cis')
+const SQTL = at('topchef_leafcutter_cis'), TRANS_E = at('topchef_ge_trans', null), TRANS_S = at('topchef_leafcutter_trans', null)
+const GTEX = at('gtex_v8_heart_lv_ge_cis', null)
 const docs = Object.fromEntries(await Promise.all(studyIds.map(async id => [id, await (await fetch(`${BASE}/data/experiments/${id}.json`)).json()])))
 const cisOf = type => Object.values(docs).find(d => d.kind === 'qtl_cis' && d.phenotype_type === type)
 const res = { ge: cisOf('ge').files, leafcutter: cisOf('leafcutter').files }
@@ -66,7 +74,7 @@ async function open(path, { ready = true } = {}) {
   const done = r => { if (net.delete(r)) { inflight--; last = Date.now() } }
   ctx.on('requestfinished', done)
   ctx.on('requestfailed', done)
-  await page.goto(BASE + path)
+  await page.goto(BASE + (path.startsWith('/c/') || path === '/' || path === '/about' ? path : PREFIX + path))
   if (ready) await page.waitForSelector(READY, { timeout: 60_000 })
   const idle = async (quiet = 2000) => {
     const t0 = Date.now()
@@ -137,8 +145,6 @@ async function downloadCsv(page) {
   const csv = await downloadCsv(page)
   check(csv.length === 5828 && csv[0] === CIS_COLS.join(','), `PDXK: CSV export has ${csv.length - 1} rows, header ${csv[0]}`)
   check(await page.getByText(ROUNDING).first().isVisible(), 'PDXK: rounding note by the CSV button')
-  // PDXK's eQTL phenotype has 115 trans rows and its 4 introns 404 (search index n_trans)
-  check(await page.locator('[data-trans-total="115"]').count() === 1, 'PDXK: the eQTL trans table has its 115 rows')
   const toggle = page.locator('label:has-text("Gene track") input[type=checkbox]')
   const before = await page.locator('svg').count()
   await toggle.click()
@@ -147,26 +153,36 @@ async function downloadCsv(page) {
   check(await toggle.isChecked() && after > before, `PDXK: gene track toggle adds the track (${before} -> ${after} svg elements)`)
   await toggle.click()
   await idle()
-  // one range per ranged object and no header reads (the pointer says what each object is); both
-  // trans objects are read when the gene opens, one range each
+  // one range per ranged object and no header reads (the pointer says what each object is); the
+  // eQTL experiment holds no trans scan and no sQTL scan, so neither is read
   const k = Object.fromEntries(['ge', 'variants', 'leafcutter', 'gwas', 'trans'].map(x => [x, count(reqs, x)]))
-  check(k.ge === 1 && k.variants === 1 && k.leafcutter === 0 && k.gwas === 1 && k.trans === 2,
-    `PDXK: requests eQTL results ${k.ge} (block), variants ${k.variants} (range), GWAS ${k.gwas} (window), trans ${k.trans} (one range per trans object), sQTL results ${k.leafcutter}`)
-  const n0 = reqs.length
-  const d = await drawnCount(page)
-  await page.getByText(/^sQTL/).first().click()
-  await waitDrawn(page, d); await idle()
-  const sqtlText = await page.locator('text=/tested introns/').first().innerText()
-  check(/tested introns/.test(sqtlText) && count(reqs, 'leafcutter', n0) === 1 && reqs.length - n0 === 1,
-    `PDXK: sQTL tab adds ${reqs.length - n0} request (the introns span): "${sqtlText.slice(0, 70)}"`)
-  check(await page.locator('[data-trans-total="404"]').count() === 1, 'PDXK: the sQTL trans table has its 404 rows from the frames read when the gene opened')
+  check(k.ge === 1 && k.variants === 1 && k.leafcutter === 0 && k.gwas === 1 && k.trans === 0,
+    `PDXK: requests eQTL results ${k.ge} (block), variants ${k.variants} (range), GWAS ${k.gwas} (window), trans ${k.trans}, sQTL results ${k.leafcutter}`)
+  check(await page.getByText(/^sQTL/).count() === 0, 'PDXK: one cis scan, so no eQTL/sQTL tab switch')
   check(errors.length === 0, `PDXK: no console errors${errors.length ? ` (${errors.slice(0, 3).join(' | ')})` : ''}`)
   await ctx.close()
 }
 
-// ---- MICAL3 (chr22): requests per intron choice and tab switch, show all, sQTL CSV ----
+// ---- PDXK in the sQTL experiment, and in each trans experiment ----
 {
-  const { ctx, page, errors, reqs, idle } = await open('/gene/MICAL3?tab=sqtl')
+  const { ctx, page, errors, reqs, idle } = await open(`${SQTL}/gene/PDXK`)
+  await idle()
+  const sqtlText = await page.locator('text=/tested introns/').first().innerText()
+  check(/tested introns/.test(sqtlText) && count(reqs, 'leafcutter') === 1 && count(reqs, 'ge') === 0,
+    `PDXK (sQTL experiment): the introns span is the one sQTL read, no eQTL read: "${sqtlText.slice(0, 70)}"`)
+  // PDXK's eQTL phenotype has 115 trans rows and its 4 introns 404 (search index n_trans)
+  for (const [where, n, what] of [[TRANS_E, 115, 'eQTL'], [TRANS_S, 404, 'sQTL']]) {
+    await page.goto(`${BASE}${where}/gene/PDXK`)
+    const ok = await page.locator(`[data-trans-total="${n}"]`).waitFor({ timeout: 60_000 }).then(() => true, () => false)
+    check(ok, `PDXK (${what} trans experiment): the trans table has its ${n} rows`)
+  }
+  check(errors.length === 0, `PDXK sQTL/trans: no console errors${errors.length ? ` (${errors.slice(0, 3).join(' | ')})` : ''}`)
+  await ctx.close()
+}
+
+// ---- MICAL3 (chr22): requests per intron choice, show all, sQTL CSV ----
+{
+  const { ctx, page, errors, reqs, idle } = await open(`${SQTL}/gene/MICAL3`)
   await idle()
   const label = (await page.locator('label:has-text("Show all")').first().innerText()).trim()
   const N = Number(/Show all ([\d,]+) tested/.exec(label)[1].replace(/,/g, ''))
@@ -189,52 +205,45 @@ async function downloadCsv(page) {
   await cisTable(page).locator('tbody tr').first().waitFor({ timeout: 30_000 })
   const csv = await downloadCsv(page)
   check(csv[0] === ['phenotype_id', ...CIS_COLS].join(',') && csv.length - 1 === nVariants(header), `MICAL3: sQTL CSV has ${csv.length - 1} rows, header ${csv[0]}`)
-  d = await drawnCount(page)
-  const n2 = reqs.length
-  await page.getByText(/^eQTL$/).first().click()
-  await waitDrawn(page, d); await idle()
-  check(reqs.length === n2 && count(reqs, 'ge') === 1, `MICAL3: sQTL -> eQTL tab sends ${reqs.length - n2} requests (the eQTL block left when the gene opened)`)
-  d = await drawnCount(page)
-  const n3 = reqs.length
-  await page.getByText(/^sQTL/).first().click()
-  await waitDrawn(page, d); await idle()
-  check(reqs.length === n3, `MICAL3: back to the sQTL tab sends ${reqs.length - n3}`)
-  check(await page.locator('[data-trans-total="5436"]').count() === 1, 'MICAL3: sQTL trans table has 5,436 rows (search index n_trans over its 33 introns)')
+  check(count(reqs, 'ge') === 0, `MICAL3: the sQTL experiment reads no eQTL block (${count(reqs, 'ge')})`)
+  await page.goto(`${BASE}${TRANS_S}/gene/MICAL3`)
+  const t = await page.locator('[data-trans-total="5436"]').waitFor({ timeout: 60_000 }).then(() => true, () => false)
+  check(t, 'MICAL3 (sQTL trans experiment): 5,436 rows (search index n_trans over its 33 introns)')
   check(errors.length === 0, `MICAL3: no console errors${errors.length ? ` (${errors.slice(0, 3).join(' | ')})` : ''}`)
   await ctx.close()
 }
 
-// ---- SMARCB1: trans rows on both tabs, and the GWAS panel with shared variants ----
+// ---- SMARCB1: the GWAS panel with shared variants, and its trans rows in each trans experiment ----
 {
-  const { ctx, page, errors, reqs, idle } = await open('/gene/SMARCB1')
-  await page.waitForSelector('[data-trans-total="895"]', { timeout: 60_000 })
+  const { ctx, page, errors, idle } = await open('/gene/SMARCB1')
   await idle()
   const dots = await page.locator('.plot-host svg').nth(1).locator('g[aria-label="dot"] > *').count()
   check(dots > 0, `SMARCB1: the QTL-versus-GWAS panel draws ${dots} shared variants`)
+  await page.goto(`${BASE}${TRANS_E}/gene/SMARCB1`)
+  await page.waitForSelector('[data-trans-total="895"]', { timeout: 60_000 })
   const [dl] = await Promise.all([page.waitForEvent('download', { timeout: 30_000 }), page.locator('[data-trans-total] button:has-text("CSV")').first().click()])
   const csv = readFileSync(await dl.path(), 'utf8').trim().split('\n')
-  check(csv.length === 896, `SMARCB1: trans eQTL CSV has ${csv.length - 1} rows, header ${csv[0]}`)
-  const n0 = reqs.length
-  const d = await drawnCount(page)
-  await page.getByText(/^sQTL/).first().click()
-  await waitDrawn(page, d); await idle()
-  check(await page.locator('[data-trans-total="933"]').count() === 1 && count(reqs, 'trans', n0) === 0,
-    `SMARCB1: sQTL trans table has 933 rows with no new trans request`)
+  check(csv.length === 896, `SMARCB1 (eQTL trans experiment): trans CSV has ${csv.length - 1} rows, header ${csv[0]}`)
+  await page.goto(`${BASE}${TRANS_S}/gene/SMARCB1`)
+  const s933 = await page.locator('[data-trans-total="933"]').waitFor({ timeout: 60_000 }).then(() => true, () => false)
+  check(s933, 'SMARCB1 (sQTL trans experiment): 933 rows')
   check(errors.length === 0, `SMARCB1: no console errors${errors.length ? ` (${errors.slice(0, 3).join(' | ')})` : ''}`)
   await ctx.close()
 }
 
-// ---- GUSBP11: sQTL only, opens on its first significant intron ----
+// ---- GUSBP11: sQTL only; opens on its first significant intron, and is untested in the eQTL scan ----
 {
-  const { ctx, page, errors, reqs, idle } = await open('/gene/GUSBP11')
+  const { ctx, page, errors, reqs, idle } = await open(`${SQTL}/gene/GUSBP11`)
   await idle()
   const rows = await intronRows(page)
   const sel = rows.findIndex(r => r.selected)
   const header = await locusHeader(page)
-  const chip = await page.getByText('no eQTL test').count()
-  check(sel === 0 && nVariants(header) > 0 && chip === 1, `GUSBP11: opens on its sQTL tab with the first significant intron selected (${rows.length} listed), "no eQTL test" chip: "${header}"`)
+  check(sel === 0 && nVariants(header) > 0, `GUSBP11: opens with the first significant intron selected (${rows.length} listed): "${header}"`)
   check(count(reqs, 'ge') === 0 && count(reqs, 'leafcutter') === 1 && count(reqs, 'variants') === 1,
     `GUSBP11: requests eQTL ${count(reqs, 'ge')}, sQTL ${count(reqs, 'leafcutter')}, variants ${count(reqs, 'variants')}`)
+  await page.goto(`${BASE}${PREFIX}/gene/GUSBP11`)
+  const untested = await page.getByText(/was not tested for QTL/).first().waitFor({ timeout: 30_000 }).then(() => true, () => false)
+  check(untested, 'GUSBP11 (eQTL experiment): not tested in this experiment')
   check(errors.length === 0, `GUSBP11: no console errors${errors.length ? ` (${errors.slice(0, 3).join(' | ')})` : ''}`)
   await ctx.close()
 }
@@ -250,30 +259,52 @@ async function downloadCsv(page) {
   await ctx.close()
 }
 
-// ---- Home, genes list, region, About ----
+// ---- landing, collection page, experiment page, genes list, region, About ----
 {
   const { ctx, page, errors, idle } = await open('/', { ready: false })
-  const sentence = page.locator('[data-sentence]', { hasText: /eGenes and [\d,]+ significant sQTL introns/ }).first()
-  await sentence.waitFor({ state: 'attached', timeout: 30_000 })
+  await page.locator('a[href^="/c/"]').first().waitFor({ timeout: 30_000 })
+  check((await page.locator('a[href^="/c/"]').count()) === 3, 'Landing: one row per collection, studies and GWAS (TOPCHeF, GTEx, DCM)')
+  await page.goto(`${BASE}/c/${coll('topchef_ge_cis')}`)
+  await page.getByText('topchef_ge_cis', { exact: true }).waitFor({ timeout: 30_000 })
   await idle()
-  const line = await sentence.textContent()
-  check(/^10,220 eGenes and 13,540 significant sQTL introns across 19,423 tested genes/.test(line), `Home: counts from the cis experiments: "${line.slice(0, 80)}"`)
-  const loci = await page.getByText(/PP\.H4 ≥ 0\.8, 22 loci/).count()
-  check(loci === 1, 'Home: the colocalization track places all 22 coloc genes (21 eQTL, 4 sQTL, 3 shared)')
-  await page.goto(`${BASE}/genes`)
+  const rows = await page.locator('table:has(th:has-text("Significance")) tbody tr').count()
+  const links = await page.locator('table:has(th:has-text("Significance")) tbody a[href*="/e/"]').count()
+  check(rows === 4 && links === 4, `Collection: the TOPCHeF experiments table lists its 4 scans, each a link (${rows}, ${links})`)
+  await page.goto(`${BASE}${PREFIX}`)
+  const top = await page.locator('section:has(h2:has-text("Top loci")) [data-genome-track]').first()
+    .waitFor({ timeout: 30_000 }).then(() => true, () => false)
+  check(top, 'Experiment: the Top loci genome track renders from the index\'s lead columns')
+  await page.goto(`${BASE}${PREFIX}/genes`)
   await page.locator('table tbody tr').first().waitFor({ timeout: 30_000 })
   const meta = await page.locator('h1 + *').first().innerText().catch(() => '')
   check((await page.locator('table tbody tr').count()) > 0, `Genes: the eGene list renders (${meta.trim()})`)
-  await page.goto(`${BASE}/region/chr21:43000000-44000000`)
+  await page.goto(`${BASE}${PREFIX}/region/chr21:43000000-44000000`)
   const pdxk = await page.getByText('PDXK', { exact: true }).first().waitFor({ timeout: 30_000 }).then(() => true, () => false)
   check(pdxk, 'Region chr21:43-44 Mb lists PDXK')
   await page.goto(`${BASE}/about`)
-  await page.getByText('Genes tested').first().waitFor({ timeout: 30_000 })
+  await page.getByText('This store').first().waitFor({ timeout: 30_000 })
   const text = await page.locator('body').innerText()
-  check(/Genes tested\s+19,423/.test(text) && /DCM GWAS variants\s+12,494,731/.test(text) && /trans pairs\s+15,824,574/.test(text) && /5,022 cases/.test(text),
-    'About: genes tested 19,423, DCM GWAS variants 12,494,731, trans pairs 15,824,574, 5,022 cases')
-  check(/trans values by up to/.test(text) && /GWAS values by up to/.test(text), 'About: the rounding sentence covers cis, trans and GWAS bounds')
-  check(errors.length === 0, `Home/Genes/Region/About: no console errors${errors.length ? ` (${errors.slice(0, 3).join(' | ')})` : ''}`)
+  check(/Experiments\s+7/.test(text) && /EiFob05aCWgVU_B_Ae0cypnQut3cxUP1/.test(text), 'About: the store\'s 7 experiments and its sequence collection')
+  check(errors.length === 0, `Landing/Collection/Genes/Region/About: no console errors${errors.length ? ` (${errors.slice(0, 3).join(' | ')})` : ''}`)
+  await ctx.close()
+}
+
+// ---- GTEx: no GWAS until one is chosen; against DCM, on another catalog, matched by position and alleles ----
+{
+  const { ctx, page, errors, idle } = await open(GTEX, { ready: false })
+  const topG = await page.locator('section:has(h2:has-text("Top loci")) [data-genome-track]').first().waitFor({ timeout: 30_000 }).then(() => true, () => false)
+  check(topG, 'GTEx eQTL experiment: Top loci renders')
+  await page.goto(`${BASE}${GTEX}/gene/PDXK`)
+  await page.waitForSelector(READY, { timeout: 60_000 })
+  check((await page.getByText('Choose a GWAS to compare it with this locus.').count()) === 1, 'GTEx PDXK without a GWAS: the QTL-versus-GWAS panel asks for one')
+  await page.goto(`${BASE}${GTEX}/gwas/dcm_jurgens2024_biobanks/gene/SMARCB1`)
+  await page.waitForSelector(READY, { timeout: 60_000 })
+  await idle()
+  const dots = await page.locator('.plot-host svg').nth(1).locator('g[aria-label="dot"] > *').count()
+  check(dots > 0, `GTEx SMARCB1 against DCM: the QTL-versus-GWAS panel draws ${dots} shared variants`)
+  const h4 = await page.getByText('H4 · shared causal variant').count()
+  check(h4 === 1, 'GTEx SMARCB1 against DCM: coloc.abf runs')
+  check(errors.length === 0, `GTEx: no console errors${errors.length ? ` (${errors.slice(0, 3).join(' | ')})` : ''}`)
   await ctx.close()
 }
 

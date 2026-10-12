@@ -51,7 +51,7 @@ leaves; the ones only Sam can answer are collected at the end.
 - **Sam, 2026-10-09: every GWAS in the store is eligible for every study.** A GWAS's collection
   says only which publication it came from; no curated pairing, and no shared-catalog rule for
   collections (D24 stands). A study page offers every GWAS experiment, the visitor's choice in the
-  URL; with one, it is the one. Coloc lists already name their pair, so the picker marks the GWAS
+  URL; nothing is preselected, even with one. Coloc lists already name their pair, so the picker marks the GWAS
   that have a list for this study. The store has one sequence collection but a catalog per cohort
   (`topchef_grch38`, `gtex_v8_heart_lv_grch38`), so the browser's coloc and LocusCompare join a
   window by `(pos, ref, alt)` rather than by vidx; today the reader refuses a GWAS on another
@@ -301,7 +301,7 @@ UI facets on without the format knowing the vocabulary. Ontology terms (UBERON f
 traits) would make them comparable with other resources.
 
 **Sam, 2026-10-10: optional facets on the experiment document, as plain labels.** `organ`, `tissue`,
-`cell_type`, `ancestry`, `n_samples`, `assay`, `sex`, and `trait` for a GWAS (today it has only a
+`cell_type`, `ancestry`, `n_samples`, `assay`, `sex`, `condition` (2026-10-11), and `trait` for a GWAS (today it has only a
 `title`; a QTL experiment's phenotype is `phenotype_type`). Not on the collection: one publication
 spans tissues (GTEx) and ancestries (ARIC); a collection card shows the union of its experiments'
 values. No ontology ids. Each is a SPEC addition and a config entry per experiment; `kind`,

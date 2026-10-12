@@ -8,7 +8,7 @@ import { Empty } from '@/components/states'
 import { toastError } from '@/lib/toast'
 
 /**
- * LocusCompare: QTL −log10 p against DCM GWAS −log10 p for every variant of the window
+ * LocusCompare: QTL −log10 p against GWAS −log10 p for every variant of the window
  * present in both, from the already-materialized locus table. Same colour, shape and size encoding as the locus scatter, the same hover tooltips, and a click on a hovered dot
  * opens its variant page. A colocalized locus streaks along the diagonal; independent signals
  * form an L.
@@ -46,7 +46,7 @@ export default function LocusCompare({ table, dark, size = 320, yDomain, link, b
           channels: { position: 'position' },
         }),
         hoverInteractor(link),
-        vg.xLabel('DCM GWAS −log₁₀ p'), vg.yLabel('QTL −log₁₀ p'),
+        vg.xLabel('GWAS −log₁₀ p'), vg.yLabel('QTL −log₁₀ p'),
         ...dotScales(hasColoc, dark),
         // y axis identical to the locus scatter: same domain, height, margins, insets
         vg.xZero(true), vg.yDomain(yDomain), vg.xGrid(true), vg.yGrid(true), vg.xInset(8),
@@ -63,7 +63,7 @@ export default function LocusCompare({ table, dark, size = 320, yDomain, link, b
     <div>
       <div ref={host} className={`plot-host ${click.className}`} onPointerMove={onPlotPointerMove} onPointerLeave={clearPlotHover}
         onPointerDown={click.onPointerDown} onPointerUp={click.onPointerUp} />
-      {n === 0 && <Empty label="No variants in this window are present in the DCM GWAS." />}
+      {n === 0 && <Empty label="No variants in this window are present in the GWAS." />}
     </div>
   )
 }

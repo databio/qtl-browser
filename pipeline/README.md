@@ -21,7 +21,7 @@ uv run python -m pipeline.overlap build --store <store> --id grch38 && uv run py
 # then rewrite store.json and validate, as store.sbatch's validate step does
 uv run python -m pipeline.which_codec --store <store>              # which codec wrote each object, from its bytes
 uv run python -m pipeline.scan_codes --store <store> --experiment topchef_ge_cis [--chrom chr22]
-uv run python -m pipeline.qtlstore validate | remove-experiment ID | gc [--dry-run] | crosscat A B --store <store>
+uv run python -m pipeline.qtlstore validate | remove-experiment ID | gc [--dry-run] | crosscat A B | set-collection KEY | set-facets --store <store>
 uv run python -m pipeline.overlap build --store <store> --id <id> --catalogs A B ...   # catalog overlap index
 QTLB_STORE=<store> EXPERIMENTS="topchef:<tree>/_tables/topchef" sbatch store.sbatch   # the same on Rivanna, several cohorts
 
@@ -62,11 +62,13 @@ changes the shape of the trans data, not just its size.
 | DCM GWAS into the TOPCHeF tables | `ADAPTER=dcm_gwas STEPS="adapter contract" QTLB_DERIVED=<tree> sbatch adapter.sbatch` | `adapters/dcm_gwas.py` |
 | Store build, one cohort, locally | `uv run python -m pipeline.build_store --store <store> --validate` (`--tables`, `--sites`, `--gtf` override the configured paths; `--keep` adds to an existing store) | `build_store.py` |
 | Store build, several cohorts, Rivanna | `QTLB_CHROMS=all QTLB_STORE=<store> EXPERIMENTS="topchef:<tree>/_tables/topchef:gencode_v34 gtex_v8_heart_lv:<tree>/_tables/gtex_v8_heart_lv" CROSSCAT="topchef_grch38 gtex_v8_heart_lv_grch38" sbatch --time=6:00:00 --mem=64G store.sbatch` | `annotation.py`, `catalog.py`, `results.py`, `gwas.py`, `which_codec.py` |
-| Store maintenance | `uv run python -m pipeline.qtlstore validate \| remove-experiment ID \| gc [--dry-run] \| crosscat A B --store <store>` | `qtlstore.py` |
+| Store maintenance | `uv run python -m pipeline.qtlstore validate \| remove-experiment ID \| gc [--dry-run] \| crosscat A B \| set-collection KEY \| set-facets --store <store>` | `qtlstore.py` |
+| A publication's title, citation or source, or the facets, after a config.yaml edit | `uv run python -m pipeline.qtlstore set-collection <key> --store <store>` (new collection document, repoints its experiments, rewrites store.json; old links stop resolving) and `uv run python -m pipeline.qtlstore set-facets --store <store>` | `qtlstore.py` |
 | Which codec wrote each object | `uv run python -m pipeline.which_codec --store <store>`: reads the block and frame magics back out of the bytes and judges them against `store.json`'s declared version | `which_codec.py` |
 | Upload | `uv run python -m pipeline.upload inventory \| plan \| push [--yes] \| check \| prune [--yes] --store <store>` | `upload.py` |
 | Catalog overlap index | `uv run python -m pipeline.overlap build --store <store> --id <id> [--catalogs A B ...]` (run by `store.sbatch`; `OVERLAP=` skips it) | `overlap.py` |
 | Gene symbols -> ENSG, for a source that publishes no gene id | `uv run python -m pipeline.genemap --symbols aric` (the report for ARIC's `seqid.txt`; any file of one symbol per line otherwise) | `genemap.py` |
+| Search index lead columns for a store built before them | `uv run python -m pipeline.results add-leads --store <store> --id <cis experiment>` (read back out of its blocks; the builder's index bytes; no other object changes) | `results.py` |
 | Search index column rename, in place | `uv run python -m pipeline.results migrate-index --store <store> --id <experiment>` (25 objects per experiment; no results, variant, hits or GWAS object changes) | `results.py` |
 | Results-block code sweep | `uv run python -m pipeline.scan_codes --store <store> --experiment <id> [--chrom chr22 ...]`, or `--base <url>` to read a published store over HTTP | `scan_codes.py` |
 | Per-chromosome objects for a store built before them | `uv run python -m pipeline.annotation add-split --store <store> --id <annotation>`, then `uv run python -m pipeline.results add-split --store <store> --id <experiment>` (rewrites the pointer; no other object changes) | `annotation.py`, `results.py` |

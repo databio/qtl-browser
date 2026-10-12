@@ -66,7 +66,7 @@ def build(store_root: Path, version: int, *, name: str = "topchef", annot_id: st
     t0 = time.time()
     log(f"== experiments from {exp_id} (codec v{codec.FORMAT_VERSION})")
     exps = results.build(st, exp_id, tables, cat_id, annot_id, chroms, codec=codec,
-                         collections=cfg.cfg.get("collections"))
+                         collections=cfg.cfg.get("collections"), facets=cfg.cfg.get("facets"))
     out["experiments"] = {
         eid: {"kind": d["kind"],
               **({"phenotype_type": d["phenotype_type"]} if "phenotype_type" in d else {}),

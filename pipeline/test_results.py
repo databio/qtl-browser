@@ -933,6 +933,100 @@ def test_migrate_index_renames_p_perm():
             raise AssertionError("a rule on another column must not be silently renamed")
 
 
+def test_lead_columns_match_blocks_and_backfill():
+    """`lead_nlp` and `lead_pos` are each phenotype's strongest row as its block decodes it. The
+    builder writes them; `add-leads` reads them back out of the blocks of an index that lacks them,
+    and lands on the same index bytes, so a backfilled store and a rebuilt one are one store."""
+    from . import catalog
+    with tempfile.TemporaryDirectory() as d:
+        st, rg, docs = build_all(Path(d))
+        for doc in (d_ for d_ in docs.values() if d_["kind"] == "qtl_cis"):
+            index = rs.load_index(st, doc)
+            assert set(rs.LEAD_FIELDS) <= set(index.schema.names)
+            rows = index.to_pylist()
+            cdoc = st.load(qs.CATALOGS, doc["catalog"])
+            got = rs.block_leads(st, doc, cdoc, rows)
+            assert all((r["lead_nlp"], r["lead_pos"]) == got[r["ord"]] for r in rows)
+            for r in rows:                    # the lead is the run's largest decoded -log10 p
+                b = rs.read_block(st, doc, r)
+                if r["lead_nlp"] is None:
+                    assert r["n_var"] is None or np.isnan(b["nlp"]).all()
+                else:
+                    assert r["lead_nlp"] == np.nanmax(b["nlp"]) and r["w_lo"] <= r["lead_pos"] <= r["w_hi"]
+            assert any(r["lead_nlp"] is not None for r in rows)
+
+        doc = one(docs)
+        idx = rs.load_index(st, doc)
+        stale = idx.drop_columns(list(rs.LEAD_FIELDS))
+        st.write_pointer("experiments", doc["id"], {**doc, "search_index": st.put(rs.encode_arrow(stale), rs.EXT_INDEX)})
+        fails = st.validate(refget=rg, sites=catalog.read_sites)
+        assert any("add-leads" in f for f in fails), fails
+        out = rs.add_leads(st, doc["id"])
+        assert out["search_index"] == doc["search_index"]                   # the builder's bytes
+        assert out["search_index_parts"] == doc["search_index_parts"]
+        assert st.validate(refget=rg, sites=catalog.read_sites) == []
+        # a lead that disagrees with its block is caught
+        bad = idx.set_column(idx.schema.get_field_index("lead_nlp"), "lead_nlp",
+                             pa.array([None if v is None else v + 1 for v in idx.column("lead_nlp").to_pylist()], pa.float64()))
+        st.write_pointer("experiments", doc["id"], rs._rewrite_index(st, doc, bad, rs.ZSTD_LEVEL))
+        assert any("!= its block's" in f for f in st.validate(refget=rg, sites=catalog.read_sites))
+
+
+def test_facets_and_set_collection():
+    """Facets are optional labels on an experiment, checked on the way in and by validate.
+    `set-collection` writes a publication's new document, repoints its scans and rewrites store.json;
+    `set-facets` replaces the labels of the experiments it names."""
+    from . import catalog
+    for bad in ({"colour": "red"}, {"n_samples": "10"}, {"n_samples": True}, {"tissue": " "}):
+        try:
+            qs.with_facets({"id": "x"}, bad)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"facets {bad} must be refused")
+    with tempfile.TemporaryDirectory() as d:
+        d = Path(d)
+        st, rg, cdoc = build_catalog(d)
+        build_annotation(st)
+        t = write_tables(d)
+        ing = json.loads((t / "ingestion.json").read_text())
+        (t / "ingestion.json").write_text(json.dumps({**ing, "experiment_id": "exp"}))
+        docs = rs.build(st, "exp", t, "cat1", "ann", ["chr1", "chr2"],
+                        facets={"exp_ge_cis": {"tissue": "left ventricle", "n_samples": 10}})
+        st.write_store("t", [])
+        assert docs["exp_ge_cis"]["facets"] == {"tissue": "left ventricle", "n_samples": 10}
+        assert "facets" not in docs["exp_leafcutter_cis"]
+        assert st.validate(refget=rg, sites=catalog.read_sites) == []
+
+        qs.set_facets(st, {"exp_leafcutter_cis": {"assay": "bulk RNA-seq"}})
+        assert st.load("experiments", "exp_leafcutter_cis")["facets"] == {"assay": "bulk RNA-seq"}
+        assert st.load("experiments", "exp_ge_cis")["facets"]["n_samples"] == 10      # not named: kept
+        try:
+            qs.set_facets(st, {"nope": {"tissue": "x"}})
+        except ValueError as e:
+            assert "nope" in str(e)
+        else:
+            raise AssertionError("facets for an experiment the store lacks must be refused")
+        p = st.root / "experiments" / "exp_ge_cis.json"
+        p.write_text(json.dumps({**json.loads(p.read_text()), "facets": {"tissue": 3}}))
+        assert any("facets: tissue" in f for f in st.validate(refget=rg, sites=catalog.read_sites))
+        qs.set_facets(st, {"exp_ge_cis": {"tissue": "left ventricle"}})
+
+        old = docs["exp_ge_cis"]["collection"]
+        r = qs.set_collection(st, "exp", {"title": "Short", "citation": {"year": 2026}})
+        assert r["was"] == [old] and sorted(r["experiments"]) == ["exp_ge_cis", "exp_leafcutter_cis"]
+        assert json.loads((st.immutable / r["collection"]).read_text())["title"] == "Short"
+        assert {e["collection"] for e in json.loads((st.root / "store.json").read_text())["experiments"].values()} \
+            == {r["collection"]}
+        assert st.validate(refget=rg, sites=catalog.read_sites) == []
+        try:
+            qs.set_collection(st, "other", {"title": "x"})
+        except ValueError as e:
+            assert "no experiment" in str(e)
+        else:
+            raise AssertionError("a key no experiment derives from must be refused")
+
+
 def test_defaults_for_old_tables():
     """Tables written before the contract added phenotype_object_id and has_nominal still build,
     with phenotype_object_id = phenotype_id and has_nominal from the nominal rows."""

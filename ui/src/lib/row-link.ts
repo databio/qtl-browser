@@ -44,3 +44,19 @@ export function useRowLink() {
     },
   })
 }
+
+/** `useRowLink` for a URL outside the router's basename (another experiment, a collection): every
+ *  open is a full navigation (lib/scope.ts), so it assigns `window.location` instead of navigating. */
+export function hrefRowLink(href: string) {
+  const open = (e: { metaKey: boolean; ctrlKey: boolean; shiftKey: boolean; button: number }) => {
+    if (e.button === 1 || e.metaKey || e.ctrlKey || e.shiftKey) window.open(href, '_blank', 'noopener')
+    else window.location.assign(href)
+  }
+  return {
+    role: 'link' as const,
+    tabIndex: 0,
+    onClick: (e: MouseEvent<HTMLTableRowElement>) => { if (!e.defaultPrevented) open(e) },
+    onAuxClick: (e: MouseEvent<HTMLTableRowElement>) => { if (e.button === 1) { e.preventDefault(); open(e) } },
+    onKeyDown: (e: KeyboardEvent<HTMLTableRowElement>) => { if (e.key === 'Enter' && e.target === e.currentTarget) window.location.assign(href) },
+  }
+}

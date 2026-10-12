@@ -5,7 +5,7 @@ local qtlstore (format version 2), written as JSON for the TS decoder (src/lib/s
         [--anchor topchef_ge_cis] [--gwas dcm_jurgens2024_biobanks] [--sample 40]
 
 Run from the repo root (it imports `pipeline`). The experiments are the anchor's collection siblings,
-the ones the app opens with VITE_COLLECTION_OF, plus the GWAS named like VITE_GWAS. A genome-wide
+the ones a collection page opens, plus the GWAS chosen beside them. A genome-wide
 store is too large to dump whole, so every object family gets a seeded sample decoded in full and
 exact totals over every row, both of which the TS side recomputes from its own decode:
 

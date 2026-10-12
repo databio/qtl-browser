@@ -1,7 +1,7 @@
 // Smoke check of the trans tables on a version 2 store (SPEC.md sections 8 and 9), against the local
-// preview serving the genome-wide local store. Gene page: both tabs page off the frames of the gene's
-// phenotypes in the trans experiments' objects, one range request per object (a gene's frames are
-// contiguous); the rows exported as CSV must equal `results.read_trans` for the same phenotypes
+// preview serving the genome-wide local store. Each trans experiment has its own pages
+// (src/lib/scope.ts). Gene page: the table pages off the frames of the gene's phenotypes in that
+// experiment's object, one range request (a gene's frames are contiguous); the rows exported as CSV must equal `results.read_trans` for the same phenotypes
 // (written by `ui/scripts/store_reference.py`, whose --smoke-genes and --smoke-variants
 // default to this suite's; path in SMOKE_REF). Variant page: the hits frames' trans records.
 //   SMOKE_REF=/tmp/ref-v2.json node bench/smoke_trans_tab.mjs
@@ -16,6 +16,9 @@ const store = await (await fetch(`${BASE}/data/store.json`)).json()
 // the study the app opens (its default VITE_COLLECTION_OF and VITE_GWAS), not every cohort in the store
 const studyIds = Object.keys(store.experiments).filter(id =>
   store.experiments[id].collection === store.experiments.topchef_ge_cis.collection || id === 'dcm_jurgens2024_biobanks')
+// the pages open inside one of TOPCHeF's trans experiments (src/lib/scope.ts)
+const at = id => `/c/${store.experiments[id].collection.replace(/\.json$/, '')}/e/${id}`
+const TE = at('topchef_ge_trans'), TS = at('topchef_leafcutter_trans')
 const docs = await Promise.all(studyIds.map(async id => (await fetch(`${BASE}/data/experiments/${id}.json`)).json()))
 const TRANS = new Set(docs.filter(d => d.kind === 'qtl_trans').map(d => d.file))
 check(TRANS.size === 2, `${store.name} has ${TRANS.size} trans experiments (ge, leafcutter), one object each`)
@@ -60,10 +63,10 @@ function compare(got, ids, label) {
 
 // ---- SMARCB1: 895 trans eQTL rows, 933 trans sQTL rows ----
 {
-  const { ctx, page, errors, reqs } = await open('/gene/SMARCB1')
+  const { ctx, page, errors, reqs } = await open(`${TE}/gene/SMARCB1`)
   await page.waitForSelector('[data-trans-total="895"]', { timeout: 60_000 })
   const n = reqs.filter(p => TRANS.has(p.split('/').pop())).length
-  check(n === 2, `SMARCB1: ${n} trans object requests (per trans experiment, one range for the gene's frames; no header reads)`)
+  check(n === 1, `SMARCB1: ${n} trans object request (one range for the gene's frames; no header reads)`)
   const e = await csv(page)
   check(e.header.join(',') === 'variant_chr,position,rsid,af,pval,beta,beta_se,r2', `SMARCB1: trans eQTL CSV header ${e.header.join(',')}`)
   compare(e.rows, new Set(['ENSG00000099956']), 'SMARCB1 trans eQTL CSV')
@@ -72,7 +75,7 @@ function compare(got, ids, label) {
   await page.waitForTimeout(400)
   check(first !== await table(page).locator('tbody tr td').first().innerText(), 'SMARCB1: sorting the trans table by p flips the first row')
   await table(page).locator('th button:text-is("p")').click()
-  await page.getByText(/^sQTL/).first().click()
+  await page.goto(`${BASE}${TS}/gene/SMARCB1`)
   await page.waitForSelector('[data-trans-total="933"]', { timeout: 60_000 })
   const s = await csv(page)
   const ids = new Set(s.rows.map(r => r.phenotype_id))
@@ -84,13 +87,13 @@ function compare(got, ids, label) {
 
 // ---- MICAL3: 5,436 trans sQTL rows across its 33 introns, 69 trans eQTL rows ----
 {
-  const { ctx, page, errors, reqs } = await open('/gene/MICAL3?tab=sqtl')
+  const { ctx, page, errors, reqs } = await open(`${TS}/gene/MICAL3`)
   await page.waitForSelector('[data-trans-total="5436"]', { timeout: 60_000 })
   const n = reqs.filter(p => TRANS.has(p.split('/').pop())).length
-  check(n === 2, `MICAL3: ${n} trans object requests (one range over all its introns' frames, one for its gene's)`)
+  check(n === 1, `MICAL3: ${n} trans object request (one range over all its introns' frames)`)
   const s = await csv(page)
   compare(s.rows, new Set(s.rows.map(r => r.phenotype_id)), 'MICAL3 trans sQTL CSV')
-  await page.getByText(/^eQTL$/).first().click()
+  await page.goto(`${BASE}${TE}/gene/MICAL3`)
   await page.waitForSelector('[data-trans-total="69"]', { timeout: 60_000 })
   const e = await csv(page)
   compare(e.rows, new Set(['ENSG00000243156']), 'MICAL3 trans eQTL CSV')
@@ -98,12 +101,16 @@ function compare(got, ids, label) {
   await ctx.close()
 }
 
-// ---- variant page: rs4819361's 10 trans associations from its hits frames ----
+// ---- variant page: rs4819361's 10 trans associations from its hits frames, across both scans ----
 {
-  const { ctx, page, errors, reqs } = await open('/variant/rs4819361')
-  await page.waitForSelector('[data-trans-total="10"]', { timeout: 60_000 })
+  const { ctx, page, errors, reqs } = await open(`${TE}/variant/rs4819361`)
+  const v = { rows: [] }
+  for (const where of [TE, TS]) {
+    if (where !== TE) await page.goto(`${BASE}${where}/variant/rs4819361`)
+    await page.waitForSelector('[data-trans-total]', { timeout: 60_000 })
+    if (Number(await table(page).getAttribute('data-trans-total')) > 0) v.rows.push(...(await csv(page)).rows)
+  }
   check(!reqs.some(p => TRANS.has(p.split('/').pop())), 'rs4819361: no trans object request (the hits frames hold the rows)')
-  const v = await csv(page)
   // every row names a phenotype whose trans frame holds this variant with the same p and beta
   if (REF) {
     let bad = 0
@@ -116,7 +123,7 @@ function compare(got, ids, label) {
       if (i < 0 || Math.abs(-Math.log10(Number(r.pval)) - t.nlp[i]) > t.nlp_max / 131066 + 1e-6 ||
           Math.abs(Number(r.beta) - t.beta[i]) > t.beta_max / 65532 + 1e-6 * Math.abs(t.beta[i])) bad++
     }
-    check(bad === 0 && v.rows.length === 10, `rs4819361: its ${v.rows.length} trans rows match the phenotypes' trans frames (${bad} off)`)
+    check(bad === 0 && v.rows.length === 10, `rs4819361: its ${v.rows.length} trans rows over both trans experiments match the phenotypes' trans frames (${bad} off)`)
   }
   check(errors.length === 0, `rs4819361: no console errors${errors.length ? ` (${errors.slice(0, 2).join(' | ')})` : ''}`)
   await ctx.close()

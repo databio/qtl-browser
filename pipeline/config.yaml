@@ -34,8 +34,10 @@ workers: 3
 duckdb_memory_limit: 6GB
 duckdb_threads: 4
 
-# TOPCHeF's published Student-t degrees of freedom, which the adapter records in each experiment's
-# `dof` as provenance; v2 stores beta, so nothing decodes through it
+# TOPCHeF's Student-t degrees of freedom, which the adapter records in each experiment's `dof`.
+# Fitted to the cis rows, and exactly what the published trans `r2` implies (t^2 (1 - r2) / r2 is 435
+# and 480 on every row): n = 516 less 70 expression PCs (MaxPC70) or 25 splicing PCs (MaxPC25), 9
+# other covariates and 2. Nothing decodes through it; trans r2 is formed from it
 topchef:
   dof: {eqtl: 435, sqtl: 480}
 
@@ -84,6 +86,36 @@ eqtl_catalogue:
     n_samples: 382
     significance: {column: p_perm, op: "<", threshold: 0.05}
 
+# Optional facets on each experiment document (SPEC section 8; qtlstore.FACET_KEYS), keyed by
+# experiment id: plain labels the browser describes and filters by. A key left out is "not stated".
+# TOPCHeF's n_samples is left out on purpose: the paper states no per-scan n (516 is what its dof
+# imply, not what it says). A GWAS has no `assay`.
+facets:
+  topchef_ge_cis: &topchef_facets
+    organ: heart
+    tissue: left ventricle
+    ancestry: multi-ancestry
+    assay: bulk RNA-seq
+    sex: both
+    condition: heart failure (DCM, ICM) and non-failing
+  topchef_ge_trans: *topchef_facets
+  topchef_leafcutter_cis: *topchef_facets
+  topchef_leafcutter_trans: *topchef_facets
+  gtex_v8_heart_lv_ge_cis: &gtex_lv_facets
+    organ: heart
+    tissue: left ventricle
+    ancestry: mostly European
+    n_samples: 382
+    assay: bulk RNA-seq
+    sex: both
+    condition: postmortem, non-diseased
+  gtex_v8_heart_lv_leafcutter_cis: *gtex_lv_facets
+  dcm_jurgens2024_biobanks:
+    ancestry: European
+    n_samples: 937963                # 5,022 cases + 932,941 controls
+    sex: both
+    trait: dilated cardiomyopathy
+
 # The publications the experiments came from (SPEC section 8, collections). Keyed by the experiment
 # stem a cohort's scans are derived from (`topchef` -> topchef_ge_cis, ...) or by a GWAS experiment's
 # id. `build_store` passes these to the builders, which write one content-addressed collection
@@ -91,7 +123,7 @@ eqtl_catalogue:
 # what the adapter recorded. The PDFs are in data/raw/papers/ (not in git).
 collections:
   topchef:
-    title: "TOPCHeF heart cis and trans eQTL and sQTL (Murray et al. 2026)"
+    title: "TOPCHeF LV"
     citation:
       title: "Integration of dilated cardiomyopathy genomics with transcriptomics from the human heart implicates regulatory molecular mechanisms"
       first_author: "Connor S. Murray"
@@ -104,7 +136,7 @@ collections:
       record: "zenodo_21382723"
       description: "TensorQTL cis and trans e/sQTL summary statistics, cis SuSiE credible sets"
   dcm_jurgens2024_biobanks:
-    title: "Dilated cardiomyopathy GWAS, Jurgens et al. 2024 (biobanks-only meta-analysis)"
+    title: "Jurgens 2024 DCM"
     citation:
       title: "Genome-wide association study reveals mechanisms underlying dilated cardiomyopathy and myocardial resilience"
       first_author: "Sean J. Jurgens"
@@ -120,7 +152,7 @@ collections:
       fetched: "2026-09-04"
       note: "the biobanks-only set (5,022 cases / 932,941 controls), which the preprint's figures were drawn from; the full META is parked locally"
   gtex_v8_heart_lv:
-    title: "GTEx v8 heart left ventricle eQTL and sQTL (eQTL Catalogue release 6)"
+    title: "GTEx v8 LV"
     citation:
       title: "The GTEx Consortium atlas of genetic regulatory effects across human tissues"
       first_author: "The GTEx Consortium"

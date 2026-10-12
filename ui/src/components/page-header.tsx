@@ -2,6 +2,8 @@ import type { ReactNode } from 'react'
 import { Link } from 'react-router'
 import { ChevronLeft, ChevronRight } from 'lucide-react'
 
+const CRUMB = 'truncate text-base-content/60 transition-colors hover:text-base-content'
+
 /** Title row (+ optional muted count/meta and right-aligned actions), description below. */
 export function PageHeader({ title, meta, description, actions, back, crumbs, size = 'lg', className = 'mb-8 mt-2' }: {
   title: ReactNode
@@ -9,8 +11,9 @@ export function PageHeader({ title, meta, description, actions, back, crumbs, si
   description?: ReactNode
   actions?: ReactNode
   back?: { to: string; label: string }
-  /** Trail above the title: linked ancestors, then the current page's label. */
-  crumbs?: { to?: string; label: string }[]
+  /** Trail above the title: linked ancestors, then the current page's label. `href` leaves the
+   *  router (the landing page sits outside a collection's basename, lib/scope.ts). */
+  crumbs?: { to?: string; href?: string; label: string }[]
   size?: 'lg' | 'md'
   /** Outer margins; replaces the default rather than adding to it. */
   className?: string
@@ -22,7 +25,8 @@ export function PageHeader({ title, meta, description, actions, back, crumbs, si
           {crumbs.map((c, i) => (
             <span key={i} className="flex min-w-0 items-center gap-1.5">
               {i > 0 && <ChevronRight className="size-3.5 shrink-0 text-base-content/30" />}
-              {c.to ? <Link to={c.to} className="truncate text-base-content/60 transition-colors hover:text-base-content">{c.label}</Link>
+              {c.href ? <a href={c.href} className={CRUMB}>{c.label}</a>
+                : c.to ? <Link to={c.to} className={CRUMB}>{c.label}</Link>
                 : <span className="truncate font-medium">{c.label}</span>}
             </span>
           ))}

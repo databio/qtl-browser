@@ -124,7 +124,7 @@ INDEX_SCHEMA = pa.schema([
     ("has_nominal", pa.bool_()), ("is_group_lead", pa.bool_()), ("significant", pa.bool_()),
     ("sig_value", pa.float64()), ("blk_off", pa.uint32()), ("blk_len", pa.uint32()),
     ("var_start", pa.uint32()), ("n_var", pa.uint32()), ("var_off", pa.uint32()), ("var_len", pa.uint32()),
-    ("w_lo", pa.int32()), ("w_hi", pa.int32()),
+    ("w_lo", pa.int32()), ("w_hi", pa.int32()), ("lead_nlp", pa.float64()), ("lead_pos", pa.uint32()),
     ("trans_off", pa.uint32()), ("trans_len", pa.uint32()), ("n_trans", pa.uint32())])
 
 # One experiment is one scan (`plans/2026-10-07-experiment-model.md` D9), so its index carries only
@@ -134,7 +134,11 @@ INDEX_SCHEMA = pa.schema([
 _SHARED_INDEX = ("ord", "phenotype_type", "phenotype_id", "phenotype_object_id", "gene_id", "chr",
                  "has_nominal", "is_group_lead", "significant", "sig_value")
 CIS_INDEX_FIELDS = _SHARED_INDEX + ("blk_off", "blk_len", "var_start", "n_var", "var_off", "var_len",
-                                    "w_lo", "w_hi")
+                                    "w_lo", "w_hi", "lead_nlp", "lead_pos")
+# `lead_nlp` and `lead_pos` are the phenotype's strongest nominal row as its block decodes it, so a
+# reader can rank a scan's phenotypes from the index alone: `sig_value` cannot, since a permutation
+# p floors (6,242 TOPCHeF eQTL genes tie at 1e-4). Both null when no row of the run has a p.
+LEAD_FIELDS = ("lead_nlp", "lead_pos")
 TRANS_INDEX_FIELDS = _SHARED_INDEX + ("trans_off", "trans_len", "n_trans")
 CIS_INDEX_SCHEMA = pa.schema([INDEX_SCHEMA.field(f) for f in CIS_INDEX_FIELDS])
 TRANS_INDEX_SCHEMA = pa.schema([INDEX_SCHEMA.field(f) for f in TRANS_INDEX_FIELDS])
@@ -275,7 +279,7 @@ def _clean(x):
 # ---- build ------------------------------------------------------------------------------------
 def build(store: qs.Store, exp_id: str, tables: Path, cat_id: str, annot_id: str, chroms: list[str],
           ingestion: dict | None = None, level: int = ZSTD_LEVEL, codec=None,
-          collection: str | None = None, collections: dict | None = None) -> dict:
+          collection: str | None = None, collections: dict | None = None, facets: dict | None = None) -> dict:
     """Build **one experiment per scan** from one set of contract tables, and return
     `{experiment_id: pointer}`.
 
@@ -292,7 +296,8 @@ def build(store: qs.Store, exp_id: str, tables: Path, cat_id: str, annot_id: str
     `codec` is `packfmt_v2` (the default, `qtlstore.FORMAT_VERSION`) or `packfmt_v1`, so the same
     contract tables build either format and the two stores can be diffed object for object.
     `collection` reuses an existing collection object instead of writing one, for a release
-    ingested in several passes. `collections` is config.yaml's `collections:` map, the publication
+    ingested in several passes. `facets` is config.yaml's `facets:` map, each experiment's optional
+    labels by experiment id (`qtlstore.FACET_KEYS`). `collections` is config.yaml's `collections:` map, the publication
     metadata keyed by `exp_id` and by a GWAS experiment's id; an entry wins over what the adapter
     recorded, and a missing one falls back to it."""
     codec = codec or qs.codec_for(qs.FORMAT_VERSION)
@@ -459,7 +464,9 @@ def build(store: qs.Store, exp_id: str, tables: Path, cat_id: str, annot_id: str
                     "n_var": None if e["lo"] is None else e["hi"] - e["lo"] + 1,
                     "var_off": var[0], "var_len": var[1],
                     "w_lo": None if e["lo"] is None else int(pc_["pos"][e["lo"]]),
-                    "w_hi": None if e["lo"] is None else int(pc_["pos"][e["hi"]])}
+                    "w_hi": None if e["lo"] is None else int(pc_["pos"][e["hi"]]),
+                    "lead_nlp": info["lead"][0],
+                    "lead_pos": None if info["lead"][1] is None else int(pc_["pos"][info["lead"][1]])}
                 blocks.append(blk)
                 off += len(blk)
             if off > pf.U32_MAX:
@@ -625,8 +632,9 @@ def build(store: qs.Store, exp_id: str, tables: Path, cat_id: str, annot_id: str
                     "catalog": cat_id, "catalog_identity": cdoc["identity_digest"],
                     "allele_orientation_source": common["allele_orientation_source"],
                     **{k: v for k, v in gwas_doc.items() if k != "id"}}
-    for eid, doc in out.items():
-        store.write_pointer("experiments", eid, doc)
+    for eid in out:
+        out[eid] = qs.with_facets(out[eid], (facets or {}).get(eid))
+        store.write_pointer("experiments", eid, out[eid])
     return out
 
 
@@ -761,7 +769,7 @@ def _block(e: dict, nom: dict | None, span: tuple | None, pos: np.ndarray, sig, 
                "extra": extra, "group": group}
     if lo is None:
         blk = _encode_block(codec, details, None, [], [], [], None, None, None, level)
-        return blk, {"has_nominal": False,
+        return blk, {"has_nominal": False, "lead": (None, None),
                      "error": {"neglog10p": 0.0, "beta_over_se": 0.0, "se_rel": 0.0, "rows_compared": 0}}
     n = hi - lo + 1
     p, beta, se = (np.full(n, np.nan) for _ in range(3))
@@ -782,7 +790,21 @@ def _block(e: dict, nom: dict | None, span: tuple | None, pos: np.ndarray, sig, 
             raise ValueError(f"credible_sets: {e['k']} cs_id outside 0..127")
     blk = _encode_block(codec, details, lo, p, beta, se, cs_row, cs_pip, cs_id, level,
                         pos_first=int(pos[lo]), pos_last=int(pos[hi]))
-    return blk, {"has_nominal": n_nom > 0, "error": _block_error(codec, blk, p, beta, se, dof)}
+    # the stored -log10 p, as the block's decoder returns it: the codec quantizes the same p the same way
+    i = run_lead(codec.dequantize_nlp(*codec.quantize_nlp(p)))
+    return blk, {"has_nominal": n_nom > 0, "lead": (None, None) if i is None else (i[0], lo + i[1]),
+                 "error": _block_error(codec, blk, p, beta, se, dof)}
+
+
+def run_lead(nlp: np.ndarray) -> tuple[float, int] | None:
+    """A run's strongest row: (its -log10 p, its row in the run), the first on a tie; None when no
+    row has a p. A p of 0 decodes to +inf and is the strongest there is."""
+    nlp = np.asarray(nlp, dtype=np.float64)
+    ok = ~np.isnan(nlp)
+    if not ok.any():
+        return None
+    i = int(np.argmax(np.where(ok, nlp, -np.inf)))
+    return float(nlp[i]), i
 
 
 def slope_error(blk: bytes, beta: np.ndarray, se: np.ndarray, dof: int | None) -> tuple[float, int]:
@@ -1304,6 +1326,12 @@ def migrate_index(store: qs.Store, exp_id: str, level: int = ZSTD_LEVEL) -> dict
         raise ValueError(f"experiments/{exp_id}: rule tests {col!r}, so the stored p_perm column is not "
                          f"the tested value and cannot be renamed; rebuild this experiment instead")
     index = index.rename_columns(["sig_value" if n == "p_perm" else n for n in index.schema.names])
+    return _rewrite_index(store, doc, index, level)
+
+
+def _rewrite_index(store: qs.Store, doc: dict, index: pa.Table, level: int) -> dict:
+    """Put a cis experiment's new search index and its parts, and rewrite its pointer with them in
+    the places `build` writes them. Nothing else in the pointer changes."""
     out = {k: v for k, v in doc.items() if k not in SPLIT_KEYS}
     out["search_index"] = store.put(encode_arrow(index, level), EXT_INDEX)
     parts = split_index(store, index, _chroms_of(doc, store.load("variant_catalogs", doc["catalog"])), level)
@@ -1312,8 +1340,87 @@ def migrate_index(store: qs.Store, exp_id: str, level: int = ZSTD_LEVEL) -> dict
         merged[k] = v
         if k == "search_index":
             merged |= parts
-    store.write_pointer("experiments", exp_id, merged)
+    store.write_pointer("experiments", doc["id"], merged)
     return merged
+
+
+def block_leads(store: qs.Store, doc: dict, cdoc: dict, rows: list[dict]) -> dict[int, tuple]:
+    """`ord -> (lead_nlp, lead_pos)` for the given index rows of a cis scan, read back out of their
+    blocks: the strongest decoded -log10 p of the run (`run_lead`) and that row's catalog position.
+    (None, None) for a run with no p. v2 blocks only: a v1 block's -log10 p decodes the same way, but
+    a v1 store is not one this column is added to."""
+    out, by_chr = {}, {}
+    for r in rows:
+        if r.get("blk_len") is None:
+            out[r["ord"]] = (None, None)
+        else:
+            by_chr.setdefault(r["chr"], []).append(r)
+    for c, rs in by_chr.items():
+        path = store.immutable / doc["files"][c]
+        with open(path, "rb") as f:
+            codec = qs.codec_for(qs.parse_file_header(f.read(qs.HEADER_LEN))["version"])
+            if codec is pf:
+                raise ValueError(f"experiments/{doc['id']} {c}: a v1 results file; lead columns are v2's")
+            pos = None
+            for r in sorted(rs, key=lambda r: r["blk_off"]):
+                f.seek(r["blk_off"])
+                d = codec.decode_gene_block(f.read(r["blk_len"]), expect_blk_len=r["blk_len"],
+                                            details_version=DETAILS_VERSION)
+                lead = run_lead(d["nlp"])
+                if lead is None:
+                    out[r["ord"]] = (None, None)
+                    continue
+                if pos is None:
+                    pos = cat.load_chrom(store, cdoc, c)["pos"]
+                out[r["ord"]] = (lead[0], int(pos[d["var_start"] + lead[1]]))
+    return out
+
+
+def add_leads(store: qs.Store, exp_id: str, level: int = ZSTD_LEVEL) -> dict:
+    """Give a stored cis scan's search index its `lead_nlp` and `lead_pos` columns, read back out of
+    its own blocks, and rewrite the index, its parts and the pointer (as `migrate_index` does). No
+    results, variants or hits object changes. Idempotent: the same blocks give the same columns, so
+    a second run writes the same objects."""
+    doc = store.load("experiments", exp_id)
+    if doc.get("kind") != "qtl_cis":
+        raise ValueError(f"experiments/{exp_id}: kind {doc.get('kind')!r}; lead columns are a cis scan's")
+    cdoc = store.load("variant_catalogs", doc["catalog"])
+    index = load_index(store, doc)
+    leads = block_leads(store, doc, cdoc, index.select(["ord", "chr", "blk_off", "blk_len"]).to_pylist())
+    ords = index.column("ord").to_pylist()
+    cols = {"lead_nlp": pa.array([leads[o][0] for o in ords], pa.float64()),
+            "lead_pos": pa.array([leads[o][1] for o in ords], pa.uint32())}
+    index = pa.table({f: cols[f] if f in cols else index.column(f) for f in CIS_INDEX_SCHEMA.names},
+                     schema=CIS_INDEX_SCHEMA)
+    return _rewrite_index(store, doc, index, level)
+
+
+def check_leads(store: qs.Store, doc: dict, cdoc: dict, per_chrom: int = 4) -> list[str]:
+    """A cis scan's index has the lead columns, and they match its blocks: on every chromosome, the
+    row with the largest `lead_nlp` and `per_chrom` rows spread through the part, each block decoded.
+    A sample, since the whole check is a decode of every block; `add_leads` is the full computation."""
+    where = f"experiments/{doc.get('id')}"
+    if doc.get("kind") != "qtl_cis" or not (store.immutable / doc["search_index"]).exists():
+        return []
+    index = load_index(store, doc)
+    if not set(LEAD_FIELDS) <= set(index.schema.names):
+        return [f"{where}: search index has no lead_nlp/lead_pos (`python -m pipeline.results add-leads`)"]
+    rows = index.select(["ord", "chr", "blk_off", "blk_len", "n_var", *LEAD_FIELDS]).to_pylist()
+    fails = [f"{where}: ord {r['ord']} has a lead and no rows" for r in rows
+             if r["n_var"] is None and r["lead_nlp"] is not None][:3]
+    pick = []
+    for c in {r["chr"] for r in rows}:
+        rs = [r for r in rows if r["chr"] == c and r["blk_len"] is not None]
+        if not rs:
+            continue
+        idx = set(np.linspace(0, len(rs) - 1, min(per_chrom, len(rs))).round().astype(int).tolist())
+        idx.add(max(range(len(rs)), key=lambda i: -1.0 if rs[i]["lead_nlp"] is None else rs[i]["lead_nlp"]))
+        pick += [rs[i] for i in sorted(idx)]
+    got = block_leads(store, doc, cdoc, pick)
+    for r in pick:
+        if (r["lead_nlp"], r["lead_pos"]) != got[r["ord"]]:
+            fails.append(f"{where}: ord {r['ord']} lead {(r['lead_nlp'], r['lead_pos'])} != its block's {got[r['ord']]}")
+    return fails
 
 
 def check_split(store: qs.Store, doc: dict, cdoc: dict) -> list[str]:
@@ -1407,7 +1514,15 @@ def main(argv: list[str] | None = None) -> int:
     m = sub.add_parser("migrate-index", help="rename the search index's p_perm column to sig_value (rewrites its pointer)")
     m.add_argument("--store", required=True, type=Path)
     m.add_argument("--id", required=True)
+    ld = sub.add_parser("add-leads", help="give a stored cis scan's search index lead_nlp and lead_pos from its blocks "
+                                          "(rewrites its pointer)")
+    ld.add_argument("--store", required=True, type=Path)
+    ld.add_argument("--id", required=True)
     args = ap.parse_args(argv)
+    if args.cmd == "add-leads":
+        doc = add_leads(qs.Store(args.store), args.id)
+        print(json.dumps({"search_index": doc["search_index"], "parts": len(doc.get("search_index_parts") or {})}))
+        return 0
     if args.cmd == "add-split":
         doc = add_split(qs.Store(args.store), args.id)
         print(json.dumps({"parts": len(doc.get("search_index_parts") or {}), "counts": doc.get("counts")}))
@@ -1419,7 +1534,8 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     from .common import CHROMS, Config
     docs = build(qs.Store(args.store), args.id, args.tables, args.catalog, args.annotation, CHROMS,
-                 codec=qs.codec_for(args.version), collections=Config().cfg.get("collections"))
+                 codec=qs.codec_for(args.version), collections=Config().cfg.get("collections"),
+                 facets=Config().cfg.get("facets"))
     print(json.dumps({eid: {k: v for k, v in d.items() if k not in ("hits", "files", "search_index_parts")}
                       for eid, d in sorted(docs.items())}, indent=1))
     return 0

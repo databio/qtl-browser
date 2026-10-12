@@ -6,7 +6,7 @@ import { PageHeader } from '@/components/page-header'
 import { KvTable } from '@/components/kv-table'
 import { SectionPanel } from '@/components/section-panel'
 import RoundingNote from '@/components/rounding-note'
-import { DetailSkeleton, Empty, TableSkeleton, Unavailable } from '@/components/states'
+import { DetailSkeleton, Empty, TableSkeleton } from '@/components/states'
 import { ErrorPage } from '@/components/error-page'
 import { toastError } from '@/lib/toast'
 import TransTable from '@/components/TransTable'
@@ -20,7 +20,7 @@ import { csValues, hitPhenotypes, leadValues, loadHits, lookupRsid, nominalsAt, 
 import { SQTL_TYPE } from '@/lib/store'
 import { variantTransTable } from '@/lib/trans'
 import { dropTable } from '@/lib/db'
-import { useSignificance, useStoreInfo } from '@/contexts/store-context'
+import { useCollectionCrumbs, useSignificance, useStoreInfo } from '@/contexts/store-context'
 import { ROW_LINK, ROW_LINK_TEXT, useRowLink } from '@/lib/row-link'
 
 const gnomad = (v: VariantRecord) => `https://gnomad.broadinstitute.org/variant/${v.chr.replace('chr', '')}-${v.position}-${v.A2}-${v.A1}?dataset=gnomad_r4`
@@ -53,6 +53,7 @@ async function resolve(id: string): Promise<{ v: VariantRecord; hits: Hits } | n
 }
 
 export default function Variant() {
+  const home = useCollectionCrumbs()
   const { id = '' } = useParams()
   const [found, setFound] = useState<{ v: VariantRecord; hits: Hits } | null | undefined>(undefined)
   // the lookup itself failed (not "no such variant"): the page cannot say either way
@@ -69,11 +70,11 @@ export default function Variant() {
   if (found === undefined) return <Page><DetailSkeleton kvRows={4} /></Page>
   return (
     <Page>
-      <PageHeader crumbs={[{ label: 'Variants' }, { label: id }]} title={found ? (rsidOf(found.v) ?? id) : id}
+      <PageHeader crumbs={[...home, { label: id }]} title={found ? (rsidOf(found.v) ?? id) : id}
         meta={found ? <span className="tabular-nums">{found.v.chr}:{fmtInt(found.v.position)}</span> : undefined} />
       {!found ? (
         <div className="space-y-2">
-          <Empty label={`${id} is not among the variants tested in TOPCHeF (MAF ≥ 0.01; cis windows within 1 Mb of a tested gene, or the genome-wide trans scan).`} />
+          <Empty label={`${id} is not among the variants tested in this experiment.`} />
           {/^rs\d+$/i.test(id) && <p className="px-4 text-sm"><ExternalLink icon href={dbsnp(id.toLowerCase())}>Look it up in dbSNP</ExternalLink></p>}
         </div>
       ) : <VariantBody v={found.v} hits={found.hits} />}
@@ -129,6 +130,7 @@ function VariantBody({ v, hits }: { v: VariantRecord; hits: Hits }) {
   // the variant changes; the trans table pages off it like the gene page's does
   const [transTable, setTransTable] = useState<string | null>(null)
   const hasTrans = useStoreInfo()?.hasTrans ?? false
+  const hasCis = (useStoreInfo()?.cis.size ?? 1) > 0
   const [plan, setPlan] = useState<ScanPlan | null>(null)
   const [scan, setScan] = useState<{ e: CisHit[]; s: CisHit[] } | null | 'running'>(null)
   const [allIntrons, setAllIntrons] = useState(false)
@@ -192,6 +194,8 @@ function VariantBody({ v, hits }: { v: VariantRecord; hits: Hits }) {
         ]} />
       </div>
 
+      {/* a trans experiment has no cis results: its page is the trans section */}
+      {hasCis && <>
       <SectionPanel title="Lead variant for" description="Genes and splice phenotypes where this is the top cis association.">
         {!v.inCis ? <Empty label={OUTSIDE_CIS} /> : lists === null ? <TableSkeleton columns={[{ w: 'w-10' }, { w: 'w-16' }, { w: 'w-40' }, { w: 'w-20', align: 'right' }, { w: 'w-14', align: 'right' }, { w: 'w-12', align: 'right' }]} rows={2} /> :
           lists.leads.length === 0 ? <Empty label="Not the lead variant for any gene or splice phenotype." /> : (
@@ -242,12 +246,15 @@ function VariantBody({ v, hits }: { v: VariantRecord; hits: Hits }) {
             </div>
           )}
       </SectionPanel>
+      </>}
 
-      <SectionPanel title="trans associations" description={<>Genes and splice phenotypes anywhere in the genome whose expression or splicing this variant associates with, outside their cis windows. <RoundingNote kind="trans" /></>}>
-        {hasTrans ? <TransTable table={transTable} keyedBy="variant" fileStem={`${rsid ?? `${v.chr}_${v.position}`}_trans`} />
-          : <Unavailable what="trans eQTL and sQTL results" />}
-      </SectionPanel>
+      {hasTrans && (
+        <SectionPanel title="trans associations" description={<>Genes and splice phenotypes anywhere in the genome whose expression or splicing this variant associates with, outside their cis windows. <RoundingNote kind="trans" /></>}>
+          <TransTable table={transTable} keyedBy="variant" fileStem={`${rsid ?? `${v.chr}_${v.position}`}_trans`} />
+        </SectionPanel>
+      )}
 
+      {hasCis && <>
       <SectionPanel title="All cis associations" description="Nominal statistics for every gene and splice phenotype whose window covers this variant. It runs on request."
         action={v.inCis && scan === null && plan && <button data-scan-button className="btn btn-sm h-8 rounded-lg border-base-300 font-medium" onClick={doScan}>
           Scan cis windows ({fmtBytes(plan.bytes)}{plan.sPending ? ' + splicing' : ''})
@@ -260,6 +267,7 @@ function VariantBody({ v, hits }: { v: VariantRecord; hits: Hits }) {
           </div>
         )}
       </SectionPanel>
+      </>}
     </div>
   )
 }
