@@ -1,49 +1,37 @@
 # ui — the general multi-study browser
 
 A fork of the TOPCHeF app, now `../ui-topchef/` (2026-09-25, `plans/2026-09-25-ui-fork-topchef.md`),
-with the same stack, store and decoders. The difference is what it assumes about which study it is
-showing.
+with the same stack, store and decoders. `../ui-topchef/` is the site at https://topchef.databio.org.
+This one deploys to its own Worker, `qtl-browser` (`wrangler.jsonc`), on every push to main that
+touches `ui/` (`.github/workflows/deploy-ui.yml`). It has no custom domain yet.
 
-`../ui-topchef/` is the site at https://topchef.databio.org. This one deploys to its own Worker,
-`qtl-browser` (`wrangler.jsonc`), on every push to main that touches `ui/`
-(`.github/workflows/deploy-ui.yml`). It has no custom domain yet.
+It browses every collection in the store (`plans/2026-10-10-general-ui-first-pass.md`):
 
-Features may land in either copy, so a change belonging in both has to be applied twice, and
-nothing checks that it was. `diff -rq src ../ui-topchef/src` shows what differs.
+| Path | Page |
+|---|---|
+| `/` | the collections as rows, studies and GWAS apart; nothing opens until one is chosen |
+| `/about` | the browser and the store |
+| `/c/<digest>` | a collection: its publication, facets and experiments, each a link |
+| `/c/<digest>/e/<id>` | an experiment: search and Top loci (a cis scan), search (a trans scan), Top loci (a GWAS) |
+| `/c/<digest>/e/<id>/genes`, `/gene/<g>`, `/variant/<v>`, `/region/<loc>` | that QTL experiment's pages |
+| `/c/<digest>/e/<id>/gwas/<gwas id>/...` | the same, with that GWAS for coloc and LocusCompare, chosen on a gene page |
 
-## Where it is going
-
-The store already holds N experiments over M variant catalogs (SPEC.md sections 2 and 8). On B2
-today: `topchef` (two phenotype types, trans, the DCM GWAS, GENCODE v34) and `gtex_v8_heart_lv`
-(no trans, no GWAS, a fitted dof, GENCODE v39). Both catalogs anchor to the same seqcol collection,
-so a site key `(seq_digest, pos, ref, alt)` means the same thing in both.
-
-The browser is the only layer that assumes one study. The work, roughly in dependency order:
-
-1. **Experiment in the route** (`/e/<id>/gene/<gene>`), not `VITE_EXPERIMENT` at build time.
-   `store.json` already lists the experiments; nothing reads that list yet.
-2. **Per-experiment caches.** `getStore`, `variantIndex`, `lookupDir`, `wholeGenes`, `wholeIndex`
-   and the `memoBy(chr)` caches in `lib/store.ts` are singletons keyed to one store.
-3. **Phenotype types from the data.** `EQTL_TYPE = 'ge'` and `SQTL_TYPE = 'leafcutter'` become
-   whatever `results[].phenotype_type` holds.
-4. **Study-specific content behind a config**: the coloc tables and DCM chips (`lib/coloc.ts`,
-   `routes/Gene.tsx`, `components/ColocLoci.tsx`), the GWAS comparison labels
-   (`components/LocusCompare.tsx`), the About and Home prose, the nav wordmark, and the
-   `topchef`/`topchef-dark` themes.
-5. **Cross-catalog lookup in TypeScript** (SPEC.md section 11). Python has it as
-   `qtlstore crosscat`; every decoder the browser needs already exists, so this is assembly rather
-   than new format work. It is what makes "this locus in the other study" reachable.
+`<digest>` is the collection object's digest. Every page is one experiment's: the URL's prefix up
+to the GWAS is the router's basename (`src/lib/scope.ts`), so a page load holds one experiment and
+one GWAS, and choosing another is a full navigation. No GWAS is chosen until the visitor picks
+one. A GWAS on another variant catalog is matched by position and alleles. The code is not shared
+with `../ui-topchef/`: a fix to both is made in both.
 
 ## Running it
 
 ```bash
 npm install
-QTL_DATA_DIR=/path/to/store VITE_DATA_BASE= npm run dev   # a local store at /data, with Range support
-VITE_DATA_BASE=https://cloud2.databio.org/qtl-browser npm run dev   # the live store
+QTL_DATA_DIR=../data/derived/store-release-v2 VITE_DATA_BASE= npm run dev   # a local store at /data, with Range support
+VITE_DATA_BASE=https://cloud2.databio.org/qtl-browser npm run dev           # the live store
 ```
 
-`VITE_EXPERIMENT` still selects the experiment (default `topchef`) until step 1 lands;
-`VITE_EXPERIMENT=gtex_v8_heart_lv` is the second study to test against.
+`QTL_DATA_DIR` is read when the dev server starts, so pointing it at another store needs a
+restart. Open the dev fault page inside an experiment, `/c/<digest>/e/<id>/dev/faults`.
 
 `npx tsc -b` type-checks. `npm run store-check` validates a local store against the Python
-decoders. The bench suites under `bench/` came with the fork and still describe the TOPCHeF pages.
+decoders (`bench/README.md`). The smoke suites open each of TOPCHeF's four experiments, and GTEx's eQTL experiment against the DCM GWAS.

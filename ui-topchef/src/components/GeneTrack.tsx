@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import * as vg from '@uwdata/vgplot'
 import { genesInWindow, type Exon, type WindowGene } from '@/lib/queries'
+import { toastError } from '@/lib/toast'
 
 export interface TrackSpec {
   chr: string
@@ -49,7 +50,7 @@ export default function GeneTrack({ spec, width, marginLeft, dark, shade }: {
     // neighbours come from the chromosome's genes (read when the gene was resolved); the gene's own exons come with the gene details
     genesInWindow(spec.chr, spec.domain[0], spec.domain[1])
       .then(genes => { if (alive) setData({ genes, exons: spec.exons }) })
-      .catch((e: Error) => { console.error(e); if (alive) setError(`gene track query failed: ${e.message}`) })
+      .catch((e: Error) => { if (alive) { setError(e.message); toastError('The gene track could not be loaded.', e) } })
     return () => { alive = false }
   }, [key]) // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -109,15 +110,15 @@ export default function GeneTrack({ spec, width, marginLeft, dark, shade }: {
       ) as HTMLElement
       el.replaceChildren(plot)
     } catch (e) {
-      console.error(e)
-      setError(`gene track render failed: ${(e as Error).message}`)
+      setError((e as Error).message)
+      toastError('The gene track could not be drawn.', e)
     }
   }, [data, width, marginLeft, dark, spec.intron?.start, spec.intron?.end, shade?.[0], shade?.[1]]) // eslint-disable-line react-hooks/exhaustive-deps
 
   return (
     <div>
-      {error && <div className="px-2 py-1 text-xs text-error">{error}</div>}
-      <div ref={host} className={data ? '' : 'min-h-[60px]'} />
+      {/* the failure is a toast; the track's space stays, empty */}
+      <div ref={host} className={data && !error ? '' : 'min-h-[60px]'} />
     </div>
   )
 }

@@ -4,15 +4,12 @@
 knows that source's file names, column spellings and allele convention and nothing else. Below it
 sit the **builders** (variant catalog, annotation, results, store), which know the qtlb format and nothing
 about where the numbers came from. This file defines the seam: the five Parquet tables an adapter
-must produce, the three it may produce (`trans`, `gwas`, `gwas_bins`), and the rules those tables obey.
+must produce, the two it may produce (`trans`, `gwas`), and the rules those tables obey.
 
 Adding a second experiment should mean writing one adapter. If it means touching a builder, either
 the contract is wrong or the adapter is cheating; fix whichever it is rather than special-casing
 downstream.
 
-Everything here is qtlb **v1**. The v0 tables the TOPCHeF build writes today are described at the
-end under [What TOPCHeF's current tables look like](#what-topchefs-current-tables-look-like), with
-the delta from this contract, because that delta is the work the TOPCHeF adapter has to do.
 
 ## Scope
 
@@ -64,10 +61,12 @@ Rules:
     (its trans eQTL pairs) is ingested. Alleles are **not inferred** -- not from dbSNP by rsID, not
     from population frequency, not from any other study. A guessed allele that is wrong looks
     exactly like a right one once it is anchored, and it would carry a real VRS id.
-  - The exclusion is counted, not silent: `ingestion.json` records `trans_eqtl_excluded` with the
-    number of variants, the number of trans eQTL rows left out (and the total), the genes those rows
-    belong to, and the reason. The orientation counts list the same variants under the class
-    `no_source_alleles`.
+  - The exclusion is counted, not silent: `ingestion.json` records it per phenotype type under
+    `trans_excluded` -- `{phenotype_type: {variants, rows, rows_in_source,
+    phenotypes_with_excluded_rows, reason} | null}` -- because each type's trans scan is its own
+    experiment and reports only its own. TOPCHeF's adapter also keeps its cohort-level
+    `trans_eqtl_excluded` for its own invariant. The orientation counts list the same variants under
+    the class `no_source_alleles`.
   - Trans sQTL rows carry A1/A2 in the source and are unaffected.
   - This holds **until the authors supply the alleles** (asked for: A1/A2 on the trans eQTL files,
     or their `.bim` files). When they do, the variants enter as ordinary sites from the source's
@@ -325,29 +324,16 @@ Rules:
 - `gwas.json`: `id`, `title`, `source` (file, cases, controls, source row counts), `orientation`
   (`as_is`, `swapped`, `dropped`, counts by reference class), `rows`.
 
-### `gwas_bins.parquet`
-
-The landing track's summary of the GWAS (SPEC.md section 10, "Bin summary"), optional next to
-`gwas.parquet`. One row per window of `bin_bp` (5 Mb, `gwas_bin_bp` in the config) that has source rows,
-from **the source rows as published**, not the oriented `gwas` rows: rows the reference does not read
-count, and the lead's allele and beta are the source's effect allele and its beta. The DCM GWAS adapter
-writes it with v0's `gwas_bins` query unchanged (`dcm_gwas.BINS_SQL`; `--bins-only` writes just this
-table), so it equals v0's `gwas_dcm_bins.json`.
-
-| column | type | meaning |
-|---|---|---|
-| `chr` | `string` | sequence name, in the variant catalog's chromosome list |
-| `bin_start`, `bin_end` | integer | `[k * bin_bp, (k + 1) * bin_bp)`; a position `pos` is in bin `pos // bin_bp` |
-| `min_p` | `double` | smallest p in the bin, unrounded (the builder rounds to 3 significant digits) |
-| `lead_position`, `lead_rsid`, `lead_beta`, `lead_ea` | | the row holding `min_p`: position, rsID text (null when none), beta (unrounded; the builder rounds to 3 decimals), effect allele |
-| `n_gws`, `n_variants` | integer | rows with p < 5e-8; rows in the bin |
+The landing track's bin summary (SPEC.md section 10) is not an adapter's job: the builder computes it
+from these rows for every GWAS.
 
 ## The ingestion report
 
 Each adapter writes `ingestion.json` next to the tables. Beyond what individual rules above
 require, it records, per `phenotype_type`: the number of phenotypes, groups, and phenotypes with
-`nominal` rows (`has_nominal`), and whether `permuted.n_variants` was recounted from nominal or
-copied from the source. Every site dropped or held out of `sites` is counted there by reason.
+`nominal` rows (`has_nominal`), whether `permuted.n_variants` was recounted from nominal or
+copied from the source, and what was left out of that type's trans rows (`trans_excluded`, above).
+Every site dropped or held out of `sites` is counted there by reason.
 
 ## Orientation
 
@@ -370,8 +356,8 @@ Two separate questions had to be answered for it, and both are now measured:
    rows where the GWAS effect allele is our A2, so the frequency had to be mirrored to compare,
    agree at +0.9975 -- the join is not answering its own question. No palindrome could confound it:
    that GWAS carries zero strand-ambiguous SNPs. Cis `af` averages 0.2420 with median 0.1318 over
-   SNPs, an ALT-side distribution. `beta` follows from `af` by construction: `steps_nominal` copies
-   `n.af` and `n.slope` from one tensorQTL row unchanged, and tensorQTL codes both against the same
+   SNPs, an ALT-side distribution. `beta` follows from `af` by construction: the adapter copies
+   `af` and `slope` from one tensorQTL row unchanged, and tensorQTL codes both against the same
    dosage vector. EVIDENCE.md A.11.
 
 Put together: A2 is REF, A1 is ALT, `af` is already the ALT frequency and `beta` is already the ALT
@@ -381,7 +367,7 @@ effect. **So the TOPCHeF reorientation is a relabelling, not a sign flip.** The 
 > **Corrected: what to do at the 97,433 indels the refcheck table calls `a1`.** *Measured by the
 > TOPCHeF adapter, 2026-09-22. This paragraph used to say "take the call from
 > `_tables/refcheck/<chr>.parquet` rather than re-deriving it", which cannot be done at the same
-> time as the acceptance gate's "zero swapped sites": taking that call literally makes ref = A1 at
+> time as "zero swapped sites" (below): taking that call literally makes ref = A1 at
 > 97,433 cis sites, which is 97,433 swaps and 97,433 negated slopes.*
 >
 > The refcheck class is a **reading** at SNPs and a **tie-break** at indels. An indel's two alleles
@@ -417,54 +403,18 @@ Each adapter records how it decided, as `allele_orientation_source` in the exper
 (`topchef_refcheck_a2_is_ref`, `eqtl_catalogue_ref_alt`). A reader should be able to tell a
 convention that was verified from one that was assumed.
 
-### Acceptance gate for a TOPCHeF re-ingestion
+### Zero swapped sites for TOPCHeF
 
-This is the authoritative wording; it replaces the phrase "bit-identical up to the sign flip on
-swapped sites" in the qtlstore design plan, step 2. That phrasing pre-authorized the exact failure
-it should have caught. SPEC.md section 11 stores a slope's sign in one bit of the SE u16, so a
-genome-wide inversion re-encodes to perfectly valid bytes, survives every precision and round-trip
-check, and is indistinguishable from a legitimate result under a gate that expects sign flips.
-
-A rebuild of TOPCHeF through the contract tables is accepted only when, against the v0 packs:
-
-- Every decoded `-log10 p` and SE array is **bit-identical**.
-- Every decoded slope is **bit-identical, sign included**. Zero sign flips is the expected count,
-  not an allowance: A2 is REF and `beta` is A1's, so no cis site swaps.
-- Every `af` is **bit-identical**. No site takes `1 - af`.
-- `ref` equals the old `A2` and `alt` equals the old `A1` at every SNP. At every indel the pair is
-  one of those two orderings and the choice follows the corrected rule above: A2 wherever the
-  refgetstore confirms the reference reads A2 there, the `_tables/refcheck/<chr>.parquet` call
-  otherwise. The ingestion report gives the split, so a reader can see how many were decided which
-  way rather than taking the count on trust.
-- The count of swapped sites and the count of dropped sites are both reported in the ingestion
-  report, and both are **0** for cis variants.
-
-If any slope changes sign, the rebuild is wrong. Do not accept it as orientation.
+A slope's sign is one bit of the stored value, so a genome-wide inversion encodes to perfectly
+valid bytes and survives every precision and round-trip check. For TOPCHeF A2 is REF and `beta` is
+A1's, so no cis site swaps: the ingestion report's swapped and dropped counts are both **0** for cis
+variants, and at every indel the choice follows the corrected rule above (A2 wherever the
+refgetstore confirms the reference reads A2 there, the refcheck call otherwise), with the split
+reported. If any slope changes sign, the rebuild is wrong. Do not accept it as orientation.
 
 ## Degrees of freedom
 
-Not a contract table. The results builder needs a `dof` per results set so a reader can rebuild
-`beta` from `se` and p. Where the source publishes it (TOPCHeF: 435 eQTL, 480 sQTL) the adapter
-passes it through. Where it does not (eQTL Catalogue), `pipeline/dof.py` fits it from `nominal`
-and records the fit residual. A fit that does not converge is not fatal: the experiment stores
-`dof: null` and the reader uses the stored `-log10(p)` directly, which is what it does today
-anyway.
-
-## What TOPCHeF's current tables look like
-
-The v0 build writes these, and they are *not* the contract. The delta is the TOPCHeF adapter's job:
-
-| v0 table | rows | what has to change |
-|---|---|---|
-| `variants.parquet` | 9,215,026 | `A1`/`A2` -> `ref`/`alt` by the refcheck call; `position` -> `pos`; keep `rsid`/`rs_number` as variant catalog attributes, not contract columns |
-| `genes.parquet` | 60,624 | split three ways: annotation columns to the annotation object, result columns to `permuted`, `bin` dropped (it named a build partition) |
-| `splice_phenotypes.parquet` | 80,750 | same split; `intron_start`, `intron_end`, `cluster_id`, `strand` go into `phenotypes.extra` |
-| `credible_sets.parquet` | 461,784 | drop `symbol`, `tss`, `gene_id`, `rsid`, `af` (all derivable); `qtl_type` -> `phenotype_type`; add `z`, `cs_size`, `cs_min_r2` |
-| `trans/`, `trans_by_variant/` | 15,862,525 pairs | `trans.parquet` (15,824,574 rows with source alleles); `gene_chr`/`gene_tss`/`symbol` come out |
-| nominal build intermediates | | become `nominal/chr=*/` with `ref`/`alt` |
-
-Two things to notice. First, almost every deletion above is an annotation column that v0 copied into
-three different tables; the annotation object exists so that a second experiment on GENCODE v39
-cannot silently disagree with this one on where a gene starts. Second, `qtl_type` becoming
-`phenotype_type` is not a rename: v0 has exactly two values baked into the file kinds, and the
-contract makes it an open set carried in data.
+Not a contract table, and provenance only: the store keeps `beta` itself, so nothing decodes
+through a dof. Where the source publishes it (TOPCHeF: 435 eQTL, 480 sQTL) the adapter records it.
+Where it does not (eQTL Catalogue, ARIC), `pipeline/dof.py` fits it from `nominal` and records the
+fit residual; a fit that does not converge records `dof: null`.

@@ -4,7 +4,8 @@ import ExternalLink from '@/components/ExternalLink'
 import { Page } from '@/components/page'
 import { PageHeader } from '@/components/page-header'
 import { Empty, TableSkeleton } from '@/components/states'
-import { useSignificance } from '@/contexts/store-context'
+import { ErrorPage } from '@/components/error-page'
+import { useCollectionCrumbs, useSignificance } from '@/contexts/store-context'
 import { ucsc } from '@/lib/links'
 import { fmtInt } from '@/lib/format'
 import { genesInRegion, type SearchHit } from '@/lib/queries'
@@ -12,20 +13,23 @@ import { ROW_LINK, ROW_LINK_TEXT, useRowLink } from '@/lib/row-link'
 
 export default function Region() {
   const sig = useSignificance()
+  const home = useCollectionCrumbs()
   const { loc = '' } = useParams()
   const m = /^(chr[0-9XY]+):(\d+)-(\d+)$/i.exec(loc)
   const [genes, setGenes] = useState<SearchHit[] | null>(null)
+  const [error, setError] = useState<unknown>(null)
   const rowLink = useRowLink()
   useEffect(() => {
     if (!m) return
-    setGenes(null)
-    genesInRegion(m[1], Number(m[2]), Number(m[3])).then(setGenes)
+    setGenes(null); setError(null)
+    genesInRegion(m[1], Number(m[2]), Number(m[3])).then(setGenes, e => { console.error(e); setError(e) })
   }, [loc]) // eslint-disable-line react-hooks/exhaustive-deps
   if (!m) return <Page><Empty label="Region must look like chr10:73000000-74500000." /></Page>
+  if (error) return <Page><ErrorPage title="The region's genes could not be loaded." error={error} /></Page>
   const [, chr, s, e] = m
   return (
     <Page>
-      <PageHeader crumbs={[{ label: 'Regions' }, { label: loc }]} title={<span className="tabular-nums">{chr}:{fmtInt(s)}-{fmtInt(e)}</span>} meta={`${fmtInt(Number(e) - Number(s))} bp`}
+      <PageHeader crumbs={[...home, { label: loc }]} title={<span className="tabular-nums">{chr}:{fmtInt(s)}-{fmtInt(e)}</span>} meta={`${fmtInt(Number(e) - Number(s))} bp`}
         description={<ExternalLink icon href={ucsc(chr, Number(s), Number(e))}>Open in UCSC</ExternalLink>} />
       {genes === null ? <TableSkeleton columns={[{ w: 'w-20' }, { w: 'w-32' }, { w: 'w-24', align: 'right' }, { w: 'w-20' }]} /> :
         genes.length === 0 ? <Empty label="No genes with a TSS in this region." /> : (

@@ -2,8 +2,8 @@
 
 `refget_store` opens (or builds) a refgetstore and writes `_tables/reference.json`: the seqcol
 collection digest and each chromosome's sequence digest. `variants_refcheck` then looks up every
-allele-bearing variant's reference bases and writes `_checks/refcheck/summary.json`. The manifest
-copies both into its `reference` block. None of this touches the pack format.
+allele-bearing variant's reference bases and writes `_checks/refcheck/summary.json` and the
+per-chromosome calls in `_tables/refcheck/`, which the TOPCHeF adapter orients by.
 """
 from __future__ import annotations
 
@@ -218,103 +218,3 @@ def variants_refcheck(cfg: Config) -> None:
         f"both {c['both']:,}, neither {c['neither']:,} (strand flip {c['strand_flip']:,}, on N {c['on_n']:,})")
     frac = check_threshold(c, minimum)
     log(f"variants_refcheck: cis match fraction {frac:.5f} (minimum {minimum})")
-
-
-def manifest_block(cfg: Config) -> dict:
-    """The manifest's `reference` block. Data about the release, not part of the pack format."""
-    for path, step in ((reference_json(cfg), "refget_store"), (refcheck_summary(cfg), "variants_refcheck")):
-        if not path.exists():
-            raise FileNotFoundError(f"manifest: {path.relative_to(cfg.derived)} is missing; run `build --step {step}`")
-    ref = json.loads(reference_json(cfg).read_text())
-    rc = json.loads(refcheck_summary(cfg).read_text())
-    if rc["collection"] != ref["refget"]["collection"]:
-        raise ValueError("manifest: refcheck ran against another collection; re-run `build --step variants_refcheck --force`")
-    cis, tr = rc["total"]["cis"], rc["total"]["trans_only"]
-    return {
-        "assembly": ref["assembly"],
-        "refget": {"collection": ref["refget"]["collection"], "store_url": ref["store_url"]},
-        "sequences": {c: {"digest": s["digest"], "length": s["length"]} for c, s in ref["sequences"].items()},
-        "allele_check": {
-            "cis_with_alleles": sum(cis[k] for k in ("a1", "a2", "both", "neither")),
-            "a1_is_reference": cis["a1"], "a2_is_reference": cis["a2"], "both": cis["both"], "neither": cis["neither"],
-            "trans_only_with_alleles": sum(tr[k] for k in ("a1", "a2", "both", "neither")),
-            "trans_only_neither": tr["neither"],
-            "min_match_fraction": rc["min_match_fraction"],
-            "source": f"{refcheck_summary(cfg).relative_to(cfg.derived)} (generated {rc['generated']})",
-        },
-    }
-
-
-def validate(cfg: Config, man: dict, check) -> None:
-    """The manifest's reference block agrees with the store and the refcheck summary, and names
-    every chromosome a pack does."""
-    import re
-    ref = man.get("reference")
-    if not ref or not ref.get("refget", {}).get("collection") or not ref.get("sequences"):
-        check(False, "manifest.reference has refget.collection and sequences (run `build --step manifest`)")
-        return
-    seqs = ref["sequences"]
-    digest_ok = re.compile(r"^[A-Za-z0-9_-]{32}$")
-    bad = [c for c, s in seqs.items() if not digest_ok.match(s.get("digest", ""))
-           or not isinstance(s.get("length"), int) or s["length"] <= 0]
-    bad += [] if digest_ok.match(ref["refget"]["collection"]) else ["collection"]
-    check(not bad, f"manifest.reference digests are 32-character sha512t24u and lengths positive ({bad[:3]})")
-
-    files = (man.get("packs") or {}).get("files") or {}
-    named = {c for kind in ("variants", "eqtl", "sqtl", "trans", "gwas", "hits") for c in files.get(kind, {})}
-    check(named <= set(seqs), f"every pack chromosome is in manifest.reference.sequences ({sorted(named - set(seqs))})")
-
-    store = open_store(cfg)
-    coll = ref["refget"]["collection"]
-    if store.get_collection_metadata(coll) is None:
-        check(False, f"the refgetstore holds collection {coll}")
-    else:
-        by_name = {r.metadata.name: r.metadata for r in store.get_collection(coll)}
-        wrong = [c for c, s in seqs.items() if c not in by_name
-                 or by_name[c].sha512t24u != s["digest"] or by_name[c].length != s["length"]]
-        check(not wrong, f"manifest.reference sequences match the store's collection {coll} ({wrong[:3]})")
-
-    rc_path = refcheck_summary(cfg)
-    if not rc_path.exists():
-        check(False, "_checks/refcheck/summary.json exists (run `build --step variants_refcheck`)")
-        return
-    rc = json.loads(rc_path.read_text())
-    minimum = float(cfg["reference"]["allele_check"]["min_match_fraction"])
-    frac = match_fraction(rc["total"]["cis"])
-    check(frac >= minimum, f"cis alleles match the reference for {frac:.5f} of variants (minimum {minimum})")
-    ac, cis = ref.get("allele_check", {}), rc["total"]["cis"]
-    same = (ac.get("a1_is_reference"), ac.get("a2_is_reference"), ac.get("both"), ac.get("neither")) == \
-           (cis["a1"], cis["a2"], cis["both"], cis["neither"])
-    check(same, "manifest.reference.allele_check equals _checks/refcheck/summary.json")
-
-    # a spot check with real bytes: the refcheck table's call for the paper's named variants has to
-    # agree with what the store actually reads at that position. Cheap, and it catches an off-by-one
-    # or a stale table that the aggregate counts would sail straight past.
-    spot_check(cfg, seqs, store, check)
-
-
-def spot_check(cfg: Config, seqs: dict, store, check) -> None:
-    """For each `paper_variants` entry, read the reference base from the store and confirm the
-    refcheck table called the same allele."""
-    wrong, checked = [], 0
-    for locus in cfg["paper_variants"]:
-        chrom, pos = str(locus).split(":")
-        pos = int(pos)
-        table = refcheck_table(cfg, chrom)
-        if chrom not in seqs or not table.exists():
-            continue
-        t = pq.read_table(table, columns=["position", "A1", "A2", "match"])
-        t = t.filter(pc.equal(t["position"], pos))
-        if not t.num_rows:
-            wrong.append(f"{chrom}:{pos} absent from {table.name}")
-            continue
-        base = store.get_substring(seqs[chrom]["digest"], pos - 1, pos).upper()
-        for row in t.to_pylist():
-            called, a1, a2 = row["match"], row["A1"], row["A2"]
-            want = {"a1": a1, "a2": a2, "both": a1}
-            if called in want and want[called][:1] != base:
-                wrong.append(f"{chrom}:{pos} {a1}/{a2} called {called} but the store reads {base}")
-            elif called == "neither" and base in (a1, a2):
-                wrong.append(f"{chrom}:{pos} {a1}/{a2} called neither but the store reads {base}")
-            checked += 1
-    check(not wrong, f"refcheck calls match reference bytes for {checked} paper variants ({wrong[:3]})")

@@ -63,7 +63,13 @@ const dataKind = url => (DATA_KINDS.find(([, re]) => re.test(url)) ?? ['other'])
 const OPTS = { query: null, latency: 0 }
 
 /** A page path with the run's extra query parameters (for example pack=1). */
+/** The experiments the pages open in (src/lib/scope.ts): TOPCHeF's eQTL cis scan, or its sQTL cis
+ *  scan for a `tab=sqtl` page, with the DCM GWAS chosen, so the pages read what the TOPCHeF app's
+ *  tabs do. Set in main from the target's store.json. */
+const PREFIX = { e: '', s: '' }
+
 function withQuery(path, query) {
+  path = (/[?&]tab=sqtl\b/.test(path) ? PREFIX.s : PREFIX.e) + path
   if (!query) return path
   const u = new URL(path, 'http://x')
   for (const [k, v] of new URLSearchParams(query)) u.searchParams.set(k, v)
@@ -713,6 +719,9 @@ async function main() {
   for (const id of ids) if (!allPages.some(p => p.id === id)) die(`unknown page id ${id}`)
   OPTS.query = args.query
   OPTS.latency = args.latency
+  const st = await (await fetch(`${target.dataBase}/store.json`)).json()
+  const at = id => `/c/${st.experiments[id].collection.replace(/\.json$/, '')}/e/${id}/gwas/dcm_jurgens2024_biobanks`
+  PREFIX.e = at('topchef_ge_cis'); PREFIX.s = at('topchef_leafcutter_cis')
   // --pages keeps its order, so `pair` navigates from the first id to the second
   const byId = new Map(allPages.map(p => [p.id, p]))
   const pages = ids.map(id => ({ ...byId.get(id), path: withQuery(byId.get(id).path, args.query) }))

@@ -38,12 +38,13 @@ def sites_table() -> pa.Table:
                      "match": pa.array(cols[10])})
 
 
-def build(d: Path, page_size: int = 2, table: pa.Table | None = None, chroms=("chr1", "chr2")):
+def build(d: Path, page_size: int = 2, table: pa.Table | None = None, chroms=("chr1", "chr2"),
+          version: int = qs.FORMAT_VERSION):
     rg = refgetstore(d / "refget")
     coll = rg.list_collections(page_size=10)["results"][0].digest
     st = qs.Store(d / "store")
     doc = cat.build(st, "cat1", table if table is not None else sites_table(), rg, coll, list(chroms),
-                    page_size=page_size)
+                    page_size=page_size, version=version)
     return st, rg, doc
 
 

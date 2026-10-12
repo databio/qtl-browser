@@ -1,58 +1,81 @@
 /**
  * Genes and phenotypes, per chromosome, in plain JS (SPEC sections 6 and 8). A page reads only the
- * chromosomes it shows: that chromosome's genes and exon models (annotation) and its search index
- * part (experiment), each one whole-object read per session that the browser cache keeps after. A
- * gene named in a URL is found through the gene lookup (two small range reads), so a first gene page
- * never reads a whole-genome table. The gene list and the search box need every chromosome; they
- * read the whole-genome genes table and search index instead (two requests rather than one per
- * chromosome), the first time they are used, and chromosomes not yet read come from those after.
+ * chromosomes it shows: that chromosome's genes and exon models (annotation) and, per experiment it
+ * shows, that experiment's search index part, each one whole-object read per session that the
+ * browser cache keeps after. A gene named in a URL is found through the gene lookup (two small range
+ * reads), so a first gene page never reads a whole-genome table. The gene list and the search box
+ * need every chromosome; they read the whole-genome genes table and the cis experiments' whole
+ * search indexes instead, the first time they are used, and chromosomes not yet read come from
+ * those after.
  *
- * `SearchHit` joins a gene's annotation row to its phenotypes on the same chromosome: its eQTL
- * phenotype (block, run, significance) and its sQTL counts. A gene's phenotypes are read from the
- * part of its annotation chromosome; a phenotype the experiment places on another chromosome than
- * its gene is not shown on the gene page (TOPCHeF and GTEx have none).
+ * One experiment is one scan and numbers its own rows (SPEC section 8), so a phenotype row here
+ * carries the experiment it came from, and an `ord` is only meaningful with it. `SearchHit` joins a
+ * gene's annotation row to its cis phenotypes on the same chromosome: its eQTL phenotype (block,
+ * run, significance) and its sQTL counts. A gene's phenotypes are read from the parts of its
+ * annotation chromosome; a phenotype the experiment places on another chromosome than its gene is
+ * not shown on the gene page (TOPCHeF has none).
  *
  * No query engine here: pages that only list or look up genes never start DuckDB.
  */
 import type { Table } from 'apache-arrow'
-import { chromExonModels, chromGenes, chromIndex, EQTL_TYPE, getStore, lookupGenes, partOfOrd, SQTL_TYPE, transOnlyIndex, wholeGenes,
-  wholeIndex } from './store'
+import { chromExonModels, chromGenes, EQTL_TYPE, experimentPart, getStore, lookupGenes, partKey, partOfOrd, SQTL_TYPE,
+  unplacedIndex, wholeExperimentIndex, wholeGenes, type QtlExperiment, type Store } from './store'
 import type { Exon, SearchHit, WindowGene } from './queries'
 
-/** A search index row (SPEC section 8, `results.INDEX_SCHEMA`). */
+/** A search index row (SPEC section 8), with the experiment it belongs to. A cis scan's rows carry
+ *  the block and run columns; a trans scan's the frame columns; the others are null. */
 export interface PhenotypeRow {
+  experiment: string
   ord: number; phenotype_type: string; phenotype_id: string; gene_id: string | null; chr: string | null
-  /** null when the experiment assessed no significance, which is not false (lib/significance.ts) */
+  /** null when the scan assessed no significance, which is not false (lib/significance.ts) */
   significant: boolean | null
-  /** the value the experiment's rule tested, whichever `permuted` column it names */
+  /** the value the scan's rule tested, whichever `permuted` column it names */
   sig_value: number | null
   blk_off: number | null; blk_len: number | null; var_start: number | null; n_var: number | null
   var_off: number | null; var_len: number | null; w_lo: number | null; w_hi: number | null
+  /** a cis run's strongest row: its decoded -log10 p (Infinity for a p of 0) and position; null
+   *  when no row has a p, or the index predates the columns */
+  lead_nlp: number | null; lead_pos: number | null
   trans_off: number | null; trans_len: number | null; n_trans: number | null
 }
 
 /** An annotation genes row (SPEC section 6). */
 export interface GeneRow { gene_id: string; version: number; name: string; biotype: string; chr: string; tss: number; strand: string; start: number; end: number }
 
-const PHENOTYPE_COLS = ['ord', 'phenotype_type', 'phenotype_id', 'gene_id', 'chr', 'significant', 'sig_value', 'blk_off', 'blk_len',
-  'var_start', 'n_var', 'var_off', 'var_len', 'w_lo', 'w_hi', 'trans_off', 'trans_len', 'n_trans']
+const SHARED_COLS = ['ord', 'phenotype_type', 'phenotype_id', 'gene_id', 'chr', 'significant', 'sig_value']
+const CIS_COLS = ['blk_off', 'blk_len', 'var_start', 'n_var', 'var_off', 'var_len', 'w_lo', 'w_hi']
+const LEAD_COLS = ['lead_nlp', 'lead_pos']
+const TRANS_COLS = ['trans_off', 'trans_len', 'n_trans']
 const GENE_COLS = ['gene_id', 'version', 'name', 'biotype', 'chr', 'tss', 'strand', 'start', 'end']
 
-/** Plain objects from an Arrow table's columns (nulls as null). */
-function rowsOf<T>(t: Table | null, cols: string[]): T[] {
+/** Plain objects from an Arrow table's columns (nulls as null). `cols` must exist; `optional` come
+ *  out null; `ifPresent` are read when the table has them and null when it does not (columns a
+ *  store built before them lacks). */
+function rowsOf<T>(t: Table | null, cols: string[], optional: string[] = [], extra: Record<string, unknown> = {},
+  ifPresent: string[] = []): T[] {
   if (!t) return []
   const vecs = cols.map(c => {
     const v = t.getChild(c)
     if (!v) throw new Error(`table has no column ${c}`)
     return v
   })
+  const maybe = ifPresent.map(c => [c, t.getChild(c)] as const)
   const out: T[] = new Array(t.numRows)
   for (let i = 0; i < t.numRows; i++) {
-    const o: Record<string, unknown> = {}
+    const o: Record<string, unknown> = { ...extra }
     for (let j = 0; j < cols.length; j++) o[cols[j]] = vecs[j].get(i) ?? null
+    for (const [c, v] of maybe) o[c] = v ? v.get(i) ?? null : null
+    for (const c of optional) o[c] = null
     out[i] = o as T
   }
   return out
+}
+
+/** A QTL experiment's index rows: its own columns, the other scope's as null, tagged with its id. */
+function phenotypeRows(e: QtlExperiment, t: Table | null): PhenotypeRow[] {
+  return e.kind === 'qtl_cis'
+    ? rowsOf<PhenotypeRow>(t, [...SHARED_COLS, ...CIS_COLS], TRANS_COLS, { experiment: e.id }, LEAD_COLS)
+    : rowsOf<PhenotypeRow>(t, [...SHARED_COLS, ...TRANS_COLS], [...CIS_COLS, ...LEAD_COLS], { experiment: e.id })
 }
 
 function memoBy<T>(make: (key: string) => Promise<T>): (key: string) => Promise<T> {
@@ -75,13 +98,18 @@ const group = <T>(xs: T[], key: (x: T) => string | null) => {
   return m
 }
 
-/** The whole-genome tables by chromosome, once `allHits` has asked for them (null before). Rows keep
- *  table order, which is the per-chromosome objects' order too (SPEC sections 6 and 8). */
+/** The whole-genome tables by chromosome, once `allHits` has asked for them (null before): the
+ *  genes table and each cis experiment's whole index. Rows keep table order, which is the
+ *  per-chromosome objects' order too (SPEC sections 6 and 8). */
 let whole: Promise<{ genes: Map<string, GeneRow[]>; phen: Map<string, PhenotypeRow[]> }> | null = null
 function readWhole() {
   if (!whole) {
-    const p = Promise.all([wholeGenes(), wholeIndex()]).then(([g, i]) => ({
-      genes: group(rowsOf<GeneRow>(g, GENE_COLS), r => r.chr), phen: group(rowsOf<PhenotypeRow>(i, PHENOTYPE_COLS), r => r.chr) }))
+    const p = getStore().then(async s => {
+      const cis = [...s.cis.values()]
+      const [g, ...idx] = await Promise.all([wholeGenes(), ...cis.map(e => wholeExperimentIndex(e.id))])
+      const rows = cis.flatMap((e, i) => phenotypeRows(e, idx[i]))
+      return { genes: group(rowsOf<GeneRow>(g, GENE_COLS), r => r.chr), phen: group(rows, r => r.chr) }
+    })
     whole = p
     p.catch(() => { if (whole === p) whole = null })
   }
@@ -94,29 +122,41 @@ const genesOf = memoBy(async chr => {
   return { genes, byId: new Map(genes.map(g => [g.gene_id, g])) }
 })
 
-/** One chromosome's search index rows, by gene id: its part, or the whole index once read. */
+/** One chromosome's **cis** search index rows across the study's cis experiments, by gene id: their
+ *  parts for that chromosome, or the whole indexes once read. `byOrd` is per experiment. */
 const phenotypesOf = memoBy(async chr => {
-  const rows = whole ? (await whole).phen.get(chr) ?? [] : rowsOf<PhenotypeRow>(await chromIndex(chr), PHENOTYPE_COLS)
+  const s = await getStore()
+  const rows = whole ? (await whole).phen.get(chr) ?? [] : await cisPartRows(s, chr)
+  return { rows, byGene: group(rows, r => r.gene_id), byOrd: ordMap(rows) }
+})
+
+async function cisPartRows(s: Store, chr: string): Promise<PhenotypeRow[]> {
+  const cis = [...s.cis.values()]
+  const parts = await Promise.all(cis.map(e => experimentPart(partKey(e.id, chr))))
+  return cis.flatMap((e, i) => phenotypeRows(e, parts[i]))
+}
+
+const ordMap = (rows: PhenotypeRow[]) => {
+  const m = new Map<string, Map<number, PhenotypeRow>>()
+  for (const r of rows) { let x = m.get(r.experiment); if (!x) { x = new Map(); m.set(r.experiment, x) } x.set(r.ord, r) }
+  return m
+}
+
+/** One trans experiment's rows on one chromosome part, or its unplaced residue (`chr` = 'unplaced'). */
+const transPartRows = memoBy(async key => {
+  const [expId, chr] = key.split('\t')
+  const s = await getStore()
+  const e = s.experiments.get(expId)
+  if (!e || e.kind !== 'qtl_trans') throw new Error(`no trans experiment ${expId}`)
+  const t = chr === 'unplaced' ? await unplacedIndex(expId) : await experimentPart(partKey(expId, chr))
+  const rows = phenotypeRows(e, t)
   return { rows, byGene: group(rows, r => r.gene_id), byOrd: new Map(rows.map(r => [r.ord, r])) }
 })
 
-const transOnly = (() => {
-  let p: Promise<{ rows: PhenotypeRow[]; byOrd: Map<number, PhenotypeRow> }> | null = null
-  return () => {
-    if (!p) {
-      const q = transOnlyIndex().then(t => { const rows = rowsOf<PhenotypeRow>(t, PHENOTYPE_COLS); return { rows, byOrd: new Map(rows.map(r => [r.ord, r])) } })
-      p = q
-      q.catch(() => { if (p === q) p = null })
-    }
-    return p
-  }
-})()
-
-/** The gene's search hit from its annotation row and its phenotypes on that chromosome: the rules of
- *  v1's former `search_index` table. `tested`: its eQTL phenotype has rows; `is_egene`: that
- *  phenotype is significant -- null both without an eQTL phenotype and when the experiment assessed
- *  no significance, which `tested` and `significanceOf().assessed` tell apart; `has_results`: any
- *  phenotype has a block. */
+/** The gene's search hit from its annotation row and its cis phenotypes on that chromosome.
+ *  `tested`: its eQTL phenotype has rows; `is_egene`: that phenotype is significant -- null both
+ *  without an eQTL phenotype and when the scan assessed no significance, which `tested` and
+ *  `significanceOf().assessed` tell apart; `has_results`: any phenotype has a block. */
 function hitOf(g: GeneRow, ps: PhenotypeRow[]): SearchHit {
   const e = ps.find(p => p.phenotype_type === EQTL_TYPE && p.blk_off != null) ?? null
   const sq = ps.filter(p => p.phenotype_type === SQTL_TYPE && p.blk_off != null)
@@ -139,11 +179,42 @@ export const chromHits = memoBy(async (chr): Promise<SearchHit[]> => {
 })
 
 /** Every annotated gene on every catalog chromosome (the gene list and the search box): the
- *  whole-genome genes table and search index, read once (chromosomes already read keep theirs). */
+ *  whole-genome genes table and the cis indexes, read once (chromosomes already read keep theirs). */
 export async function allHits(): Promise<SearchHit[]> {
   const s = await getStore()
   await readWhole()
   return (await Promise.all([...s.chroms.keys()].map(chromHits))).flat()
+}
+
+/** A study locus for the collection page: a phenotype's strongest cis row, with its gene. */
+export interface TopLocus {
+  gene_id: string | null; symbol: string | null; phenotype_type: string; phenotype_id: string
+  chr: string; lead_pos: number; lead_nlp: number
+}
+
+/** A study's strongest loci across its cis scans, by each phenotype's lead -log10 p (the index's
+ *  `lead_nlp`; `sig_value` cannot rank them, since a permutation p floors). One per gene, and none
+ *  within `spacing` bp of a stronger one on its chromosome, so one region does not fill the list.
+ *  Reads what the search box reads: the whole-genome genes table and each cis scan's whole index.
+ *  Empty when the indexes predate the lead columns. */
+export async function topLoci(n = 20, spacing = 1_000_000): Promise<TopLocus[]> {
+  const w = await readWhole()
+  const name = new Map<string, string>()
+  for (const gs of w.genes.values()) for (const g of gs) name.set(g.gene_id, g.name)
+  const rows = [...w.phen.values()].flat().filter(r => r.lead_nlp != null && r.lead_pos != null && r.chr != null)
+  // Infinity (a p of 0) sorts first; the comparison avoids Infinity - Infinity
+  rows.sort((a, b) => (b.lead_nlp! > a.lead_nlp! ? 1 : b.lead_nlp! < a.lead_nlp! ? -1 : 0))
+  const out: TopLocus[] = []
+  const genes = new Set<string>()
+  for (const r of rows) {
+    if (out.length >= n) break
+    if (r.gene_id && genes.has(r.gene_id)) continue
+    if (out.some(x => x.chr === r.chr && Math.abs(x.lead_pos - r.lead_pos!) < spacing)) continue
+    if (r.gene_id) genes.add(r.gene_id)
+    out.push({ gene_id: r.gene_id, symbol: r.gene_id ? name.get(r.gene_id) ?? null : null, phenotype_type: r.phenotype_type,
+      phenotype_id: r.phenotype_id, chr: r.chr!, lead_pos: r.lead_pos!, lead_nlp: r.lead_nlp! })
+  }
+  return out
 }
 
 /** The gene a URL names by Ensembl id or symbol (ASCII case ignored), preferring a gene with results,
@@ -195,30 +266,41 @@ export async function exonModel(geneId: string, chr: string): Promise<Exon[]> {
   return []
 }
 
-/** The gene's phenotypes on `chr`, by ord. */
+/** The gene's cis phenotypes on `chr` (every cis experiment), by (experiment, ord). */
 export async function phenotypesOfGene(geneId: string, chr: string): Promise<PhenotypeRow[]> {
-  return [...((await phenotypesOf(chr)).byGene.get(geneId) ?? [])].sort((a, b) => a.ord - b.ord)
+  return [...((await phenotypesOf(chr)).byGene.get(geneId) ?? [])]
+    .sort((a, b) => (a.experiment < b.experiment ? -1 : a.experiment > b.experiment ? 1 : a.ord - b.ord))
 }
 
-/** The gene's phenotypes with trans rows: those on `chr` and its trans-only phenotypes. */
+/** The gene's phenotypes with trans rows, from each trans experiment: its part for the gene's
+ *  chromosome (where the builder files a phenotype by its gene's chromosome), then the unplaced
+ *  residue for any phenotype of the gene the annotation could not place. */
 export async function transPhenotypesOfGene(geneId: string, chr: string): Promise<PhenotypeRow[]> {
-  const [p, t] = await Promise.all([phenotypesOf(chr), transOnly()])
-  return [...(p.byGene.get(geneId) ?? []), ...t.rows.filter(r => r.gene_id === geneId)].filter(r => r.trans_off != null)
+  const s = await getStore()
+  const out: PhenotypeRow[] = []
+  await Promise.all([...s.trans.values()].map(async e => {
+    const [part, unplaced] = await Promise.all([transPartRows(partKey(e.id, chr)),
+      e.search_index_unplaced ? transPartRows(partKey(e.id, 'unplaced')) : null])
+    out.push(...(part.byGene.get(geneId) ?? []), ...(unplaced?.byGene.get(geneId) ?? []))
+  }))
+  return out.filter(r => r.trans_off != null)
 }
 
-/** Phenotypes by ord (the hits files name them so), read from the parts that hold them. */
-export async function phenotypesByOrd(ords: number[]): Promise<Map<number, PhenotypeRow>> {
-  const s = await getStore()
-  const parts = new Map<string | null, number[]>()
+/** Phenotypes by ord within one experiment (its hits files name them so), read from the parts that
+ *  hold them. */
+export async function phenotypesByOrd(e: QtlExperiment, ords: number[]): Promise<Map<number, PhenotypeRow>> {
+  const parts = new Map<string, number[]>()
   for (const o of new Set(ords)) {
-    const p = partOfOrd(s, o)
-    if (p === undefined) throw new Error(`the search index has no phenotype with ord ${o}`)
+    const p = partOfOrd(e, o)
+    if (p === undefined) throw new Error(`experiment ${e.id}: the search index has no phenotype with ord ${o}`)
     const a = parts.get(p)
     if (a) a.push(o); else parts.set(p, [o])
   }
   const out = new Map<number, PhenotypeRow>()
   await Promise.all([...parts].map(async ([p, os]) => {
-    const byOrd = p === null ? (await transOnly()).byOrd : (await phenotypesOf(p)).byOrd
+    const byOrd = e.kind === 'qtl_cis'
+      ? (await phenotypesOf(p)).byOrd.get(e.id) ?? new Map<number, PhenotypeRow>()
+      : (await transPartRows(partKey(e.id, p))).byOrd
     for (const o of os) { const r = byOrd.get(o); if (r) out.set(o, r) }
   }))
   return out

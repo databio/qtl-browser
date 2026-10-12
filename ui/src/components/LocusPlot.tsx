@@ -14,6 +14,8 @@ import { clearPlotHover, onPlotPointerMove, useHoverOverlay, type HoverLookup, t
 import { useOpenPath } from '@/lib/row-link'
 import { rsFromNumber } from '@/lib/format'
 import ExportMenu from '@/components/ExportMenu'
+import { Empty } from '@/components/states'
+import { toastError } from '@/lib/toast'
 
 export interface LocusSpec {
   hit: SearchHit
@@ -252,8 +254,7 @@ export default function LocusPlot({ spec, onCount, onLegend, onActions, onCredib
         setBrushSel(Selection.intersect())
         setTableName(table)
       } catch (e) {
-        console.error(e)
-        if (alive) { setState('error'); onTable?.(null, true) }
+        if (alive) { setState('error'); onTable?.(null, true); toastError('The locus window could not be loaded.', e) }
       }
     })()
     return () => {
@@ -322,8 +323,8 @@ export default function LocusPlot({ spec, onCount, onLegend, onActions, onCredib
       setReadyFor(key)
       performance.mark('locus:drawn', { detail: key })
     } catch (e) {
-      console.error(e)
       setState('error')
+      toastError('The locus plot could not be drawn.', e)
     }
     return () => { el.replaceChildren(); brushInteractor.current = null }
   }, [tableName, link, brushSel, width, dark, yMax, nColoc, spec.tss, spec.hit.chr])
@@ -364,7 +365,7 @@ export default function LocusPlot({ spec, onCount, onLegend, onActions, onCredib
           as its content, so a hidden gene track leaves no blank strip under the scatter */}
       <div ref={column} className={`relative min-w-0 flex-1 ${state === 'loading' ? 'min-h-[340px]' : ''}`}>
         {state === 'loading' && <LocusSkeleton chr={spec.hit.chr} />}
-        {state === 'error' && <div className="p-4 text-sm text-error">Could not draw the locus.</div>}
+        {state === 'error' && <Empty label="The locus could not be drawn." />}
         <div ref={host} className={`plot-host ${state === 'ready' ? '' : 'invisible'} ${click.className}`}
           onPointerMove={onPlotPointerMove} onPointerLeave={clearPlotHover}
           onPointerUp={click.onPointerUp}
@@ -385,7 +386,7 @@ export default function LocusPlot({ spec, onCount, onLegend, onActions, onCredib
       <div ref={compareCol} className="shrink-0" style={{ width: SCATTER_H }}>
         {!hasGwas
           ? <div className="flex h-full items-center rounded-lg border border-base-300 p-4 text-center text-sm text-base-content/60" style={{ height: SCATTER_H }}>
-              QTL versus DCM GWAS: not available in this data release yet.</div>
+              Choose a GWAS to compare it with this locus.</div>
           : state === 'ready' && tableName && link && brushSel
           ? <LocusCompare table={tableName} dark={dark} size={Math.min(SCATTER_H, Math.max(width, 200))} yDomain={[0, yMax]} link={link} brush={brushSel} click={click} lookup={lookup} hasColoc={nColoc > 0} />
           : <CompareSkeleton />}
@@ -425,7 +426,7 @@ function LocusDetail({ table, brush, dark, width, yMax, tss, chr, hasColoc }: {
       ) as HTMLElement
       el.replaceChildren(plot)
     } catch (e) {
-      console.error(e)
+      toastError('The locus plot could not be drawn.', e)
     }
     return () => { el.replaceChildren() }
   }, [table, brush, dark, width, yMax, tss, chr, hasColoc])

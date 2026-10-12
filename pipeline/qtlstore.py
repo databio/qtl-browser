@@ -24,7 +24,8 @@ from pathlib import Path
 
 import numpy as np
 
-FORMAT_VERSION = 1
+FORMAT_VERSION = 2                 # the version written when a caller names none: the p/beta/se triple
+SUPPORTED_VERSIONS = (1, 2)        # versions this reader accepts; 1 is the live store until the v2 release
 
 # ---- digest -----------------------------------------------------------------------------------
 DIGEST = re.compile(r"^[A-Za-z0-9_-]{32}$")
@@ -59,9 +60,17 @@ KIND_OVERLAP = 11                        # catalog overlap index (section 19), i
 ALL = "all"                        # header chromosome of objects spanning a whole variant catalog (seq_digest: the collection) or annotation (its identity)
 
 
-def file_header(kind: int, chrom: str, count: int, page_size: int, n_cis: int, seq_digest: str) -> bytes:
+def file_header(kind: int, chrom: str, count: int, page_size: int, n_cis: int, seq_digest: str,
+                version: int = FORMAT_VERSION) -> bytes:
     """64 bytes. `seq_digest` names the exact sequence the file's positions index, so a pack found
-    alone still says which genome it belongs to."""
+    alone still says which genome it belongs to.
+
+    `version` is the layout of the file's *body*, not a property of this header, and every builder
+    threads it from the codec it encodes with. It has to be a parameter rather than a module
+    constant because a GWAS block carries no magic of its own (unlike `QGB2`/`QTT3`), so this byte
+    is the only thing in a `.qbg` that says which codec wrote its rows."""
+    if version not in SUPPORTED_VERSIONS:
+        raise ValueError(f"file header: version {version} not in {SUPPORTED_VERSIONS}")
     if not 1 <= kind <= 255:
         raise ValueError(f"file header: kind {kind} not in 1..255")
     try:
@@ -75,7 +84,7 @@ def file_header(kind: int, chrom: str, count: int, page_size: int, n_cis: int, s
             raise ValueError(f"file header: {field} {v} does not fit u32")
     if not DIGEST.match(seq_digest):
         raise ValueError(f"file header: seq_digest {seq_digest!r} is not a 32-character sha512t24u")
-    return _HEADER.pack(MAGIC_FILE, kind, FORMAT_VERSION, HEADER_LEN, name.ljust(8, b"\0"), count, page_size, n_cis,
+    return _HEADER.pack(MAGIC_FILE, kind, version, HEADER_LEN, name.ljust(8, b"\0"), count, page_size, n_cis,
                         seq_digest.encode("ascii"))
 
 
@@ -85,8 +94,8 @@ def parse_file_header(b: bytes) -> dict:
     magic, kind, version, hlen, name, count, page_size, n_cis, sd = _HEADER.unpack_from(b, 0)
     if magic != MAGIC_FILE:
         raise ValueError(f"file header: magic {magic!r} is not {MAGIC_FILE!r}")
-    if version != FORMAT_VERSION:
-        raise ValueError(f"file header: version {version}, this reader supports {FORMAT_VERSION}")
+    if version not in SUPPORTED_VERSIONS:
+        raise ValueError(f"file header: version {version}, this reader supports {SUPPORTED_VERSIONS}")
     if hlen != HEADER_LEN:
         raise ValueError(f"file header: header length {hlen} != {HEADER_LEN}")
     if any(b[60:64]):
@@ -99,6 +108,17 @@ def parse_file_header(b: bytes) -> dict:
         raise ValueError(f"file header: bad seq_digest field {sd!r}")
     return {"kind": kind, "version": version, "chrom": chrom.decode("ascii"), "count": count,
             "page_size": page_size, "n_cis": n_cis, "seq_digest": seq_digest}
+
+
+def codec_for(version: int):
+    """The codec module a header version names, so every builder and every CLI resolves it one way.
+    Imported late: this module is the format core and hashing some bytes should not pull in Arrow
+    and scipy behind the codecs."""
+    from . import packfmt_v1, packfmt_v2
+    try:
+        return {packfmt_v1.FORMAT_VERSION: packfmt_v1, packfmt_v2.FORMAT_VERSION: packfmt_v2}[version]
+    except KeyError:
+        raise ValueError(f"no codec for format version {version}") from None
 
 
 # ---- variant catalog identity -----------------------------------------------------------------
@@ -157,8 +177,8 @@ def orient_to_ref(ref_base, effect_allele, other_allele, beta, af) -> dict:
         9,998,282, so our 1,282,725 palindromic sites never join. Cis `af` averages 0.2420 with median
         0.1318 over SNPs, a minor/ALT distribution, not a REF one. EVIDENCE.md A.11.
 
-    `beta` rides along with `af` by construction: `steps_nominal` copies `n.af` and `n.slope` unchanged
-    from one tensorQTL nominal row, and tensorQTL codes both against the same dosage allele.
+    `beta` rides along with `af` by construction: the adapter copies `af` and `slope` unchanged from
+    one tensorQTL nominal row, and tensorQTL codes both against the same dosage allele.
 
     So reorienting a TOPCHeF v0 store to ref/alt is a relabelling. It is **not** a sign flip. A rebuild
     whose slopes come out negated genome-wide is wrong, not "oriented".
@@ -180,7 +200,67 @@ def orient_to_ref(ref_base, effect_allele, other_allele, beta, af) -> dict:
 # ---- store ------------------------------------------------------------------------------------
 CATALOGS = "variant_catalogs"            # pointer level of variant catalogs (store.json key too)
 OVERLAPS = "overlaps"                    # pointer level of catalog overlap indexes (derived)
-POINTER_DIRS = (CATALOGS, "annotations", "experiments", OVERLAPS)
+COLOCS = "colocs"                        # pointer level of coloc lists (optional, one per declared pair)
+POINTER_DIRS = (CATALOGS, "annotations", "experiments", OVERLAPS, COLOCS)
+
+# ---- experiment kind, and collections ----------------------------------------------------------
+# `plans/2026-10-07-experiment-model.md`. One experiment is one scan: a cis QTL scan, a trans QTL
+# scan, or a GWAS. A cohort that published eQTL and sQTL, cis and trans, is four experiments.
+#
+# `kind` is a **closed** enum, deliberately, and the rule it follows is worth stating because it
+# decides where a future axis goes: *open where the value is a label, closed where the value selects
+# a layout*. `phenotype_type` is open and always was (SPEC section 8, "data, not a file kind"), which
+# is why `protein_somalogic` cost no format change. `kind` picks which object kind to expect, which
+# fields exist and whether there is an annotation, so a reader cannot shrug at one it does not know:
+# it would show a partial store as though it were complete. Adding a kind is a version bump.
+EXPERIMENT_KINDS = ("qtl_cis", "qtl_trans", "gwas")
+QTL_KINDS = ("qtl_cis", "qtl_trans")
+
+# A collection is a **field, not an entity** (D16): experiments carrying the same value are in the
+# same collection, and membership is derived rather than declared. The value is the object name of a
+# small immutable JSON document holding the publication's title, citation and source -- a digest, so
+# equality *proves* identical metadata and there is nothing to keep in agreement. It is an object
+# name rather than a bare digest so `object_names` sees it and `gc` protects it.
+#
+# What validate does **not** check (D24): that members agree on anything. A collection is provenance,
+# not a compatibility claim -- one publication may release a GRCh37 eQTL scan and a GRCh38 pQTL scan,
+# as MESA does. The burden is the reader's: never put two experiments on one axis without comparing
+# their catalogs.
+COLLECTION_EXT = "json"
+COLLECTION_FIELDS = ("title", "citation", "source", "parent")
+MAX_COLLECTION_DEPTH = 16          # a parent chain this deep is a mistake, not a hierarchy
+
+# Optional facets on an experiment document (SPEC section 8): plain labels a browser filters and
+# describes by, no ontology ids. On the experiment, not the collection, because one publication can
+# span tissues (GTEx) and ancestries (ARIC). Every key is optional; an absent key means "not stated".
+FACET_KEYS = ("organ", "tissue", "cell_type", "ancestry", "n_samples", "assay", "sex", "condition", "trait")
+
+
+def check_facets(facets) -> list[str]:
+    """What is wrong with an experiment's `facets`, as strings (empty = fine): an object whose keys
+    are FACET_KEYS, `n_samples` a positive integer and every other value a non-empty string."""
+    if not isinstance(facets, dict):
+        return [f"facets is {type(facets).__name__}, not an object"]
+    out = [f"facets: unknown key {k!r}" for k in facets if k not in FACET_KEYS]
+    for k, v in facets.items():
+        if k == "n_samples":
+            if isinstance(v, bool) or not isinstance(v, int) or v < 1:
+                out.append(f"facets: n_samples {v!r} is not a positive integer")
+        elif k in FACET_KEYS and (not isinstance(v, str) or not v.strip()):
+            out.append(f"facets: {k} {v!r} is not a non-empty string")
+    return out
+
+
+def with_facets(doc: dict, facets: dict | None) -> dict:
+    """The experiment document with `facets` set to the given ones (dropped when there are none),
+    after checking them. Builders and `set-facets` both go through here."""
+    out = {k: v for k, v in doc.items() if k != "facets"}
+    if facets:
+        bad = check_facets(facets)
+        if bad:
+            raise ValueError(f"experiments/{doc.get('id')}: " + "; ".join(bad))
+        out["facets"] = dict(facets)
+    return out
 
 
 class Store:
@@ -188,6 +268,7 @@ class Store:
         self.root = Path(root)
         self.immutable = self.root / "immutable"
         self.notes = []                 # what the last validate() could not check, and why
+        self._version = None            # store.json's format_version, set by validate()
 
     def put(self, src: Path | bytes, ext: str) -> str:
         """Copy bytes into immutable/ under their digest; returns the object name `<digest>.<ext>`."""
@@ -213,11 +294,87 @@ class Store:
             raise ValueError(f"{level}/{pid}: objects not in the store (write objects first): {missing[:3]}")
         return _write_json(self.root / level / f"{pid}.json", doc)
 
-    def write_store(self, name: str, refget: list[str]) -> Path:
-        """store.json last: it lists whatever pointers exist now."""
-        ids = {lvl: sorted(p.stem for p in (self.root / lvl).glob("*.json")) for lvl in POINTER_DIRS}
-        return _write_json(self.root / "store.json", {"name": name, "format_version": FORMAT_VERSION,
-                                                      "refget": refget, **ids})
+    def write_collection(self, title: str, citation: dict | None = None, source: dict | None = None,
+                         parent: str | None = None) -> str:
+        """Put a collection document and return its object name, which is what an experiment's
+        `collection` field holds. Two publications with identical metadata collapse to one object,
+        which is correct: they would be the same collection."""
+        if not title or not isinstance(title, str):
+            raise ValueError("collection: a title is required")
+        if parent is not None and not OBJECT_NAME.match(parent):
+            raise ValueError(f"collection: parent {parent!r} is not an object name")
+        if parent is not None and not (self.immutable / parent).exists():
+            raise ValueError(f"collection: parent {parent} is not in the store (write it first)")
+        doc = {"title": title, "citation": citation or {}, "source": source or {}, "parent": parent}
+        return self.put(json.dumps(doc, indent=1, sort_keys=True).encode(), COLLECTION_EXT)
+
+    def collection_chain(self, name: str) -> list[str]:
+        """A collection's object name followed by its ancestors, nearest first.
+
+        Raises on a missing member, a document that does not parse, or a cycle. Content addressing
+        makes a cycle impossible among well-formed objects -- each name depends on the other's
+        bytes -- so the loop and depth checks only ever fire on a store whose object bytes no longer
+        match their names, which `validate` reports separately. They are here so this function
+        terminates on such a store rather than spinning."""
+        out, seen = [], set()
+        cur = name
+        while cur is not None:
+            if not OBJECT_NAME.match(cur):
+                raise ValueError(f"collection: {cur!r} is not an object name")
+            if cur in seen:
+                raise ValueError(f"collection: parent chain loops at {cur}")
+            if len(out) >= MAX_COLLECTION_DEPTH:
+                raise ValueError(f"collection: parent chain deeper than {MAX_COLLECTION_DEPTH}")
+            p = self.immutable / cur
+            if not p.exists():
+                raise ValueError(f"collection {cur}: object missing")
+            seen.add(cur)
+            out.append(cur)
+            try:
+                doc = json.loads(p.read_text())
+            except Exception as e:                # noqa: BLE001 -- any parse failure is a failure
+                raise ValueError(f"collection {cur}: {e}") from None
+            if not isinstance(doc, dict) or not doc.get("title"):
+                raise ValueError(f"collection {cur}: no title")
+            cur = doc.get("parent")
+        return out
+
+    def write_store(self, name: str, refget: list[str], version: int = FORMAT_VERSION, *,
+                    collection: str | None = None) -> Path:
+        """store.json last: it lists whatever pointers exist now. `version` must be the version every
+        object's header declares -- `validate` compares the two, which is what turns a store built
+        half with one codec and half with another into a failure rather than a surprise.
+
+        `collection` is the store's sequence collection, the seqcol digest every position in it sits
+        on; a build passes the configured one. Every variant catalog must name it, so a catalog on
+        another reference stops the write. Without one, the catalogs' own is taken when they agree,
+        and a store with no catalogs records none.
+
+        Experiments are a **map**, not a list, carrying each one's `kind` and `collection` (D19). It
+        is generated from the documents on disk, like every other entry here, so it is a derived
+        index rather than a second place the truth lives -- `validate` checks the two agree. It earns
+        its place by being free: `store.json` is the first fetch on every page load, so a reader can
+        group experiments into collections and route by kind without opening anything, and at ~68
+        bytes an entry 100 experiments come to ~12 KB, 2.3 KB gzipped."""
+        if version not in SUPPORTED_VERSIONS:
+            raise ValueError(f"store.json: format_version {version} not in {SUPPORTED_VERSIONS}")
+        ids = {lvl: sorted(p.stem for p in (self.root / lvl).glob("*.json")) for lvl in POINTER_DIRS
+               if lvl != "experiments"}
+        exps = {}
+        for p in sorted((self.root / "experiments").glob("*.json")):
+            doc = json.loads(p.read_text())
+            exps[p.stem] = {"kind": doc.get("kind"), "collection": doc.get("collection")}
+        named = {cid: self.load(CATALOGS, cid).get("collection_digest") for cid in ids[CATALOGS]}
+        if collection is None and len(set(named.values())) > 1:
+            raise ValueError(f"store.json: variant catalogs span sequence collections {named}")
+        collection = collection or next(iter(named.values()), None)
+        off = {cid: c for cid, c in named.items() if c != collection}
+        if off:
+            raise ValueError(f"store.json: variant catalogs {off} are not on the store's sequence collection "
+                             f"{collection}")
+        return _write_json(self.root / "store.json", {"name": name, "format_version": version,
+                                                      "refget": refget, "collection_digest": collection,
+                                                      "experiments": exps, **ids})
 
     def load(self, level: str, pid: str) -> dict:
         return json.loads((self.root / level / f"{pid}.json").read_text())
@@ -230,6 +387,7 @@ class Store:
         and rsID indexes with chromosome `all` and the variant catalog's collection digest --, a GWAS bin summary
         decodes and passes `gwas.check_bins` on chromosomes that have GWAS files, every trans object's
         frames tile it and each gene's frames are one contiguous range (`results.check_trans_layout`), every variant catalog
+        is on `store.json`'s `collection_digest` and the refgetstore holds that collection, every variant catalog
         chromosome is a sequence the refgetstore holds at the recorded length, and every variant catalog identity
         digest recomputes from the variant catalog's own sites.
 
@@ -251,8 +409,10 @@ class Store:
         store = self._refgetstore(refget)
         fails = []
         st = json.loads((self.root / "store.json").read_text())
-        if st.get("format_version") != FORMAT_VERSION:
-            fails.append(f"store.json: format_version {st.get('format_version')}")
+        self._version = st.get("format_version")
+        if self._version not in SUPPORTED_VERSIONS:
+            fails.append(f"store.json: format_version {self._version} not in {SUPPORTED_VERSIONS}")
+            self._version = None            # nothing to compare the headers against
         docs = {}
         for lvl in POINTER_DIRS:
             for pid in st.get(lvl, []):
@@ -267,8 +427,13 @@ class Store:
                         fails.append(f"{lvl}/{pid}: object {n} missing")
                     elif sha512t24u_file(obj) != OBJECT_NAME.match(n)["digest"]:
                         fails.append(f"{lvl}/{pid}: object {n} bytes do not match its name")
+        fails += self._check_experiment_map(st, docs)
+        fails += self._check_store_collection(st, store)
         for (lvl, pid), doc in docs.items():
             if lvl == CATALOGS:
+                if doc.get("collection_digest") != st.get("collection_digest"):
+                    fails.append(f"variant_catalogs/{pid}: collection_digest {doc.get('collection_digest')!r} != "
+                                 f"store.json collection_digest {st.get('collection_digest')!r}")
                 for c in doc["chromosomes"]:
                     fails += self._check_header(f"variant_catalogs/{pid} {c['name']}", c["file"], c["name"], c["seq_digest"],
                                                 KIND_VARIANTS)
@@ -287,36 +452,41 @@ class Store:
                 fails += annotation.check_split(self, doc)
             if lvl == OVERLAPS:
                 fails += self._check_overlap(pid, doc, docs)
+            if lvl == COLOCS:
+                from . import coloc            # late, as for overlap
+                fails += coloc.check(self, pid, doc, docs)
             if lvl != "experiments":
                 continue
+            if "facets" in doc:
+                fails += [f"experiments/{pid}: {x}" for x in check_facets(doc["facets"])]
             cat = docs.get((CATALOGS, doc["catalog"]))
             if cat is None:
                 fails.append(f"experiments/{pid}: variant catalog {doc['catalog']!r} not in store")
                 continue
-            if ("annotations", doc["annotation"]) not in docs:
-                fails.append(f"experiments/{pid}: annotation {doc['annotation']!r} not in store")
+            # a GWAS has no gene annotation: its one phenotype is a trait, not a gene
+            if doc.get("kind") in QTL_KINDS and ("annotations", doc.get("annotation")) not in docs:
+                fails.append(f"experiments/{pid}: annotation {doc.get('annotation')!r} not in store")
             if doc.get("catalog_identity") != cat.get("identity_digest"):
                 fails.append(f"experiments/{pid}: catalog_identity {doc.get('catalog_identity')!r} != variant catalog "
                              f"{doc['catalog']!r} identity_digest {cat.get('identity_digest')!r}")
             table = {c["name"]: c["seq_digest"] for c in cat["chromosomes"]}
-            files = [(f"{r['phenotype_type']} {chrom}", chrom, n, KIND_RESULTS)
-                     for r in doc["results"] for chrom, n in r["files"].items()]
+            # one experiment is one scan, so its per-chromosome objects are its own `files`
+            per_chrom_kind = KIND_GWAS if doc.get("kind") == "gwas" else KIND_RESULTS
+            files = [(f"{doc.get('kind')} {chrom}", chrom, n, per_chrom_kind)
+                     for chrom, n in (doc.get("files") or {}).items()]
             files += [(f"hits {chrom}", chrom, n, KIND_HITS) for chrom, n in (doc.get("hits") or {}).items()]
-            gw = doc.get("gwas") or {}
-            files += [(f"gwas {chrom}", chrom, n, KIND_GWAS) for chrom, n in (gw.get("files") or {}).items()]
             for what, chrom, n, kind in files:
                 if chrom not in table:
                     fails.append(f"experiments/{pid} {what}: {chrom} not in variant catalog table")
                 else:
                     fails += self._check_header(f"experiments/{pid} {what}", n, chrom, table[chrom], kind)
             # objects that span the whole variant catalog: chromosome `all`, the collection digest
-            wide = [(f"trans {r['phenotype_type']}", r["trans"]["file"], KIND_TRANS)
-                    for r in doc["results"] if r.get("trans")]
-            wide += [("gwas index", gw["index"], KIND_GWAS_INDEX)] if gw.get("index") else []
+            wide = [("trans", doc["file"], KIND_TRANS)] if doc.get("file") else []
+            wide += [("gwas index", doc["index"], KIND_GWAS_INDEX)] if doc.get("index") else []
             for what, n, kind in wide:
                 fails += self._check_header(f"experiments/{pid} {what}", n, ALL, cat.get("collection_digest"), kind)
             # trans frames tile each object and each gene's frames are one contiguous range
-            tfiles = [r["trans"]["file"] for r in doc["results"] if r.get("trans")]
+            tfiles = [doc["file"]] if doc.get("kind") == "qtl_trans" and doc.get("file") else []
             if tfiles and all((self.immutable / n).exists() for n in tfiles + [doc["search_index"]]):
                 from . import results     # late, as for gwas below
                 rows = results.load_index(self, doc).to_pylist()
@@ -326,8 +496,9 @@ class Store:
             if doc.get("search_index") and (self.immutable / doc["search_index"]).exists():
                 from . import results
                 fails += results.check_split(self, doc, cat)
+                fails += results.check_leads(self, doc, cat)
             # the GWAS bin summary (an Arrow object, no header): schema, bins, chromosomes with GWAS rows
-            bins = gw.get("bins")
+            bins = doc.get("bins") if doc.get("kind") == "gwas" else None
             if bins and (self.immutable / bins["file"]).exists():
                 from . import gwas     # late: the Arrow stack is not needed to hash bytes
                 what = f"experiments/{pid} gwas bins"
@@ -337,7 +508,7 @@ class Store:
                     fails.append(f"{what}: {e}")
                 else:
                     fails += [f"{what}: {x}" for x in gwas.check_bins(t, cat, bins.get("bin_bp", 0), bins.get("n_bins", -1))]
-                    extra = sorted(set(t.column("chr").to_pylist()) - set(gw.get("files") or {}))
+                    extra = sorted(set(t.column("chr").to_pylist()) - set(doc.get("files") or {}))
                     if extra:
                         fails.append(f"{what}: chromosomes {extra} have bins and no GWAS file")
             # a hits file's frame table covers exactly the chromosome's variants (u32 at byte 24)
@@ -347,6 +518,7 @@ class Store:
                 if chrom in counts and obj.exists():
                     with open(obj, "rb") as f:
                         h = parse_file_header(f.read(HEADER_LEN))
+                    fails += self._check_version(f"experiments/{pid} hits {chrom}", h)
                     if h["n_cis"] != counts[chrom] or h["page_size"] < 1:
                         fails.append(f"experiments/{pid} hits {chrom}: header covers {h['n_cis']} variants in frames "
                                      f"of {h['page_size']}; the variant catalog has {counts[chrom]}")
@@ -380,6 +552,7 @@ class Store:
         except Exception as e:                 # noqa: BLE001 -- any decode failure is a validation failure
             return fails + [f"{what}: {e}"]
         h = d["header"]
+        fails += self._check_version(what, h)
         if h["kind"] != KIND_OVERLAP or h["chrom"] != "all" or h["seq_digest"] != doc.get("collection_digest"):
             fails.append(f"{what}: header kind {h['kind']}, chromosome {h['chrom']}, seq_digest {h['seq_digest']}")
         if d["k"] != len(named):
@@ -394,6 +567,59 @@ class Store:
                 fails.append(f"{what}: catalog {c['id']} has {total} set bits for {c['n_sites']} sites")
         return fails
 
+    def _check_experiment_map(self, st: dict, docs: dict) -> list[str]:
+        """`store.json`'s `experiments` map against the documents it was generated from (D19), each
+        `kind` against the closed enum, and each `collection` chain.
+
+        Deliberately absent: any check that the experiments sharing a collection agree with one
+        another (D24). A collection records who published what together, not that the results are
+        comparable. Every experiment sits on the store's one sequence collection, but two can still
+        sit on different catalogs, so a reader that puts two experiments on one axis compares their
+        catalogs itself."""
+        fails = []
+        m = st.get("experiments")
+        if m is None:
+            return ["store.json: no experiments entry"]
+        if not isinstance(m, dict):
+            return [f"store.json: experiments is a {type(m).__name__}, expected a map of id -> "
+                    "{kind, collection}"]
+        chains: dict[str, list[str] | str] = {}
+        for pid, entry in m.items():
+            doc = docs.get(("experiments", pid))
+            if doc is None:
+                continue                            # already reported as a missing file
+            what = f"experiments/{pid}"
+            if not isinstance(entry, dict):
+                fails.append(f"store.json {pid}: entry is not a map")
+                continue
+            kind = doc.get("kind")
+            if kind not in EXPERIMENT_KINDS:
+                fails.append(f"{what}: kind {kind!r} not in {EXPERIMENT_KINDS}")
+            if entry.get("kind") != kind:
+                fails.append(f"store.json {pid}: kind {entry.get('kind')!r}, the document says {kind!r}")
+            coll = doc.get("collection")
+            if entry.get("collection") != coll:
+                fails.append(f"store.json {pid}: collection {entry.get('collection')!r}, the document "
+                             f"says {coll!r}")
+            if coll is None:
+                continue
+            if coll not in chains:
+                try:
+                    chains[coll] = self.collection_chain(coll)
+                except ValueError as e:
+                    chains[coll] = str(e)
+            if isinstance(chains[coll], str):
+                fails.append(f"{what}: {chains[coll]}")
+        return fails
+
+    def _check_version(self, what: str, h: dict) -> list[str]:
+        """Every object's header declares the store's format version. A v1 object in a v2 store decodes
+        at the wrong stride, and a GWAS block has no magic of its own, so this byte is the only
+        discriminator a `.qbg` carries -- which makes disagreement a failure, not a note."""
+        if self._version is None or h["version"] == self._version:
+            return []
+        return [f"{what}: header version {h['version']}, store.json says {self._version}"]
+
     def _check_header(self, what: str, name: str, chrom: str, seq_digest: str, kind: int) -> list[str]:
         obj = self.immutable / name
         if not obj.exists():
@@ -403,7 +629,7 @@ class Store:
                 h = parse_file_header(f.read(HEADER_LEN))
             except ValueError as e:
                 return [f"{what}: {e}"]
-        out = []
+        out = self._check_version(what, h)
         if h["kind"] != kind:
             out.append(f"{what}: header kind {h['kind']} != {kind}")
         if h["chrom"] != chrom:
@@ -422,6 +648,24 @@ class Store:
             return refget
         from .steps_refget import open_store
         return open_store(refget)
+
+    def _check_store_collection(self, st: dict, store) -> list[str]:
+        """The store's one sequence collection: named whenever there is a variant catalog, a
+        32-character digest, and a collection the refgetstore holds. Each catalog is compared to it
+        in `validate`."""
+        coll = st.get("collection_digest")
+        if coll is None:
+            return ["store.json: no collection_digest, but the store has variant catalogs"] if st.get(CATALOGS) else []
+        if not isinstance(coll, str) or not DIGEST.match(coll):
+            return [f"store.json: collection_digest {coll!r} is not a 32-character sha512t24u"]
+        if store is None:
+            self.notes.append("store.json: collection_digest not checked, no refgetstore configured")
+            return []
+        try:
+            store.get_collection(coll)
+        except Exception:                         # noqa: BLE001 -- gtars raises on an unknown digest
+            return [f"store.json: collection_digest {coll} is not in the refgetstore"]
+        return []
 
     def _check_sequences(self, pid: str, doc: dict, store) -> list[str]:
         """Every chromosome of a variant catalog names a sequence the refgetstore really holds, at the length the
@@ -496,8 +740,57 @@ def remove_experiment(store: Store, exp_id: str) -> dict:
     st = json.loads((store.root / "store.json").read_text())
     doc = json.loads(p.read_text())
     p.unlink()
-    store.write_store(st["name"], st.get("refget", []))
+    store.write_store(st["name"], st.get("refget", []), st.get("format_version", FORMAT_VERSION),
+                      collection=st.get("collection_digest"))
     return {"experiment": exp_id, "objects_now_unreferenced_candidates": len(object_names(doc))}
+
+
+def _rewrite_store_json(store: Store) -> None:
+    """store.json again, with its own name, refget URLs, version and sequence collection."""
+    st = json.loads((store.root / "store.json").read_text())
+    store.write_store(st["name"], st.get("refget", []), st.get("format_version", FORMAT_VERSION),
+                      collection=st.get("collection_digest"))
+
+
+def collection_members(store: Store, key: str) -> list[str]:
+    """The experiments config.yaml's `collections[key]` describes: a GWAS whose id is the key, or
+    the QTL scans derived from the cohort stem `key` (their `source.experiment_id`)."""
+    out = []
+    for p in sorted((store.root / "experiments").glob("*.json")):
+        doc = json.loads(p.read_text())
+        src = doc.get("source") if isinstance(doc.get("source"), dict) else {}
+        if doc.get("id") == key or (doc.get("kind") in QTL_KINDS and src.get("experiment_id") == key):
+            out.append(p.stem)
+    return out
+
+
+def set_collection(store: Store, key: str, meta: dict) -> dict:
+    """Write the collection document config.yaml's `collections[key]` describes, point its member
+    experiments at it, and rewrite store.json. The old document stays until `gc`. A changed title,
+    citation or source is a new digest, so every link to the old one stops resolving (SPEC section 8)."""
+    members = collection_members(store, key)
+    if not members:
+        raise ValueError(f"collections.{key}: no experiment in the store is derived from it")
+    name = store.write_collection(meta["title"], citation=meta.get("citation"), source=meta.get("source"),
+                                  parent=meta.get("parent"))
+    old = set()
+    for eid in members:
+        doc = store.load("experiments", eid)
+        old.add(doc.get("collection"))
+        store.write_pointer("experiments", eid, {**doc, "collection": name})
+    _rewrite_store_json(store)
+    return {"key": key, "collection": name, "was": sorted(o for o in old if o), "experiments": members}
+
+
+def set_facets(store: Store, facets: dict) -> dict:
+    """Give every experiment config.yaml's `facets[id]` names those facets, replacing what it had;
+    an experiment the map does not name keeps its own. Refuses an id the store does not hold."""
+    missing = sorted(eid for eid in facets if not (store.root / "experiments" / f"{eid}.json").exists())
+    if missing:
+        raise ValueError(f"facets: no experiments {missing} in the store")
+    for eid, f in sorted(facets.items()):
+        store.write_pointer("experiments", eid, with_facets(store.load("experiments", eid), f))
+    return {"experiments": sorted(facets)}
 
 
 def referenced(store: Store) -> set[str]:
@@ -583,15 +876,20 @@ def main(argv: list[str] | None = None) -> int:
         remove-experiment ID       drop experiments/ID.json and rewrite store.json (objects stay until gc)
         gc [--dry-run]             delete immutable objects no pointer names
         crosscat A B               the cross-catalog lookup check between variant catalogs A and B
+        set-collection KEY         write config.yaml's collections.KEY and repoint its experiments
+        set-facets                 write config.yaml's facets into the experiment documents
     """
     import argparse
-    ap = argparse.ArgumentParser(description="qtlstore maintenance: validate, remove-experiment, gc, crosscat")
+    ap = argparse.ArgumentParser(description="qtlstore maintenance: validate, remove-experiment, gc, crosscat, "
+                                             "set-collection, set-facets")
     sub = ap.add_subparsers(dest="cmd", required=True)
-    for name in ("validate", "remove-experiment", "gc", "crosscat"):
+    for name in ("validate", "remove-experiment", "gc", "crosscat", "set-collection", "set-facets"):
         p = sub.add_parser(name)
         p.add_argument("--store", required=True, type=Path)
         if name == "remove-experiment":
             p.add_argument("id")
+        if name == "set-collection":
+            p.add_argument("key")
         if name == "gc":
             p.add_argument("--dry-run", action="store_true")
         if name == "crosscat":
@@ -609,6 +907,17 @@ def main(argv: list[str] | None = None) -> int:
         return 1 if fails else 0
     if a.cmd == "remove-experiment":
         print(json.dumps(remove_experiment(st, a.id)))
+        return 0
+    if a.cmd in ("set-collection", "set-facets"):
+        from .common import Config
+        cfg = Config().cfg
+        if a.cmd == "set-collection":
+            meta = (cfg.get("collections") or {}).get(a.key)
+            if not meta:
+                raise SystemExit(f"config.yaml has no collections.{a.key}")
+            print(json.dumps(set_collection(st, a.key, meta)))
+        else:
+            print(json.dumps(set_facets(st, cfg.get("facets") or {})))
         return 0
     if a.cmd == "gc":
         print(json.dumps(gc(st, a.dry_run)))

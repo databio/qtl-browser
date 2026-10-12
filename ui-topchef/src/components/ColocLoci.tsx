@@ -5,14 +5,15 @@ import type { TrackBin, TrackLocus } from '@/components/genome-track/types'
 import { SectionPanel } from '@/components/section-panel'
 import { fetchChromSizes, type ChromSizes } from '@/lib/chrom-sizes'
 import { fmtInt, fmtP } from '@/lib/format'
-import { getStore, gwasBins, lookupGenes } from '@/lib/store'
+import { colocLists, getStore, gwasBins, lookupGenes } from '@/lib/store'
 import type { GwasBin } from '@/lib/store-decode'
-import { COLOC_ANNOTATION, COLOC_EQTL_GENES, COLOC_LOCI, COLOC_SQTL_GENES } from '@/lib/coloc'
+import { colocGenes, colocTrait } from '@/lib/coloc'
 import { Unavailable } from '@/components/states'
+import { toastError } from '@/lib/toast'
 import { useStoreInfo } from '@/contexts/store-context'
 
 /** A coloc locus. */
-interface ColocLocus { gene_id: string; symbol: string; chr: string; tss: number; trait: 'eQTL' | 'sQTL' | 'both' }
+interface ColocLocus { gene_id: string; symbol: string; chr: string; tss: number; trait: string }
 
 const BIN_CAP = 20   // -log10 p; BAG3 and a couple of others exceed it and are drawn clipped
 
@@ -25,31 +26,26 @@ const TRAIT_COLORS: Record<string, string> = {
 
 /**
  * The paper's DCM-colocalized loci on a static whole-genome track. Every marker is labeled;
- * clicking one opens the gene page. The loci are the authors' gene list (lib/coloc.ts) placed at
- * each gene's TSS in the store's annotation, shown when the experiment carries the DCM GWAS. The
- * bars are the GWAS's strongest p per 5 Mb bin, from the bin summary the experiment's `gwas.bins`
- * names (v0's `gwas_dcm_bins.json`, same bins and values): one small whole-object read.
+ * clicking one opens the gene page. The loci are the store's coloc lists for the study and its GWAS
+ * (SPEC section 20), each gene placed at its TSS through the annotation's gene lookup. The bars are
+ * the GWAS's strongest p per 5 Mb bin, from the bin summary the GWAS experiment's `bins` names: one
+ * small whole-object read.
  */
-/** The coloc genes at their annotated TSS, on the store's chromosomes: from the table in coloc.ts
- *  when the store's annotation is the one it was read from (no request), else through the store's
- *  gene lookup (one small read per symbol). */
 async function colocLoci(): Promise<ColocLocus[]> {
   const s = await getStore()
-  if (!s.hasGwas) return []   // the panel shows "not available" instead; do not spend lookups on it
-  const e = new Set(COLOC_EQTL_GENES), q = new Set(COLOC_SQTL_GENES)
-  const symbols = [...new Set([...COLOC_EQTL_GENES, ...COLOC_SQTL_GENES])]
-  const pinned = s.annotation.identity_digest === COLOC_ANNOTATION
-  const found = await Promise.all(symbols.map(async sym => pinned ? (COLOC_LOCI[sym] ?? []).map(x => ({ ...x, name: sym }))
-    : (await lookupGenes(sym)).filter(r => r.name === sym)))
-  const out: ColocLocus[] = []
-  symbols.forEach((sym, i) => {
-    for (const g of found[i]) {
-      if (!s.chroms.has(g.chr)) continue
-      out.push({ gene_id: g.gene_id, symbol: sym, chr: g.chr, tss: g.tss,
-        trait: e.has(sym) && q.has(sym) ? 'both' : q.has(sym) ? 'sQTL' : 'eQTL' })
-    }
+  if (!s.gwas) return []   // the panel shows "not available" instead; do not spend lookups on it
+  const lists = await colocLists()
+  const byGene = colocGenes(lists)
+  const ids = [...byGene.keys()]
+  // one small read per gene, in parallel, after the lookup header (lookupGenes shares it)
+  const found = await Promise.all(ids.map(async g => (await lookupGenes(g)).filter(r => r.gene_id === g)))
+  const loci: ColocLocus[] = []
+  ids.forEach((g, i) => {
+    const traits = [...new Set(byGene.get(g)!.map(colocTrait))]
+    for (const r of found[i]) if (s.chroms.has(r.chr))
+      loci.push({ gene_id: g, symbol: r.name || g, chr: r.chr, tss: r.tss, trait: traits.length > 1 ? 'both' : traits[0]! })
   })
-  return out
+  return loci
 }
 
 export default function ColocLoci() {
@@ -71,9 +67,9 @@ export default function ColocLoci() {
     fetchChromSizes('GRCh38')
       .then(c => { const keep = c.names.map((n, i) => [n, c.lengths[i]!] as const).filter(([n]) => n !== 'chrX' && n !== 'chrY')
         setChrom({ names: keep.map(k => k[0]), lengths: keep.map(k => k[1]) }) })
-      .catch((e: Error) => setChromError(e.message))
-    colocLoci().then(setHits).catch(e => { console.error(e); setHits([]) })
-    gwasBins().then(b => setGwas(b ?? [])).catch(e => { console.error(e); setGwas([]) })
+      .catch((e: Error) => { setChromError(e.message); toastError('Chromosome sizes could not be fetched; the genome track is hidden.', e) })
+    colocLoci().then(setHits).catch(e => { toastError('The colocalized loci could not be loaded.', e); setHits([]) })
+    gwasBins().then(b => setGwas(b ?? [])).catch(e => { toastError('The GWAS track could not be loaded.', e); setGwas([]) })
   }, [])
 
   const bins: TrackBin[] = useMemo(() => (gwas ?? []).map(b => ({
@@ -83,7 +79,7 @@ export default function ColocLoci() {
   })), [gwas])
 
   const loci: TrackLocus[] = useMemo(() =>
-    (hits ?? []).map(h => ({ id: h.gene_id, chr: h.chr, start: h.tss, end: h.tss, label: h.symbol ?? h.gene_id, trait: h.trait })), [hits])
+    (hits ?? []).map(h => ({ id: h.gene_id, chr: h.chr, start: h.tss, end: h.tss, label: h.symbol, trait: h.trait })), [hits])
 
   const legend = (
     <span className="flex flex-wrap items-center justify-end gap-x-4 gap-y-1 text-xs text-base-content/60">
@@ -106,7 +102,7 @@ export default function ColocLoci() {
   // an experiment without the DCM GWAS has no bars and no coloc to show (after the hooks, so the
   // fetches above still start at mount whatever the store turns out to hold)
   if (s && !s.hasGwas) return (
-    <SectionPanel title="Loci colocalized with dilated cardiomyopathy risk" description="Single-locus coloc with the Jurgens et al. 2024 DCM GWAS, PP.H4 > 0.8.">
+    <SectionPanel title="Loci colocalized with dilated cardiomyopathy risk" description="Single-locus coloc with the Jurgens et al. 2024 DCM GWAS, PP.H4 ≥ 0.8.">
       <Unavailable what="Colocalization and DCM GWAS data" />
     </SectionPanel>
   )
@@ -114,9 +110,8 @@ export default function ColocLoci() {
   return (
     <SectionPanel
       title="Loci colocalized with dilated cardiomyopathy risk"
-      description={`Single-locus coloc with the Jurgens et al. 2024 DCM GWAS, PP.H4 > 0.8${loci.length ? `, ${loci.length} loci` : ''}. Click a marker to open the gene.`}
+      description={`Single-locus coloc with the Jurgens et al. 2024 DCM GWAS, PP.H4 ≥ 0.8${loci.length ? `, ${loci.length} loci` : ''}. Click a marker to open the gene.`}
       action={hits !== null && gwas !== null ? legend : undefined}>
-      {chromError && <div className="text-xs text-error">Chromosome sizes unavailable ({chromError}); the track is hidden.</div>}
       {/* the track draws as soon as chromosome sizes are known (cached after the first visit);
           markers and GWAS bars fade in on top when their queries return, without moving it.
           Until then the space is held empty at the track's height: 80 pad + 40 bar/labels + 4 + 144 */}

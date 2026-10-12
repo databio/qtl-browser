@@ -1,8 +1,9 @@
-// Smoke check of the gene page on the qtlb v1 store, against the local preview serving the
-// chr21/chr22 two-experiment smoke store (bench/README.md, "Local v1 store"). Adapted from the v0
-// suite: PDXK's panels and cis table, request counts per tab and intron, the "show all tested
-// introns" toggle, an sQTL-only gene, an untested gene, the sQTL CSV, the trans tables and the
-// QTL-versus-GWAS panel, the Home colocalization track, the About counts, and dead code.
+// Smoke check of the gene page on a version 2 store, against the local preview serving the
+// genome-wide local store (bench/README.md, "Local store"). PDXK's panels and cis table, request
+// counts per tab and intron, the "show all tested introns" toggle, an sQTL-only gene, an untested
+// gene, the sQTL CSV, the trans tables and the QTL-versus-GWAS panel, the Home colocalization track,
+// the About counts, and dead code. The numbers are the genome-wide TOPCHeF store's (scripts/
+// store_reference.py's docstring says how to recompute them).
 //   node bench/smoke_gene_page.mjs
 import { chromium } from '../node_modules/playwright/index.mjs'
 import { readFileSync } from 'node:fs'
@@ -12,21 +13,25 @@ import { fileURLToPath } from 'node:url'
 const BASE = process.env.SMOKE_BASE ?? 'http://localhost:4173'
 const UI = fileURLToPath(new URL('..', import.meta.url))
 const READY = '.plot-host:not(.invisible) svg g[aria-label="dot"] > *'
-const ROUNDING = /are rounded \(p within [\d.]+%\)\. Exact values: Zenodo\./
-const CIS_COLS = ['position', 'rsid', 'A1', 'A2', 'tss_distance', 'af', 'ma_samples', 'ma_count', 'pval_nominal', 'slope', 'slope_se', 'pip', 'cs_id']
+const ROUNDING = /^Values are rounded\.$/   // the bounds are in its tooltip (components/rounding-note.tsx)
+const CIS_COLS = ['position', 'rsid', 'A1', 'A2', 'tss_distance', 'af', 'ma_samples', 'ma_count', 'pval_nominal', 'beta', 'beta_se', 'pip', 'cs_id']
 const results = []
 const check = (ok, msg) => { results.push([ok, msg]); console.log(`${ok ? 'PASS' : 'FAIL'} ${msg}`) }
 const badPaths = []
 let dataTotal = 0
 
-// the object each per-gene request reads, by name from the store's pointers
+// the object each per-gene request reads, by name from the store's pointers: one document per scan
 const store = await (await fetch(`${BASE}/data/store.json`)).json()
-const exp = await (await fetch(`${BASE}/data/experiments/topchef.json`)).json()
-const res = Object.fromEntries(exp.results.map(r => [r.phenotype_type, r.files]))
-const cat = await (await fetch(`${BASE}/data/variant_catalogs/${exp.catalog}.json`)).json()
+// the study the app opens (its default VITE_COLLECTION_OF and VITE_GWAS), not every cohort in the store
+const studyIds = Object.keys(store.experiments).filter(id =>
+  store.experiments[id].collection === store.experiments.topchef_ge_cis.collection || id === 'dcm_jurgens2024_biobanks')
+const docs = Object.fromEntries(await Promise.all(studyIds.map(async id => [id, await (await fetch(`${BASE}/data/experiments/${id}.json`)).json()])))
+const cisOf = type => Object.values(docs).find(d => d.kind === 'qtl_cis' && d.phenotype_type === type)
+const res = { ge: cisOf('ge').files, leafcutter: cisOf('leafcutter').files }
+const cat = await (await fetch(`${BASE}/data/variant_catalogs/${cisOf('ge').catalog}.json`)).json()
 const VARIANTS = new Set(cat.chromosomes.map(c => c.file))
-const TRANS = new Set(exp.results.map(r => r.trans?.file).filter(Boolean))
-const GWAS = new Set(Object.values(exp.gwas?.files ?? {}))
+const TRANS = new Set(Object.values(docs).filter(d => d.kind === 'qtl_trans').map(d => d.file))
+const GWAS = new Set(Object.values(docs).filter(d => d.kind === 'gwas').flatMap(d => Object.values(d.files)))
 const kindOf = p => {
   const name = p.split('/').pop()
   if (Object.values(res.ge).includes(name)) return 'ge'
@@ -36,7 +41,7 @@ const kindOf = p => {
   if (GWAS.has(name)) return 'gwas'
   return 'other'
 }
-check(store.format_version === 1, `store.json is format version 1 (${store.name})`)
+check(store.format_version === 2 && TRANS.size === 2 && GWAS.size > 0, `store.json is format version 2 (${store.name}): ${Object.keys(docs).length} experiments, ${TRANS.size} trans objects, ${GWAS.size} GWAS objects`)
 
 const browser = await chromium.launch({ headless: true })
 
@@ -55,7 +60,7 @@ async function open(path, { ready = true } = {}) {
     if (u.pathname.startsWith('/data/')) {
       reqs.push(u.pathname); dataTotal++
       // only pointers and content-addressed objects are ever read
-      if (!/^\/data\/(store\.json|(experiments|variant_catalogs|annotations)\/[\w.-]+\.json|immutable\/[A-Za-z0-9_-]{32}\.[a-z0-9.]+)$/.test(u.pathname)) badPaths.push(`${path}: ${u.pathname}`)
+      if (!/^\/data\/(store\.json|(experiments|variant_catalogs|annotations|overlaps|colocs)\/[\w.-]+\.json|immutable\/[A-Za-z0-9_-]{32}\.[a-z0-9.]+)$/.test(u.pathname)) badPaths.push(`${path}: ${u.pathname}`)
     }
   })
   const done = r => { if (net.delete(r)) { inflight--; last = Date.now() } }
@@ -107,7 +112,7 @@ async function downloadCsv(page) {
   await page.waitForFunction(() => document.querySelectorAll('.plot-host svg').length >= 2, null, { timeout: 30_000 })
   check((await page.locator('.plot-host svg').count()) >= 2, 'PDXK: locus plot and the QTL-versus-GWAS panel both drawn')
   const csRows = await page.locator('table:has(th:has-text("Top PIP")) tbody tr').count()
-  check(csRows === 3, `PDXK: credible-set table has ${csRows} set rows (block details say 3)`)
+  check(csRows === 3, `PDXK: credible-set table has ${csRows} set rows (the block's 32 records are in sets 1, 2 and 3)`)
   await cisTable(page).locator('tbody tr').first().waitFor({ timeout: 30_000 })
   const total = await pagerText(page)
   check(/of 5,827/.test(total), `PDXK: cis table pager reads "${total}" (search index n_var 5,827)`)
@@ -132,9 +137,8 @@ async function downloadCsv(page) {
   const csv = await downloadCsv(page)
   check(csv.length === 5828 && csv[0] === CIS_COLS.join(','), `PDXK: CSV export has ${csv.length - 1} rows, header ${csv[0]}`)
   check(await page.getByText(ROUNDING).first().isVisible(), 'PDXK: rounding note by the CSV button')
-  // PDXK's eQTL phenotype has no trans rows; its introns have 2 (search index n_trans)
-  check(await page.locator('[data-trans-total="0"]').count() === 1 && await page.getByText('No trans associations.').count() === 1,
-    'PDXK: the eQTL trans table is present and empty')
+  // PDXK's eQTL phenotype has 115 trans rows and its 4 introns 404 (search index n_trans)
+  check(await page.locator('[data-trans-total="115"]').count() === 1, 'PDXK: the eQTL trans table has its 115 rows')
   const toggle = page.locator('label:has-text("Gene track") input[type=checkbox]')
   const before = await page.locator('svg').count()
   await toggle.click()
@@ -143,10 +147,11 @@ async function downloadCsv(page) {
   check(await toggle.isChecked() && after > before, `PDXK: gene track toggle adds the track (${before} -> ${after} svg elements)`)
   await toggle.click()
   await idle()
-  // one range per ranged object and no header reads (the pointer says what each object is)
+  // one range per ranged object and no header reads (the pointer says what each object is); both
+  // trans objects are read when the gene opens, one range each
   const k = Object.fromEntries(['ge', 'variants', 'leafcutter', 'gwas', 'trans'].map(x => [x, count(reqs, x)]))
-  check(k.ge === 1 && k.variants === 1 && k.leafcutter === 0 && k.gwas === 1 && k.trans === 1,
-    `PDXK: requests eQTL results ${k.ge} (block), variants ${k.variants} (range), GWAS ${k.gwas} (window), trans ${k.trans} (frames), sQTL results ${k.leafcutter}`)
+  check(k.ge === 1 && k.variants === 1 && k.leafcutter === 0 && k.gwas === 1 && k.trans === 2,
+    `PDXK: requests eQTL results ${k.ge} (block), variants ${k.variants} (range), GWAS ${k.gwas} (window), trans ${k.trans} (one range per trans object), sQTL results ${k.leafcutter}`)
   const n0 = reqs.length
   const d = await drawnCount(page)
   await page.getByText(/^sQTL/).first().click()
@@ -154,7 +159,7 @@ async function downloadCsv(page) {
   const sqtlText = await page.locator('text=/tested introns/').first().innerText()
   check(/tested introns/.test(sqtlText) && count(reqs, 'leafcutter', n0) === 1 && reqs.length - n0 === 1,
     `PDXK: sQTL tab adds ${reqs.length - n0} request (the introns span): "${sqtlText.slice(0, 70)}"`)
-  check(await page.locator('[data-trans-total="2"]').count() === 1, 'PDXK: the sQTL trans table has its 2 rows from the frames read when the gene opened')
+  check(await page.locator('[data-trans-total="404"]').count() === 1, 'PDXK: the sQTL trans table has its 404 rows from the frames read when the gene opened')
   check(errors.length === 0, `PDXK: no console errors${errors.length ? ` (${errors.slice(0, 3).join(' | ')})` : ''}`)
   await ctx.close()
 }
@@ -194,7 +199,7 @@ async function downloadCsv(page) {
   await page.getByText(/^sQTL/).first().click()
   await waitDrawn(page, d); await idle()
   check(reqs.length === n3, `MICAL3: back to the sQTL tab sends ${reqs.length - n3}`)
-  check(await page.locator('[data-trans-total="140"]').count() === 1, 'MICAL3: sQTL trans table has 140 rows (search index n_trans over its introns)')
+  check(await page.locator('[data-trans-total="5436"]').count() === 1, 'MICAL3: sQTL trans table has 5,436 rows (search index n_trans over its 33 introns)')
   check(errors.length === 0, `MICAL3: no console errors${errors.length ? ` (${errors.slice(0, 3).join(' | ')})` : ''}`)
   await ctx.close()
 }
@@ -202,19 +207,19 @@ async function downloadCsv(page) {
 // ---- SMARCB1: trans rows on both tabs, and the GWAS panel with shared variants ----
 {
   const { ctx, page, errors, reqs, idle } = await open('/gene/SMARCB1')
-  await page.waitForSelector('[data-trans-total="7"]', { timeout: 60_000 })
+  await page.waitForSelector('[data-trans-total="895"]', { timeout: 60_000 })
   await idle()
   const dots = await page.locator('.plot-host svg').nth(1).locator('g[aria-label="dot"] > *').count()
   check(dots > 0, `SMARCB1: the QTL-versus-GWAS panel draws ${dots} shared variants`)
   const [dl] = await Promise.all([page.waitForEvent('download', { timeout: 30_000 }), page.locator('[data-trans-total] button:has-text("CSV")').first().click()])
   const csv = readFileSync(await dl.path(), 'utf8').trim().split('\n')
-  check(csv.length === 8, `SMARCB1: trans eQTL CSV has ${csv.length - 1} rows, header ${csv[0]}`)
+  check(csv.length === 896, `SMARCB1: trans eQTL CSV has ${csv.length - 1} rows, header ${csv[0]}`)
   const n0 = reqs.length
   const d = await drawnCount(page)
   await page.getByText(/^sQTL/).first().click()
   await waitDrawn(page, d); await idle()
-  check(await page.locator('[data-trans-total="34"]').count() === 1 && count(reqs, 'trans', n0) === 0,
-    `SMARCB1: sQTL trans table has 34 rows with no new trans request`)
+  check(await page.locator('[data-trans-total="933"]').count() === 1 && count(reqs, 'trans', n0) === 0,
+    `SMARCB1: sQTL trans table has 933 rows with no new trans request`)
   check(errors.length === 0, `SMARCB1: no console errors${errors.length ? ` (${errors.slice(0, 3).join(' | ')})` : ''}`)
   await ctx.close()
 }
@@ -252,9 +257,9 @@ async function downloadCsv(page) {
   await sentence.waitFor({ state: 'attached', timeout: 30_000 })
   await idle()
   const line = await sentence.textContent()
-  check(/^372 eGenes and 512 significant sQTL introns across 686 tested genes/.test(line), `Home: counts from the experiment pointer: "${line.slice(0, 70)}"`)
-  const loci = await page.getByText(/PP\.H4 > 0\.8, 4 loci/).count()
-  check(loci === 1, 'Home: the colocalization track places the 4 coloc genes on chr21/chr22 (VPREB3, MAP3K7CL, MMP11, SMARCB1)')
+  check(/^10,220 eGenes and 13,540 significant sQTL introns across 19,423 tested genes/.test(line), `Home: counts from the cis experiments: "${line.slice(0, 80)}"`)
+  const loci = await page.getByText(/PP\.H4 ≥ 0\.8, 22 loci/).count()
+  check(loci === 1, 'Home: the colocalization track places all 22 coloc genes (21 eQTL, 4 sQTL, 3 shared)')
   await page.goto(`${BASE}/genes`)
   await page.locator('table tbody tr').first().waitFor({ timeout: 30_000 })
   const meta = await page.locator('h1 + *').first().innerText().catch(() => '')
@@ -265,8 +270,9 @@ async function downloadCsv(page) {
   await page.goto(`${BASE}/about`)
   await page.getByText('Genes tested').first().waitFor({ timeout: 30_000 })
   const text = await page.locator('body').innerText()
-  check(/Genes tested\s+686/.test(text) && /DCM GWAS variants\s+349,950/.test(text) && /trans pairs\s+15,048/.test(text) && /5,022 cases/.test(text),
-    'About: genes tested 686, DCM GWAS variants 349,950, trans pairs 15,048, 5,022 cases')
+  check(/Genes tested\s+19,423/.test(text) && /DCM GWAS variants\s+12,494,731/.test(text) && /trans pairs\s+15,824,574/.test(text) && /5,022 cases/.test(text),
+    'About: genes tested 19,423, DCM GWAS variants 12,494,731, trans pairs 15,824,574, 5,022 cases')
+  check(/trans values by up to/.test(text) && /GWAS values by up to/.test(text), 'About: the rounding sentence covers cis, trans and GWAS bounds')
   check(errors.length === 0, `Home/Genes/Region/About: no console errors${errors.length ? ` (${errors.slice(0, 3).join(' | ')})` : ''}`)
   await ctx.close()
 }
@@ -274,8 +280,8 @@ async function downloadCsv(page) {
 await browser.close()
 
 check(badPaths.length === 0, `every /data/ request is a pointer or an immutable object (${dataTotal} seen)${badPaths.length ? `: ${badPaths.slice(0, 3).join(', ')}` : ''}`)
-const g = spawnSync('grep', ['-rn', 'manifest\\|pack-decode\\|trans-pack\\|variant-pack\\|lib/pack\'', 'src'], { cwd: UI, encoding: 'utf8' })
-check(g.status === 1 && !g.stdout.trim(), `dead v0 code grep finds nothing in ui-topchef/src${g.stdout.trim() ? `: ${g.stdout.trim().split('\n').slice(0, 3).join(' | ')}` : ''}`)
+const g = spawnSync('grep', ['-rn', 'manifest\\|pack-decode\\|trans-pack\\|variant-pack\\|lib/pack\'\\|slope', 'src'], { cwd: UI, encoding: 'utf8' })
+check(g.status === 1 && !g.stdout.trim(), `dead v0/v1 code grep (packs, slope) finds nothing in ui-topchef/src${g.stdout.trim() ? `: ${g.stdout.trim().split('\n').slice(0, 3).join(' | ')}` : ''}`)
 
 const failed = results.filter(r => !r[0])
 console.log(failed.length ? `smoke: ${failed.length} of ${results.length} failed` : `smoke: all ${results.length} checks passed`)

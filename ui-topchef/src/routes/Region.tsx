@@ -4,6 +4,7 @@ import ExternalLink from '@/components/ExternalLink'
 import { Page } from '@/components/page'
 import { PageHeader } from '@/components/page-header'
 import { Empty, TableSkeleton } from '@/components/states'
+import { ErrorPage } from '@/components/error-page'
 import { useSignificance } from '@/contexts/store-context'
 import { ucsc } from '@/lib/links'
 import { fmtInt } from '@/lib/format'
@@ -15,13 +16,15 @@ export default function Region() {
   const { loc = '' } = useParams()
   const m = /^(chr[0-9XY]+):(\d+)-(\d+)$/i.exec(loc)
   const [genes, setGenes] = useState<SearchHit[] | null>(null)
+  const [error, setError] = useState<unknown>(null)
   const rowLink = useRowLink()
   useEffect(() => {
     if (!m) return
-    setGenes(null)
-    genesInRegion(m[1], Number(m[2]), Number(m[3])).then(setGenes)
+    setGenes(null); setError(null)
+    genesInRegion(m[1], Number(m[2]), Number(m[3])).then(setGenes, e => { console.error(e); setError(e) })
   }, [loc]) // eslint-disable-line react-hooks/exhaustive-deps
   if (!m) return <Page><Empty label="Region must look like chr10:73000000-74500000." /></Page>
+  if (error) return <Page><ErrorPage title="The region's genes could not be loaded." error={error} /></Page>
   const [, chr, s, e] = m
   return (
     <Page>

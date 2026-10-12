@@ -246,13 +246,6 @@ class Checker:
         c("gwas values present, p in (0,1], af in [0,1]", q(f"""SELECT count(*) FROM {G} WHERE beta IS NULL OR se IS NULL
             OR af IS NULL OR pvalue IS NULL OR n IS NULL OR pvalue <= 0 OR pvalue > 1 OR af < 0 OR af > 1""")[0])
         c("gwas.json present", 0 if (self.T / "gwas.json").exists() else 1)
-        if (self.T / "gwas_bins.parquet").exists():   # optional: the landing track's bin summary
-            B = f"read_parquet('{self.T / 'gwas_bins.parquet'}')"
-            c("gwas_bins chr known", q(f"SELECT count(*) FROM {B} ANTI JOIN co USING (chr)")[0])
-            c("gwas_bins one row per bin, lead inside, 0 <= n_gws <= n_variants, p in (0,1]", q(f"""SELECT
-                (SELECT count(*) - count(DISTINCT (chr, bin_start)) FROM {B}) + (SELECT count(*) FROM {B}
-                WHERE lead_position < bin_start OR lead_position >= bin_end OR n_gws < 0 OR n_gws > n_variants
-                OR n_variants < 1 OR min_p <= 0 OR min_p > 1 OR lead_ea IS NULL OR lead_beta IS NULL)""")[0])
 
     def ingestion(self, n_nom: int) -> None:
         c, q = self.check, self.q

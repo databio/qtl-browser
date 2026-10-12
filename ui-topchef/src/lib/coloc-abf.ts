@@ -2,13 +2,10 @@
  * coloc.abf (Giambartolomei et al. 2014) over a locus, from values the qtlstore already carries.
  *
  * Nothing here needs a new pipeline output. Per variant the approximate Bayes factor needs only a
- * z statistic and a standard error, and both traits store those:
- *
- *   QTL   `z = sign * t(p, dof)`, `se` -- the SE code decodes directly and `tFromNlp` already
- *         exists for the slope, so the block's two u16 codes are exactly the inputs. The slope
- *         itself, the one value in the format that is reconstructed rather than decoded, is not on
- *         this path at all.
- *   GWAS  `z = beta / se`, both lossless at the source's printed precision (SPEC section 10).
+ * z statistic and a standard error, and both traits store beta and se as 16-bit codes against their
+ * block's scales (SPEC section 13), so on both sides `z = beta / se` from the two decoded values and
+ * nothing is rebuilt through a dof. The QTL beta is within 1.1e-03 standard errors of the source
+ * and the GWAS's within 3.9e-03, the bounds every experiment's `precision` block records.
  *
  * No LD matrix: ABF assumes a single causal variant in the region and never conditions, which is
  * the whole reason this is feasible in a browser. The multi-causal-variant version (coloc.susie)
@@ -20,7 +17,27 @@
  */
 
 /** Prior variance on the effect size, and the three configuration priors. coloc's defaults:
- *  W 0.15^2 for a quantitative trait, 0.2^2 on the log-odds scale for a case-control one. */
+ *  W 0.15^2 for a quantitative trait, 0.2^2 on the log-odds scale for a case-control one.
+ *
+ *  **`W1` assumes the QTL's phenotype has unit variance -- `sdY = 1` -- and nothing in the store
+ *  records that.** It is a real assumption, not a convention: the shrinkage is `W / (W + se^2)`, so
+ *  rescaling a phenotype by `c` sends `se^2 -> c^2 se^2` while `W` stays fixed, and the Bayes factor
+ *  moves on identical data. `0.15^2` means "a prior effect SD of 0.15 phenotype SDs per allele",
+ *  which only describes `beta` if `beta` is per phenotype SD.
+ *
+ *  It holds for everything in the store today, measured 2026-10-07: tensorQTL inverse-normal
+ *  transforms expression and splice ratios, and ARIC's plasma phenotypes were standardized before
+ *  PLINK2 saw them (coloc's own `sdY` estimator returns 0.9990 there, and with only two model
+ *  parameters it is unbiased). A source reporting raw units -- a methylation beta-value, an
+ *  untransformed concentration, Olink NPX -- would have `sdY` far from 1 and would silently inherit
+ *  this prior.
+ *
+ *  Do **not** fix that by estimating `sdY` from the data. coloc's `sdY.est` recovers the *residual*
+ *  SD, which equals the phenotype SD only when the source fitted no covariates. On TOPCHeF's eQTL,
+ *  whose model carries 81 parameters, it returns 0.5639 against a true 1 -- applying it would shrink
+ *  `W1` from 0.0225 to 0.00716 and make the posteriors 3x wrong in the name of correctness. Per
+ *  gene it ranges 0.19 to 0.99, which would make `W1` vary 27-fold between genes of one study. The
+ *  scale is not recoverable from `(se, af, n)`; it has to come from the study. */
 export interface AbfPriors {
   /** prior variance for trait 1 (the QTL) */
   W1: number
@@ -154,24 +171,21 @@ export interface LocusColoc {
   priors: AbfPriors
 }
 
-/** The QTL side of a locus: `z` is the stored t statistic, which is what ABF wants, so the slope
- *  (the one reconstructed value in the format) is never formed. NaN where the row has no usable
- *  statistics, which `alignTraits` then drops. */
-export function qtlRows(block: { nRows: number; nlp: Float64Array; se: Float64Array; slope: Float64Array; negative: Uint8Array },
+/** The QTL side of a locus: `z = beta / se` from the two stored values (SPEC section 13). NaN
+ *  where the row has no usable statistics, which `alignTraits` then drops; an underflowed p (code
+ *  65534) keeps its beta and se, so its z is finite and it stays in the comparison. */
+export function qtlRows(block: { nRows: number; nlp: Float64Array; se: Float64Array; beta: Float64Array },
   run: { position: Int32Array | Uint32Array; ref: string[]; alt: string[]; rsNumber: Uint32Array }): TraitRow[] {
   const out: TraitRow[] = new Array(block.nRows)
   for (let i = 0; i < block.nRows; i++) {
     const se = block.se[i]!
-    // slope / se == sign * t(p, dof); NaN propagates from a null or underflowed row
-    const z = (block.negative[i] ? -1 : 1) * Math.abs(block.slope[i]! / se)
-    out[i] = { position: run.position[i]!, ref: run.ref[i]!, alt: run.alt[i]!, rsNumber: run.rsNumber[i]!, z, se }
+    out[i] = { position: run.position[i]!, ref: run.ref[i]!, alt: run.alt[i]!, rsNumber: run.rsNumber[i]!, z: block.beta[i]! / se, se }
   }
   return out
 }
 
-/** The GWAS side: `z = beta / se`, both lossless at the source's printed precision. Ordered by
- *  descending N so that where a site carries two rows (SPEC section 10) the better-powered one wins
- *  the dedupe in `alignTraits`. */
+/** The GWAS side: `z = beta / se` from the stored triple. Ordered by descending N so that where a
+ *  site carries two rows (SPEC section 10) the better-powered one wins the dedupe in `alignTraits`. */
 export function gwasRows(g: { rows: number; position: Int32Array; ref: string[]; alt: string[];
   beta: Float64Array; se: Float64Array; n: Int32Array }): TraitRow[] {
   const order = Array.from({ length: g.rows }, (_, i) => i).sort((a, b) => g.n[b]! - g.n[a]!)
@@ -189,8 +203,8 @@ export function colocLocus(
 ): LocusColoc | null {
   if (!block || !run || !gwas?.rows) return null
   const q = qtlRows(block, run)
-  // the three reasons a row has no z, kept apart: NaN -log10 p is "not tested", Infinity is p = 0,
-  // and anything else left is a null SE or a results set with no dof
+  // the three reasons a row has no z, kept apart: NaN -log10 p is "not tested", Infinity is p = 0
+  // with no stored effect beside it, and anything else left is a null beta or SE
   let nNotTested = 0, nUnderflow = 0, nNoStats = 0
   for (let i = 0; i < block.nRows; i++) {
     if (Number.isFinite(q[i]!.z) && Number.isFinite(q[i]!.se)) continue

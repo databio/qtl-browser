@@ -5,8 +5,8 @@ Reads the contract `gwas` table (CONTRACT.md) from an experiment's tables direct
       <digest>.qbg                    one per chromosome: v1 header (kind 4) + zstd blocks of rows
       <digest>.qgi                    the GWAS index (kind 5): n table, per chromosome block first
                                       positions and end offsets, so a window is one range request
-      <digest>.arrow.zst              the bin summary, when the tables hold `gwas_bins.parquet`: the
-                                      strongest p per 5 Mb window, one row per window (the landing track)
+      <digest>.arrow.zst              the bin summary, computed here from the same rows: the strongest
+                                      p per 5 Mb window, one row per window (the landing track)
 
 and returns the experiment's `gwas` entry. `results.build` calls it when the table exists.
 
@@ -35,16 +35,25 @@ ZSTD_LEVEL = 19
 COLUMNS = ("chr", "pos", "ref", "alt", "beta", "se", "af", "pvalue", "n", "rs_number")
 ORDER = ["pos", "ref", "alt", "rs_number", "pvalue", "n", "beta"]
 EXT_BINS = "arrow.zst"
-# the bin summary's schema (SPEC.md section 10, "Bin summary"): v0's gwas_dcm_bins.json columns, typed
+BIN_BP = 5_000_000          # the landing track's window
+GWS_P = 5e-8                # what `n_gws` counts
+# the bin summary's schema (SPEC.md section 10, "Bin summary")
 BINS_SCHEMA = pa.schema([("chr", pa.string()), ("bin_start", pa.uint32()), ("bin_end", pa.uint32()),
                          ("min_p", pa.float64()), ("lead_position", pa.uint32()), ("lead_rsid", pa.string()),
-                         ("lead_beta", pa.float64()), ("lead_ea", pa.string()), ("n_gws", pa.uint32()),
+                         ("lead_beta", pa.float64()), ("lead_alt", pa.string()), ("n_gws", pa.uint32()),
                          ("n_variants", pa.uint32())])
 
 
 def build(store: qs.Store, tables: Path, cdoc: dict, chroms: list[str], block_rows: int = BLOCK_ROWS,
-          level: int = ZSTD_LEVEL) -> dict | None:
-    """The `gwas` entry of an experiment, or None when `tables` has no `gwas.parquet`."""
+          level: int = ZSTD_LEVEL, codec=None, bin_bp: int = BIN_BP) -> dict | None:
+    """The fields of a GWAS experiment document, or None when `tables` has no `gwas.parquet`.
+
+    `codec` decides how p/beta/se are stored. v2 (the default) quantizes to the same triple the QTL
+    side uses, with per-block scales, and records the error in a `precision` block of the same shape
+    as a QTL scan's; v1 is lossless there and refuses a source carrying more precision than its
+    fixed scales hold, so it records no precision. The loop is the same either way: precode the
+    chromosome, then encode block by block."""
+    codec = codec or qs.codec_for(qs.FORMAT_VERSION)
     path = Path(tables) / "gwas.parquet"
     if not path.exists():
         return None
@@ -68,6 +77,8 @@ def build(store: qs.Store, tables: Path, cdoc: dict, chroms: list[str], block_ro
             raise ValueError(f"gwas: null {c}")
     n_values = sorted(int(x) for x in t["n"].unique())
     files, index_chroms, rows_by_chrom = {}, [], {}
+    lim = {"neglog10p": 0.0, "beta_over_se": 0.0, "se_rel": 0.0}
+    worst = {"neglog10p": 0.0, "beta_over_se": 0.0, "se_rel": 0.0, "rows_compared": 0}
     for c in [x for x in chroms if x in set(t["chr"])]:
         d = t[t["chr"] == c].sort_values(ORDER, kind="mergesort")
         pos = d["pos"].to_numpy(dtype=np.int64)
@@ -75,75 +86,96 @@ def build(store: qs.Store, tables: Path, cdoc: dict, chroms: list[str], block_ro
             raise ValueError(f"gwas {c}: position outside 1..{table[c]['length']}")
         rs = np.where(d["rs_number"].to_numpy(dtype=np.int64) < 0, 0, d["rs_number"].to_numpy(dtype=np.int64))
         try:
-            codes = pf.gwas_codes(pos, d["beta"].to_numpy(), d["se"].to_numpy(), d["af"].to_numpy(),
-                                  d["pvalue"].to_numpy(), rs, d["n"].to_numpy(dtype=np.int64), n_values)
+            codes = codec.gwas_codes(pos, d["beta"].to_numpy(), d["se"].to_numpy(), d["af"].to_numpy(),
+                                     d["pvalue"].to_numpy(), rs, d["n"].to_numpy(dtype=np.int64), n_values)
         except ValueError as e:
             raise ValueError(f"gwas {c}: {e}") from None
         ref, alt = d["ref"].tolist(), d["alt"].tolist()
         blocks, fp, eo, off = [], [], [], qs.HEADER_LEN
         for s in range(0, len(d), block_rows):
             e = min(s + block_rows, len(d))
-            fr = pf.encode_gwas_block({k: v[s:e] for k, v in codes.items()}, ref[s:e], alt[s:e], level)
+            fr = codec.encode_gwas_columns({k: v[s:e] for k, v in codes.items()}, ref[s:e], alt[s:e], level)
+            if codec is not pf:
+                # the block's own limit from its header scales, and what the encoding actually cost
+                # against the source values, folded into the experiment's worst
+                dec = codec.decode_gwas_block(fr, n_values)
+                tl = codec.theoretical_limit(dec["nlp_max"], dec["beta_max"], dec["lse_min"], dec["lse_max"])
+                mw = codec.measured_worst(codes["p"][s:e], codes["beta"][s:e], codes["se"][s:e],
+                                          dec["nlp"], dec["beta"], dec["se"])
+                for k in ("neglog10p", "beta_over_se", "se_rel"):
+                    lim[k] = max(lim[k], tl[k])
+                    worst[k] = max(worst[k], mw[k])
+                worst["rows_compared"] += mw["rows_compared"]
             blocks.append(fr)
             off += len(fr)
             fp.append(int(pos[s]))
             eo.append(off)
         if off > pf.U32_MAX:
             raise ValueError(f"gwas {c}: over 4 GiB")
-        body = qs.file_header(KIND_GWAS, c, len(d), block_rows, 0, table[c]["seq_digest"]) + b"".join(blocks)
+        body = qs.file_header(KIND_GWAS, c, len(d), block_rows, 0, table[c]["seq_digest"],
+                              codec.FORMAT_VERSION) + b"".join(blocks)
         files[c] = store.put(body, EXT_GWAS)
         index_chroms.append((c, np.array(fp), np.array(eo)))
         rows_by_chrom[c] = len(d)
-    payload = pf.encode_gwas_index_payload(n_values, index_chroms, qs.HEADER_LEN)
-    index = qs.file_header(KIND_GWAS_INDEX, qs.ALL, len(index_chroms), block_rows, 0, cdoc["collection_digest"]) + \
-        pf.zstd_frame(payload, level)
+    payload = codec.encode_gwas_index_payload(n_values, index_chroms, qs.HEADER_LEN)
+    index = qs.file_header(KIND_GWAS_INDEX, qs.ALL, len(index_chroms), block_rows, 0,
+                           cdoc["collection_digest"], codec.FORMAT_VERSION) + \
+        codec.zstd_frame(payload, level)
+    lim["af"] = 0.5 / pf.AF_MAXQ
     return {"id": meta.get("id"), "title": meta.get("title"), "files": files, "index": store.put(index, EXT_GWAS_INDEX),
             "n_rows": int(sum(rows_by_chrom.values())), "rows_by_chrom": rows_by_chrom,
             "rows_sharing_a_site": sharing, "block_rows": block_rows,
-            "n_values": n_values, "bins": build_bins(store, tables, cdoc, [c for c in chroms if c in files], level),
+            "n_values": n_values, "bins": build_bins(store, t, cdoc, bin_bp, level),
+            # v1 stores the published digits exactly and has nothing to measure
+            "precision": None if codec is pf else {"theoretical_limit": lim, "measured_worst": worst},
             "orientation": meta.get("orientation"), "source": meta.get("source")}
 
 
 # ---- the bin summary --------------------------------------------------------------------------
-def _round_bins(t):
-    """v0's rounding (steps_gwas.run, when it wrote gwas_dcm_bins.json): p to 3 significant digits
-    through its shortest decimal text, the lead's beta to 3 decimals (Python `round`)."""
-    t = t.copy()
-    t["min_p"] = [float(f"{p:.3g}") for p in t["min_p"]]
-    t["lead_beta"] = [round(float(b), 3) for b in t["lead_beta"]]
-    return t
-
-
-def build_bins(store: qs.Store, tables: Path, cdoc: dict, chroms: list[str], level: int = ZSTD_LEVEL) -> dict | None:
-    """The `gwas.bins` entry: the bin summary object from `gwas_bins.parquet` on `chroms`, or None when
-    the tables have no such table. Rows in variant catalog table order, then by `bin_start`."""
-    path = Path(tables) / "gwas_bins.parquet"
-    if not path.exists() or not chroms:
-        return None
-    # the build's chromosomes only (as for the GWAS rows): a subset build has a subset variant catalog
-    t = pq.read_table(path, filters=[("chr", "in", list(chroms))]).to_pandas()
-    missing = [c for c in BINS_SCHEMA.names if c not in t.columns]
-    if missing:
-        raise ValueError(f"gwas bins: required columns missing: {missing}")
+def bin_rows(t, cdoc: dict, bin_bp: int):
+    """The bin summary rows from the GWAS rows (the contract table as the builder read it, already
+    oriented): per `(chr, pos // bin_bp)` with rows, the smallest p, the row holding it, the rows
+    below `GWS_P` and the row count. A tie on the smallest p goes to the first such row in the
+    stored order (`ORDER`), so the lead is deterministic. p is rounded to 3 significant digits and
+    the lead's beta to 3 decimals: a label, not a statistic. Rows in variant catalog table order,
+    then by `bin_start`. Every GWAS gets this; no adapter supplies it."""
     order = {c["name"]: i for i, c in enumerate(cdoc["chromosomes"])}
-    stray = sorted(set(t["chr"]) - set(order))
-    if stray:
-        raise ValueError(f"gwas bins: chromosomes {stray} are not in the variant catalog's table")
-    t = t.assign(_o=t["chr"].map(order)).sort_values(["_o", "bin_start"], kind="mergesort").drop(columns="_o")
-    t = _round_bins(t[list(BINS_SCHEMA.names)]).reset_index(drop=True)
-    table = pa.Table.from_pandas(t, schema=BINS_SCHEMA, preserve_index=False)
-    width = sorted(set((t["bin_end"] - t["bin_start"]).tolist()))
-    if len(width) > 1:
-        raise ValueError(f"gwas bins: bins of several widths {width}")
-    bin_bp = int(width[0]) if width else 0
-    fails = check_bins(table, cdoc, bin_bp, len(t))
+    d = t.assign(_o=t["chr"].map(order), _b=t["pos"] // bin_bp)
+    d = d.sort_values(["_o", "_b", "pvalue", *ORDER], kind="mergesort")
+    lead = d.groupby(["_o", "_b"], sort=True).head(1).set_index(["_o", "_b"])
+    agg = d.groupby(["_o", "_b"], sort=True).agg(n_variants=("pvalue", "size"),
+                                                  n_gws=("pvalue", lambda p: int((p < GWS_P).sum())))
+    out = lead.join(agg).reset_index()
+    rs = out["rs_number"].to_numpy(dtype=np.int64)
+    return {
+        "chr": out["chr"].tolist(),
+        "bin_start": (out["_b"] * bin_bp).astype(np.int64).tolist(),
+        "bin_end": ((out["_b"] + 1) * bin_bp).astype(np.int64).tolist(),
+        "min_p": [float(f"{float(p):.3g}") for p in out["pvalue"]],
+        "lead_position": out["pos"].astype(np.int64).tolist(),
+        "lead_rsid": [f"rs{r}" if r > 0 else None for r in rs],
+        "lead_beta": [round(float(b), 3) for b in out["beta"]],
+        "lead_alt": out["alt"].tolist(),
+        "n_gws": out["n_gws"].astype(np.int64).tolist(),
+        "n_variants": out["n_variants"].astype(np.int64).tolist(),
+    }
+
+
+def build_bins(store: qs.Store, t, cdoc: dict, bin_bp: int = BIN_BP, level: int = ZSTD_LEVEL) -> dict | None:
+    """The `gwas.bins` entry: the bin summary object computed from the GWAS rows `t`, or None when
+    there are none."""
+    if not len(t):
+        return None
+    rows = bin_rows(t, cdoc, bin_bp)
+    table = pa.table(rows, schema=BINS_SCHEMA)
+    fails = check_bins(table, cdoc, bin_bp, table.num_rows)
     if fails:
         raise ValueError(f"gwas bins: {fails[0]}" + (f" (and {len(fails) - 1} more)" if len(fails) > 1 else ""))
     sink = pa.BufferOutputStream()
     with pa.ipc.new_stream(sink, BINS_SCHEMA) as w:
         w.write_table(table.combine_chunks())
     return {"file": store.put(pf.zstd_frame(sink.getvalue().to_pybytes(), level), EXT_BINS),
-            "bin_bp": bin_bp, "n_bins": len(t)}
+            "bin_bp": bin_bp, "n_bins": table.num_rows}
 
 
 def decode_bins(buf: bytes) -> pa.Table:
@@ -153,7 +185,7 @@ def decode_bins(buf: bytes) -> pa.Table:
 
 def read_bins(store: qs.Store, doc: dict) -> pa.Table | None:
     """An experiment's GWAS bin summary, or None when it has none."""
-    b = (doc.get("gwas") or {}).get("bins")
+    b = doc.get("bins")
     return decode_bins((store.immutable / b["file"]).read_bytes()) if b else None
 
 
@@ -161,7 +193,7 @@ def check_bins(t: pa.Table, cdoc: dict, bin_bp: int, n_bins: int) -> list[str]:
     """What `Store.validate` checks on a bin summary (SPEC.md section 10): the schema; `n_bins` rows;
     chromosomes of the variant catalog, in its table order, bins ascending and unique; every bin
     `[bin_start, bin_start + bin_bp)` aligned to `bin_bp` and inside the chromosome; the lead position
-    inside its bin; `0 < min_p <= 1`; `0 <= n_gws <= n_variants`, `n_variants >= 1`; `lead_ea` present."""
+    inside its bin; `0 < min_p <= 1`; `0 <= n_gws <= n_variants`, `n_variants >= 1`; `lead_alt` present."""
     if t.schema != BINS_SCHEMA:
         return [f"schema {t.schema.to_string(show_schema_metadata=False)!r} is not the bin schema"]
     fails = []
@@ -193,32 +225,49 @@ def check_bins(t: pa.Table, cdoc: dict, bin_bp: int, n_bins: int) -> list[str]:
         g, n = d["n_gws"][i], d["n_variants"][i]
         if g is None or n is None or n < 1 or g > n:
             fails.append(f"{where}: n_gws {g}, n_variants {n}")
-        if d["lead_beta"][i] is None or not d["lead_ea"][i]:
-            fails.append(f"{where}: lead beta or effect allele missing")
+        if d["lead_beta"][i] is None or not d["lead_alt"][i]:
+            fails.append(f"{where}: lead beta or alt allele missing")
     return fails
 
 
 def decode_index(buf: bytes) -> dict:
-    """{block_rows, n_values, chroms: {name: (first_position, end_offset)}} from a `.qgi` object."""
+    """{block_rows, version, n_values, chroms: {name: (first_position, end_offset)}} from a `.qgi` object.
+    The payload itself is offsets and the N table, identical in both versions; `version` comes from the
+    header and is what names the codec the `.qbg` files it points into were written with."""
     h = qs.parse_file_header(buf)
     if h["kind"] != KIND_GWAS_INDEX or h["chrom"] != qs.ALL:
         raise ValueError(f"gwas index: header kind {h['kind']} chromosome {h['chrom']!r}")
     out = pf.decode_gwas_index_payload(pf.zstd_unframe(buf[qs.HEADER_LEN:], None, "gwas index"), qs.HEADER_LEN)
     if len(out["chroms"]) != h["count"]:
         raise ValueError(f"gwas index: {len(out['chroms'])} chromosomes, header count {h['count']}")
-    return {"block_rows": h["page_size"], **out}
+    return {"block_rows": h["page_size"], "version": h["version"], **out}
 
 
-def read_window(store: qs.Store, doc: dict, chrom: str, lo: int, hi: int) -> dict:
-    """The GWAS rows with lo <= pos <= hi on `chrom`, through the index (one byte range), as columns."""
-    g = doc["gwas"]
+def read_window(store: qs.Store, doc: dict, chrom: str, lo: int, hi: int, codec=None) -> dict:
+    """The GWAS rows with lo <= pos <= hi on `chrom`, through the index (one byte range), as columns.
+
+    A GWAS block carries no magic, so the codec cannot be inferred from a block's bytes: the index's
+    file header version is the only thing that says which one wrote them, and reading a v2 file
+    with the v1 codec would decode 18-byte rows at a 21-byte stride and return plausible nonsense.
+    So the codec is taken from that header. A caller that passes one is asserting a version, and a
+    mismatch raises rather than reading at the wrong stride."""
+    # `doc` is the GWAS experiment itself: a GWAS is one scan, not a field on a QTL experiment
+    # (`plans/2026-10-07-experiment-model.md` D3)
+    g = doc
     idx = decode_index((store.immutable / g["index"]).read_bytes())
+    if codec is None:
+        codec = qs.codec_for(idx["version"])
+    elif idx["version"] != codec.FORMAT_VERSION:
+        raise ValueError(f"gwas: index declares format version {idx['version']}, "
+                         f"reading with the v{codec.FORMAT_VERSION} codec")
     empty = {"pos": np.zeros(0, np.int64), "ref": [], "alt": [], "beta": np.zeros(0), "se": np.zeros(0),
-             "af": np.zeros(0), "p": np.zeros(0), "n": np.zeros(0, np.int64), "rs_number": np.zeros(0, np.int64)}
+             "af": np.zeros(0), "p": np.zeros(0), "n": np.zeros(0, np.int64), "rs_number": np.zeros(0, np.int64),
+             # v2 credible sets (F1): `cs_row` indexes the rows *returned*, not a block's
+             "cs_row": np.zeros(0, np.int64), "cs_pip": np.zeros(0, np.float32), "cs_id": np.zeros(0, np.uint8)}
     if chrom not in idx["chroms"]:
         return empty
     fp, eo = idx["chroms"][chrom]
-    w = pf.gwas_window(fp, eo, lo, hi, qs.HEADER_LEN)
+    w = codec.gwas_window(fp, eo, lo, hi, qs.HEADER_LEN)
     if w is None:
         return empty
     start, end, a, b = w
@@ -226,14 +275,22 @@ def read_window(store: qs.Store, doc: dict, chrom: str, lo: int, hi: int) -> dic
         f.seek(a)
         buf = f.read(b - a)
     cols = {k: [] for k in empty}
-    base = a
+    base, out_rows = a, 0
     for k in range(start, end + 1):
         s0 = (qs.HEADER_LEN if k == 0 else int(eo[k - 1])) - base
-        r = pf.decode_gwas_block(buf[s0:int(eo[k]) - base], idx["n_values"])
+        r = codec.decode_gwas_block(buf[s0:int(eo[k]) - base], idx["n_values"])
         keep = (r["position"] >= lo) & (r["position"] <= hi)
         cols["pos"].append(r["position"][keep])
         for c in ("beta", "se", "af", "p", "n", "rs_number"):
             cols[c].append(np.asarray(r[c])[keep])
         cols["ref"] += [x for x, m in zip(r["ref"], keep) if m]
         cols["alt"] += [x for x, m in zip(r["alt"], keep) if m]
-    return {k: (v if k in ("ref", "alt") else np.concatenate(v)) for k, v in cols.items()}
+        if "cs_row" in r and len(r["cs_row"]):
+            # a record survives if its row does; its row number moves to the returned table
+            cs_rows = np.asarray(r["cs_row"], dtype=np.int64)
+            m = keep[cs_rows]
+            cols["cs_row"].append(np.cumsum(keep)[cs_rows[m]] - 1 + out_rows)
+            cols["cs_pip"].append(np.asarray(r["cs_pip"])[m])
+            cols["cs_id"].append(np.asarray(r["cs_id"])[m])
+        out_rows += int(keep.sum())
+    return {k: (v if k in ("ref", "alt") else np.concatenate(v) if v else empty[k]) for k, v in cols.items()}

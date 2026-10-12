@@ -65,7 +65,8 @@ def write_gtf(path: Path, lines=None) -> Path:
     return path
 
 
-def build_fixture(st: qs.Store, annot_id: str = "ann", genes=(("ENSG1", "chr1", 1, 50), ("ENSG2", "chr1", 60, 90))) -> dict:
+def build_fixture(st: qs.Store, annot_id: str = "ann", genes=(("ENSG1", "chr1", 1, 50), ("ENSG2", "chr1", 60, 90)),
+                  version: int = qs.FORMAT_VERSION) -> dict:
     """A real annotation (tables, gene models, lookup) in `st`, from a GTF of one-exon genes
     `(gene_id, chr, start, end)` on `+`, named `SYM<n>`: what the other suites' stores point at."""
     lines = []
@@ -74,7 +75,7 @@ def build_fixture(st: qs.Store, annot_id: str = "ann", genes=(("ENSG1", "chr1", 
         lines += [gtf_line(chrom, "gene", start, end, "+", attrs),
                   gtf_line(chrom, "exon", start, end, "+", attrs + f' transcript_id "T{i + 1}.1"; exon_number 1;')]
     st.root.mkdir(parents=True, exist_ok=True)
-    return an.build(st, annot_id, write_gtf(st.root / f"{annot_id}.gtf.gz", lines))
+    return an.build(st, annot_id, write_gtf(st.root / f"{annot_id}.gtf.gz", lines), version=version)
 
 
 @case
@@ -85,7 +86,7 @@ def parse_follows_the_v0_rules():
     assert [g["gene_id"] for g in genes] == ["ENSG00000000001", "ENSG00000000002"], genes
     assert genes[0] == {"gene_id": "ENSG00000000001", "version": 5, "name": "AAA", "biotype": "protein_coding",
                         "chr": "chr1", "tss": 100, "strand": "+", "start": 100, "end": 900}
-    # minus strand: the TSS is the gene's end, the same rule steps_gtf uses
+    # minus strand: the TSS is the gene's end
     assert genes[1]["tss"] == 1500 and genes[1]["strand"] == "-" and genes[1]["biotype"] == "lncRNA"
     ex = t["exons"].to_pylist()
     assert len(ex) == 4, ex                                    # the PAR_Y exon is dropped with its gene

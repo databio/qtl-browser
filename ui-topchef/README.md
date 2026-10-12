@@ -21,8 +21,11 @@ npm run dev                                               # the live store, from
 | `npm run store-check` | validate a local store against the Python decoders |
 | `npm run build` | `tsc -b && vite build`; `.env.production` points at the B2 store |
 | `bench/` | browser smoke suites and a gene-page cost harness (`bench/README.md`) |
+| `/dev/faults` | dev server only: a link per error surface, each loading a page with `?fault=<name>` (`src/lib/faults.ts`) |
 
-`VITE_EXPERIMENT` selects the experiment, default `topchef`. Every push to main that touches
+`VITE_COLLECTION_OF` names an experiment (default `topchef_ge_cis`); the app opens every experiment
+of its collection, the cis and trans scans of each phenotype type. `VITE_GWAS` names the GWAS
+experiment (default `dcm_jurgens2024_biobanks`). Every push to main that touches
 `ui-topchef/` builds and deploys it to the Worker `qtl-browser-topchef` (`wrangler.jsonc`,
 `.github/workflows/deploy-topchef.yml`); the repo README has the details.
 

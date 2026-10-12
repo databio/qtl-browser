@@ -92,59 +92,6 @@ def strip_metadata(table: pa.Table) -> pa.Table:
     return table.replace_schema_metadata(None)
 
 
-# ---- the frozen v0 build's content-addressed files (v0 SPEC section 3) ---------------------------
-# A logical key uses letters, digits, "_" and "/" only, so the "." in a published name is
-# unambiguous: <stem>.<sha16>.<ext>, stem being the key with "/" replaced by ".".
-NAME = re.compile(r"^(?P<stem>[A-Za-z0-9_]+(?:\.[A-Za-z0-9_]+)*)\.(?P<sha>[0-9a-f]{16})\.(?P<ext>[a-z0-9.]+)$")
-
-
-def addressed_files(cfg) -> dict[str, Path]:
-    """Logical key -> its one current file. Fails on a stray file or two builds of one key."""
-    out: dict[str, Path] = {}
-    for p in sorted(cfg.immutable.glob("*")):
-        m = NAME.match(p.name)
-        if not m:
-            die(f"unexpected file in {cfg.immutable}: {p.name}")
-        key = m["stem"].replace(".", "/")
-        if key in out:
-            die(f"two builds of {key}: {out[key].name}, {p.name}")
-        out[key] = p
-    return out
-
-
-UNBUILT_SHA = "0" * 16
-
-
-def pack_file(cfg, key: str, ext: str) -> Path:
-    """The published path of `key`, or the name it would carry if the step that writes it had run.
-    That placeholder does not exist, so a caller can report a FAIL instead of dying."""
-    f = addressed_files(cfg).get(key)
-    return f if f is not None else cfg.immutable / f"{key.replace('/', '.')}.{UNBUILT_SHA}.{ext}"
-
-
-# the v0 search index is not a pack, but it is content-addressed like one (v0 SPEC section 3)
-SEARCH_INDEX_EXT = "arrow.zst"
-
-
-def search_index_path(cfg) -> Path:
-    """The v0 search index (v0 SPEC section 6): an Arrow IPC stream in a single zstd frame."""
-    return pack_file(cfg, "search_index", SEARCH_INDEX_EXT)
-
-
-def read_search_index(cfg, columns: list[str] | None = None) -> pa.Table:
-    from . import packfmt_v0 as packfmt
-    path = search_index_path(cfg)
-    raw = packfmt.zstd_unframe(path.read_bytes(), None, path.name)
-    t = pa.ipc.open_stream(pa.py_buffer(raw)).read_all()
-    return t.select(columns) if columns else t
-
-
-def register_search_index(cfg, con, name: str = "search_index") -> str:
-    """Make the search index queryable as `name` on a DuckDB connection."""
-    con.register(name, read_search_index(cfg))
-    return name
-
-
 def variants_path(cfg) -> Path:
     """`_tables/variants.parquet`: every tested variant, sorted by (chr, position, A1, A2)."""
     return cfg.tables / "variants.parquet"

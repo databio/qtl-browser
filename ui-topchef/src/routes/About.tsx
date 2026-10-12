@@ -5,8 +5,9 @@ import { KvTable } from '@/components/kv-table'
 import { PIPELINE, PREPRINT, ZENODO } from '@/lib/links'
 import { seqcolCollectionUrl } from '@/lib/chrom-sizes'
 import { useSignificance, useStoreInfo } from '@/contexts/store-context'
-import { roundingFacts } from '@/lib/rounding'
+import { gwasRoundingFacts, roundingFacts, transRoundingFacts } from '@/lib/rounding'
 import { NOT_YET } from '@/components/states'
+import { colocGeneCount, useColocLists } from '@/lib/coloc'
 
 const GWAS_PAPER = 'https://doi.org/10.1038/s41588-024-01975-5'
 const CVDKP = 'https://kp4cd.org/dataset_downloads/mi'
@@ -16,12 +17,16 @@ const REPO = 'https://github.com/databio/qtl-browser'
 export default function About() {
   const m = useStoreInfo()
   const sig = useSignificance()
+  const colocs = useColocLists()
   const sources = m?.sources ?? {}
   const counts = m?.counts ?? {}
-  const g = m?.experiment.gwas?.source
+  const g = m?.gwas?.source
   const gwas = g?.file ? { file: g.file, n_cases: g.n_cases ?? 0, n_controls: g.n_controls ?? 0 } : null
-  const bins = m?.experiment.gwas?.bins ?? null
-  const rounding = roundingFacts(m)
+  const bins = m?.gwas?.bins ?? null
+  const rounding = roundingFacts(m), transRounding = transRoundingFacts(m), gwasRounding = gwasRoundingFacts(m)
+  // the GWAS publication from its collection document, falling back to the paper this app was built around
+  const gwasPaper = m?.gwasStudy?.doi ? `https://doi.org/${m.gwasStudy.doi}` : GWAS_PAPER
+  const gwasLabel = m?.gwasStudy?.first_author && m.gwasStudy.year ? `${m.gwasStudy.first_author.split(' ').pop()} et al. ${m.gwasStudy.year}` : 'Jurgens et al. 2024'
   const gwasSet = gwas?.file.includes('BiobanksOnly') ? 'biobank-only meta-analysis' : gwas?.file.includes('MTAG') ? 'MTAG analysis' : 'meta-analysis'
   return (
     <Page>
@@ -46,12 +51,16 @@ export default function About() {
                 allele and A1 the alternate. Allele frequencies and betas are A1's; betas are in standard-deviation
                 units of the phenotype per A1 allele.</li>
               {rounding && <li><strong>Rounded values</strong>: per-variant p-values, betas, standard errors, and allele
-                frequencies are stored in compressed form, so a p-value shown here can differ from the source by up to{' '}
-                {rounding.pPct}%{rounding.slopeSe && <> and a beta by up to {rounding.slopeSe} standard errors</>}. Gene-level
-                results and the DCM GWAS values are exact, and <ExternalLink href={ZENODO}>exact per-variant values are on
+                frequencies are stored as 16-bit codes, so a cis p-value shown here can differ from the source by up to{' '}
+                {rounding.pPct}%, a beta by up to {rounding.betaSe} standard errors, and a standard error by up to {rounding.sePct}%
+                {transRounding && <>; trans values by up to {transRounding.pPct}%, {transRounding.betaSe} standard errors and {transRounding.sePct}%</>}
+                {gwasRounding && <>; GWAS values by up to {gwasRounding.pPct}%, {gwasRounding.betaSe} standard errors and {gwasRounding.sePct}%</>}.
+                These are bounds the store records with each experiment; the largest error actually found at build time sits below
+                each of them. Gene-level results are exact, and <ExternalLink href={ZENODO}>exact per-variant values are on
                 Zenodo</ExternalLink>.</li>}
               <li><strong>Splice phenotypes</strong>: leafcutter intron excision ratios, shown as intron coordinates and strand. Introns sharing a splice site share a cluster. Every tested intron has its permutation result and its per-variant nominal statistics.</li>
-              <li><strong>Colocalized loci</strong>: the 21 eQTL and 4 sQTL genes with coloc PP.H4 above 0.8 against the DCM GWAS. PJVK and CDKN1A are not eGenes by the permutation rule; their colocalization used nominal statistics.</li>
+              {colocs && colocs.length > 0 && <li><strong>Colocalized loci</strong>: the {colocGeneCount(colocs, 'eQTL')} eQTL genes (coloc PP.H4 &gt; 0.8) and {colocGeneCount(colocs, 'sQTL')} sQTL genes (PP.H4 ≥ 0.8) against the DCM GWAS. PJVK and CDKN1A are not eGenes by the permutation rule; their colocalization used nominal statistics.</li>}
+              <li><strong>Colocalization</strong>: coloc.abf (Giambartolomei et al. 2014) runs in your browser over the locus in view, from the z statistic and standard error of each trait, with coloc's default priors. It assumes one causal variant in the region and uses no LD. The quantitative-trait prior (W = 0.15²) is a prior on the effect per <em>standard deviation of the phenotype</em>, so it holds because every QTL set here was quantified on a standardized scale — tensorQTL inverse-normal transforms expression and splice ratios. A study reporting effects in raw units (a methylation β-value, an untransformed concentration) would need a different prior, and nothing in the store records the scale, so check it before adding one.</li>
             </ul>
             <h2>Coordinates and identifiers</h2>
             <ul>
@@ -62,7 +71,7 @@ export default function About() {
             <h2>DCM GWAS comparison</h2>
             <p>
               The landing track and the QTL-versus-GWAS panel use the dilated cardiomyopathy {gwasSet} of{' '}
-              <ExternalLink href={GWAS_PAPER}>Jurgens et al. 2024</ExternalLink>
+              <ExternalLink href={gwasPaper}>{gwasLabel}</ExternalLink>
               {gwas && <> ({gwas.n_cases.toLocaleString()} cases, {gwas.n_controls.toLocaleString()} controls)</>} from the{' '}
               <ExternalLink href={CVDKP}>Cardiovascular Disease Knowledge Portal</ExternalLink>. Variants are matched on GRCh38
               position and alleles in either orientation, and the GWAS effect is signed to the QTL effect allele.{' '}

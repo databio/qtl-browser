@@ -1,9 +1,10 @@
-// Smoke check of the trans tables on the qtlb v1 store (SPEC.md sections 8 and 9), against the local
-// preview serving the chr21/chr22 smoke store. Gene page: both tabs page off the frames of the gene's
-// phenotypes in the trans objects, one range request per object (a gene's frames are contiguous); the rows exported as CSV must equal `results.read_trans` for the
-// same phenotypes (written by `ui-topchef/scripts/store_reference.py`, path in SMOKE_REF). Variant page: the
-// hits frame's kind 2 records.
-//   SMOKE_REF=/tmp/ref.json node bench/smoke_trans_tab.mjs
+// Smoke check of the trans tables on a version 2 store (SPEC.md sections 8 and 9), against the local
+// preview serving the genome-wide local store. Gene page: both tabs page off the frames of the gene's
+// phenotypes in the trans experiments' objects, one range request per object (a gene's frames are
+// contiguous); the rows exported as CSV must equal `results.read_trans` for the same phenotypes
+// (written by `ui-topchef/scripts/store_reference.py`, whose --smoke-genes and --smoke-variants
+// default to this suite's; path in SMOKE_REF). Variant page: the hits frames' trans records.
+//   SMOKE_REF=/tmp/ref-v2.json node bench/smoke_trans_tab.mjs
 import { chromium } from '../node_modules/playwright/index.mjs'
 import { readFileSync } from 'node:fs'
 
@@ -11,9 +12,13 @@ const BASE = process.env.SMOKE_BASE ?? 'http://localhost:4173'
 const REF = process.env.SMOKE_REF ? JSON.parse(readFileSync(process.env.SMOKE_REF, 'utf8')) : null
 const results = []
 const check = (ok, msg) => { results.push([ok, msg]); console.log(`${ok ? 'PASS' : 'FAIL'} ${msg}`) }
-const exp = await (await fetch(`${BASE}/data/experiments/topchef.json`)).json()
-const TRANS = new Set(exp.results.map(r => r.trans?.file).filter(Boolean))
-check(TRANS.size === 2, `experiment ${exp.id} has ${TRANS.size} trans objects (ge, leafcutter)`)
+const store = await (await fetch(`${BASE}/data/store.json`)).json()
+// the study the app opens (its default VITE_COLLECTION_OF and VITE_GWAS), not every cohort in the store
+const studyIds = Object.keys(store.experiments).filter(id =>
+  store.experiments[id].collection === store.experiments.topchef_ge_cis.collection || id === 'dcm_jurgens2024_biobanks')
+const docs = await Promise.all(studyIds.map(async id => (await fetch(`${BASE}/data/experiments/${id}.json`)).json()))
+const TRANS = new Set(docs.filter(d => d.kind === 'qtl_trans').map(d => d.file))
+check(TRANS.size === 2, `${store.name} has ${TRANS.size} trans experiments (ge, leafcutter), one object each`)
 
 const browser = await chromium.launch({ headless: true })
 async function open(path) {
@@ -40,7 +45,8 @@ function compare(got, ids, label) {
     rs: t.rs_number[i] ? `rs${t.rs_number[i]}` : '', p: t.p[i], beta: t.beta[i], se: t.se[i] })))
   const key = r => `${r.id}|${r.chr}:${r.pos}`
   const byKey = new Map(want.map(r => [key(r), r]))
-  let bad = 0, worst = { p: 0, beta: 0, se: 0 }
+  let bad = 0
+  const worst = { p: 0, beta: 0, se: 0 }
   for (const r of got) {
     const w = byKey.get(key({ id: r.phenotype_id ?? [...ids][0], chr: r.variant_chr, pos: Number(r.position) }))
     if (!w || (r.rsid || '') !== w.rs) { bad++; continue }
@@ -52,12 +58,12 @@ function compare(got, ids, label) {
     `${label}: ${got.length} exported rows equal read_trans (${want.length}); worst relative p ${worst.p.toPrecision(2)}, beta ${worst.beta.toPrecision(2)}, SE ${worst.se.toPrecision(2)}`)
 }
 
-// ---- SMARCB1: 7 trans eQTL rows, 34 trans sQTL rows ----
+// ---- SMARCB1: 895 trans eQTL rows, 933 trans sQTL rows ----
 {
   const { ctx, page, errors, reqs } = await open('/gene/SMARCB1')
-  await page.waitForSelector('[data-trans-total="7"]', { timeout: 60_000 })
+  await page.waitForSelector('[data-trans-total="895"]', { timeout: 60_000 })
   const n = reqs.filter(p => TRANS.has(p.split('/').pop())).length
-  check(n === 2, `SMARCB1: ${n} trans object requests (per phenotype type, one range for the gene's frames; no header reads)`)
+  check(n === 2, `SMARCB1: ${n} trans object requests (per trans experiment, one range for the gene's frames; no header reads)`)
   const e = await csv(page)
   check(e.header.join(',') === 'variant_chr,position,rsid,af,pval,beta,beta_se,r2', `SMARCB1: trans eQTL CSV header ${e.header.join(',')}`)
   compare(e.rows, new Set(['ENSG00000099956']), 'SMARCB1 trans eQTL CSV')
@@ -67,35 +73,36 @@ function compare(got, ids, label) {
   check(first !== await table(page).locator('tbody tr td').first().innerText(), 'SMARCB1: sorting the trans table by p flips the first row')
   await table(page).locator('th button:text-is("p")').click()
   await page.getByText(/^sQTL/).first().click()
-  await page.waitForSelector('[data-trans-total="34"]', { timeout: 60_000 })
+  await page.waitForSelector('[data-trans-total="933"]', { timeout: 60_000 })
   const s = await csv(page)
   const ids = new Set(s.rows.map(r => r.phenotype_id))
-  check(s.header[0] === 'phenotype_id' && [...ids].every(x => x.endsWith('ENSG00000099956.20') || x.includes('ENSG00000099956')), `SMARCB1: trans sQTL CSV names ${ids.size} introns of the gene`)
+  check(s.header[0] === 'phenotype_id' && [...ids].every(x => x.includes('ENSG00000099956')), `SMARCB1: trans sQTL CSV names ${ids.size} introns of the gene`)
   compare(s.rows, ids, 'SMARCB1 trans sQTL CSV')
   check(errors.length === 0, `SMARCB1: no console errors${errors.length ? ` (${errors.slice(0, 2).join(' | ')})` : ''}`)
   await ctx.close()
 }
 
-// ---- MICAL3: 140 trans sQTL rows across its introns, no trans eQTL rows ----
+// ---- MICAL3: 5,436 trans sQTL rows across its 33 introns, 69 trans eQTL rows ----
 {
   const { ctx, page, errors, reqs } = await open('/gene/MICAL3?tab=sqtl')
-  await page.waitForSelector('[data-trans-total="140"]', { timeout: 60_000 })
+  await page.waitForSelector('[data-trans-total="5436"]', { timeout: 60_000 })
   const n = reqs.filter(p => TRANS.has(p.split('/').pop())).length
-  check(n === 1, `MICAL3: ${n} trans object request (sQTL only: one range over all its introns' frames)`)
+  check(n === 2, `MICAL3: ${n} trans object requests (one range over all its introns' frames, one for its gene's)`)
   const s = await csv(page)
   compare(s.rows, new Set(s.rows.map(r => r.phenotype_id)), 'MICAL3 trans sQTL CSV')
   await page.getByText(/^eQTL$/).first().click()
-  await page.waitForSelector('[data-trans-total="0"]', { timeout: 60_000 })
-  check(await page.getByText('No trans associations.').count() === 1, 'MICAL3: eQTL tab shows an empty trans table')
+  await page.waitForSelector('[data-trans-total="69"]', { timeout: 60_000 })
+  const e = await csv(page)
+  compare(e.rows, new Set(['ENSG00000243156']), 'MICAL3 trans eQTL CSV')
   check(errors.length === 0, `MICAL3: no console errors${errors.length ? ` (${errors.slice(0, 2).join(' | ')})` : ''}`)
   await ctx.close()
 }
 
-// ---- variant page: rs4819361's 10 trans associations from its hits frame ----
+// ---- variant page: rs4819361's 10 trans associations from its hits frames ----
 {
   const { ctx, page, errors, reqs } = await open('/variant/rs4819361')
   await page.waitForSelector('[data-trans-total="10"]', { timeout: 60_000 })
-  check(!reqs.some(p => TRANS.has(p.split('/').pop())), 'rs4819361: no trans object request (the hits frame holds the rows)')
+  check(!reqs.some(p => TRANS.has(p.split('/').pop())), 'rs4819361: no trans object request (the hits frames hold the rows)')
   const v = await csv(page)
   // every row names a phenotype whose trans frame holds this variant with the same p and beta
   if (REF) {
@@ -105,9 +112,9 @@ function compare(got, ids, label) {
       // the variant-keyed CSV lists genes, not the variant: rs4819361 is chr21:44,000,956
       const i = t ? t.pos.findIndex((p, k) => p === 44000956 && t.chr[k] === 'chr21') : -1
       // hits carry the source's -log10 p and beta as f32; the frame holds them quantized, so they
-      // agree within the frame's rounding bounds (SPEC section 13: nlp_max / 131066, beta_max / 65534)
+      // agree within half a step (SPEC section 13: nlp_max / 65533 and beta_max / 32766 per step)
       if (i < 0 || Math.abs(-Math.log10(Number(r.pval)) - t.nlp[i]) > t.nlp_max / 131066 + 1e-6 ||
-          Math.abs(Number(r.beta) - t.beta[i]) > t.beta_max / 65534 + 1e-6 * Math.abs(t.beta[i])) bad++
+          Math.abs(Number(r.beta) - t.beta[i]) > t.beta_max / 65532 + 1e-6 * Math.abs(t.beta[i])) bad++
     }
     check(bad === 0 && v.rows.length === 10, `rs4819361: its ${v.rows.length} trans rows match the phenotypes' trans frames (${bad} off)`)
   }

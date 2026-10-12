@@ -5,8 +5,10 @@ import { Segmented } from '@/components/segmented'
 import { SortableTh, type SortState } from '@/components/sortable-th'
 import { Pager } from '@/components/pager'
 import { Empty, TableSkeleton } from '@/components/states'
+import { ErrorPage } from '@/components/error-page'
 import { fmtInt } from '@/lib/format'
-import { useSignificance } from '@/contexts/store-context'
+import { useCollectionCrumbs, useSignificance, useStoreInfo } from '@/contexts/store-context'
+import { EQTL_TYPE, SQTL_TYPE } from '@/lib/store'
 import { allHits } from '@/lib/gene-index'
 import type { SearchHit } from '@/lib/queries'
 import { ROW_LINK, ROW_LINK_TEXT, useRowLink } from '@/lib/row-link'
@@ -17,43 +19,54 @@ const CHR_ORDER = [...Array.from({ length: 22 }, (_, i) => `chr${i + 1}`), 'chrX
 /** Browse every annotated gene (every chromosome's genes and search index part, read once): filter, sort, page. */
 export default function Genes() {
   const sig = useSignificance()
+  const home = useCollectionCrumbs()
+  const m = useStoreInfo()
   const [all, setAll] = useState<SearchHit[] | null>(null)
   // the significance filters only exist for an experiment that assessed it, so the default moves to
   // `tested` rather than opening on a filter that can match nothing (lib/significance.ts)
+  // and to the experiment's own scan: an eQTL scan opens on its eGenes, an sQTL scan on its sQTL
+  // genes, a trans scan (no cis results) on every gene
+  const hasE = m?.cis.has(EQTL_TYPE) ?? false, hasS = m?.cis.has(SQTL_TYPE) ?? false
   const [filter, setFilter] = useState<Filter>('egenes')
-  useEffect(() => { if (!sig.assessed) setFilter(f => (f === 'egenes' || f === 'sqtl' ? 'tested' : f)) }, [sig.assessed])
+  useEffect(() => {
+    if (!m) return
+    setFilter(!hasE && !hasS ? 'all' : !sig.assessed ? 'tested' : hasE ? 'egenes' : 'sqtl')
+  }, [m, hasE, hasS, sig.assessed])
   const [needle, setNeedle] = useState('')
   const [sort, setSort] = useState<SortState>({ by: 'symbol', order: 'asc' })
   const [offset, setOffset] = useState(0)
   const [pageSize, setPageSize] = useState(25)
   const rowLink = useRowLink()
 
-  useEffect(() => { allHits().then(setAll).catch(e => console.error(e)) }, [])
+  const [error, setError] = useState<unknown>(null)
+  useEffect(() => { allHits().then(setAll).catch(e => { console.error(e); setError(e) }) }, [])
   useEffect(() => setOffset(0), [filter, needle, sort])
 
   const shown = useMemo(() => {
     if (!all) return []
     const n = needle.trim().toUpperCase()
     let out = all.filter(g =>
-      (filter === 'all' || (filter === 'tested' && g.tested) || (filter === 'egenes' && g.is_egene) || (filter === 'sqtl' && g.n_sqtl_sig > 0)) &&
+      (filter === 'all' || (filter === 'tested' && (hasE ? g.tested : g.has_results)) || (filter === 'egenes' && g.is_egene) || (filter === 'sqtl' && g.n_sqtl_sig > 0)) &&
       (!n || (g.symbol ?? '').toUpperCase().startsWith(n) || g.gene_id.startsWith(n)))
     const dir = sort.order === 'asc' ? 1 : -1
     if (sort.by === 'symbol') out = out.sort((a, b) => dir * (a.symbol ?? a.gene_id).localeCompare(b.symbol ?? b.gene_id))
     else if (sort.by === 'position') out = out.sort((a, b) => dir * ((CHR_ORDER.indexOf(a.chr) - CHR_ORDER.indexOf(b.chr)) || (a.tss - b.tss)))
     else if (sort.by === 'n_sqtl_sig') out = out.sort((a, b) => dir * (a.n_sqtl_sig - b.n_sqtl_sig))
     return out
-  }, [all, filter, needle, sort])
+  }, [all, filter, needle, sort, hasE])
 
   const page = shown.slice(offset, offset + pageSize)
+  if (error) return <Page><ErrorPage title="The gene list could not be loaded." error={error} /></Page>
   return (
     <Page>
-      <PageHeader title="Genes" meta={all ? fmtInt(shown.length) : undefined}
-        description="All GENCODE v34 genes; tested genes carry eQTL and sQTL results." />
+      <PageHeader crumbs={[...home, { label: 'Genes' }]} title="Genes" meta={all ? fmtInt(shown.length) : undefined}
+        description={`All ${m?.annotation.id ?? ''} genes; tested genes carry this experiment's QTL results.`} />
       <div className="space-y-2">
         <div className="flex flex-wrap items-center justify-between gap-2">
           <Segmented value={filter} onChange={setFilter} options={[
-            ...(sig.assessed ? [{ value: 'egenes' as Filter, label: 'eGenes' }, { value: 'sqtl' as Filter, label: 'sQTL genes' }] : []),
-            { value: 'tested', label: 'Tested' }, { value: 'all', label: 'All' }]} />
+            ...(sig.assessed && hasE ? [{ value: 'egenes' as Filter, label: 'eGenes' }] : []),
+            ...(sig.assessed && hasS ? [{ value: 'sqtl' as Filter, label: 'sQTL genes' }] : []),
+            ...(hasE || hasS ? [{ value: 'tested' as Filter, label: 'Tested' }] : []), { value: 'all', label: 'All' }]} />
           <label className="input input-bordered input-sm flex h-8 w-64 items-center gap-2 rounded-lg">
             <input type="search" className="grow bg-transparent outline-none" placeholder="Filter by symbol or ID…" value={needle} onChange={e => setNeedle(e.target.value)} />
           </label>

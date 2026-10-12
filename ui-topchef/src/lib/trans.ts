@@ -2,20 +2,21 @@
  * The trans tables, from the qtlstore (SPEC.md sections 8 and 9), as in-memory DuckDB tables with
  * the `TransRow` columns, so `transRows`, `transCount` and `transAll` page off them.
  *
- * - Gene page: the frames of the gene's phenotypes (its eQTL phenotype and every intron, trans-only
- *   ones included) in each phenotype type's trans object. The builder writes a gene's frames back to
- *   back (SPEC section 9), so they are one request per object: the smallest `trans_off` to the
- *   largest `trans_off + trans_len`.
- * - Variant page: the hits frame's kind 2 records (already fetched for the lead and credible-set
- *   lists), one per trans association of the variant.
- *
- * The SE and r2 are derived from -log10 p and beta with the phenotype type's dof (none without one).
+ * - Gene page: the frames of the gene's phenotypes (its eQTL phenotype and every intron, the
+ *   trans-only ones included) in each trans scan's object. The builder writes a gene's frames back
+ *   to back (SPEC section 9), so they are one request per object: the smallest `trans_off` to the
+ *   largest `trans_off + trans_len`. The SE is stored in the frame; r² is formed from beta, SE and
+ *   the scan's dof.
+ * - Variant page: each trans scan's hits records for the variant, one per trans association. A
+ *   hits record carries -log10 p and beta but no SE (SPEC section 8), so the SE and r² here are
+ *   rebuilt through the inverse t with the scan's dof -- the one derived statistic left in the
+ *   reader -- and can differ in the last digits from the gene page's stored SE for the same row.
  */
 import { Int64, makeVector, Table, tableToIPC, Utf8, vectorFromArray } from 'apache-arrow'
 import { getDB, insertArrow, tableName } from './db'
 import { geneInfo, phenotypesByOrd, transPhenotypesOfGene } from './gene-index'
 import { EQTL_TYPE, fetchDecoded, getStore, SQTL_TYPE, transFile, type Store } from './store'
-import { decodeTransFrame, HIT_TRANS, transSe, type VariantRecord } from './store-decode'
+import { decodeTransFrame, HIT_TRANS, transR2, transSeFromHit, type VariantRecord } from './store-decode'
 import type { Hits } from './variant'
 import type { SearchHit } from './queries'
 
@@ -61,12 +62,12 @@ export async function geneTransTable(hit: SearchHit): Promise<string> {
     .sort((a, b) => (a.phenotype_type < b.phenotype_type ? -1 : a.phenotype_type > b.phenotype_type ? 1 : a.trans_off - b.trans_off))
   const out = emptyRows()
   const detail = { gene_id: hit.gene_id }
-  // one request per phenotype type, both in flight at once; rows go out eQTL first
+  // one request per trans scan, both in flight at once; rows go out eQTL first
   const perType = await Promise.all([EQTL_TYPE, SQTL_TYPE].map(async type => {
     const mine = frames.filter(f => f.phenotype_type === type)
     const tf = transFile(s, type)
     if (!mine.length) return null
-    if (!tf) throw new Error(`experiment ${s.experiment.id}: phenotypes of ${hit.gene_id} have ${type} trans frames but no trans object`)
+    if (!tf) throw new Error(`phenotypes of ${hit.gene_id} have ${type} trans frames but the study has no ${type} trans scan`)
     // the gene's frames are contiguous (sorted by trans_off above), so one range covers them all
     for (let k = 1; k < mine.length; k++)
       if (mine[k].trans_off !== mine[k - 1].trans_off + mine[k - 1].trans_len)
@@ -80,17 +81,15 @@ export async function geneTransTable(hit: SearchHit): Promise<string> {
   for (const t of perType) {
     if (!t) continue
     const { type, tf, mine, decoded } = t
-    const tCache = new Map<number, number>()
     mine.forEach((f, k) => {
       const fr = decoded[k]
       if (fr.n !== f.n_trans) throw new Error(`${tf.name}: ${f.phenotype_id} frame has ${fr.n} rows, the search index says ${f.n_trans}`)
       for (let i = 0; i < fr.n; i++) {
-        const { se, r2 } = transSe(fr.nlp[i], fr.beta[i], tf.dof, tCache)
         out.qtl.push(qtlOf(type)); out.phenotype.push(f.phenotype_id); out.gene.push(hit.gene_id); out.symbol.push(hit.symbol)
         out.geneChr.push(hit.chr); out.tss.push(BigInt(hit.tss))
         out.variantChr.push(chromName(s, fr.ordinal[i])); out.position.push(fr.position[i])
         out.rsid.push(fr.rsNumber[i] ? `rs${fr.rsNumber[i]}` : null); out.af.push(fr.af[i])
-        out.pval.push(fr.pval[i]); out.beta.push(fr.beta[i]); out.se.push(se); out.r2.push(r2)
+        out.pval.push(fr.pval[i]); out.beta.push(fr.beta[i]); out.se.push(fr.se[i]); out.r2.push(transR2(fr.beta[i], fr.se[i], tf.dof))
       }
     })
   }
@@ -105,32 +104,29 @@ function chromName(s: Store, ordinal: number): string {
 
 interface HitGene { ord: number; phenotype_type: string; phenotype_id: string; gene_id: string | null; symbol: string | null; chr: string | null; tss: number | null }
 
-/** One variant's trans rows, from its hits records (kind 2); the caller drops the table. */
+/** One variant's trans rows, from each trans scan's hits records (kind 2); the caller drops the table. */
 export async function variantTransTable(v: VariantRecord, hits: Hits): Promise<string> {
-  const s = await getStore()
-  const f = hits.frame
-  const recs = hits.trans
   const out = emptyRows()
-  if (recs.length) {
-    const ords = [...new Set(recs.map(r => f.ord[r]))]
-    // each phenotype from its chromosome's search index part (the trans-only part for those with
-    // none), and its gene's symbol, chromosome and TSS from the annotation
+  for (const set of hits.sets) {
+    if (set.experiment.kind !== 'qtl_trans' || !set.trans.length) continue
+    const f = set.frame, e = set.experiment
+    const ords = [...new Set(set.trans.map(r => f.ord[r]))]
+    // each phenotype from its part of this scan's index (the unplaced part for those with no
+    // chromosome), and its gene's symbol, chromosome and TSS from the annotation
     const genes = new Map<number, HitGene>()
-    await Promise.all([...(await phenotypesByOrd(ords)).values()].map(async p => {
+    await Promise.all([...(await phenotypesByOrd(e, ords)).values()].map(async p => {
       const g = p.gene_id ? await geneInfo(p.gene_id, p.chr) : null
       genes.set(p.ord, { ord: p.ord, phenotype_type: p.phenotype_type, phenotype_id: p.phenotype_id, gene_id: p.gene_id,
         symbol: g?.name ?? null, chr: g?.chr ?? null, tss: g?.tss ?? null })
     }))
-    const caches = new Map<string, Map<number, number>>()
-    for (const r of recs) {
+    const tCache = new Map<number, number>()
+    for (const r of set.trans) {
       if (f.kind[r] !== HIT_TRANS) continue
       const g = genes.get(f.ord[r])
-      if (!g) throw new Error(`the search index has no phenotype with ord ${f.ord[r]}`)
-      const dof = s.results.get(g.phenotype_type)?.dof ?? null
-      if (!caches.has(g.phenotype_type)) caches.set(g.phenotype_type, new Map())
+      if (!g) throw new Error(`experiment ${e.id}: the search index has no phenotype with ord ${f.ord[r]}`)
       const nlp = f.value[r], beta = f.beta[r]
-      const { se, r2 } = transSe(nlp, beta, dof, caches.get(g.phenotype_type))
-      out.qtl.push(qtlOf(g.phenotype_type)); out.phenotype.push(g.phenotype_id); out.gene.push(g.gene_id ?? g.phenotype_id)
+      const { se, r2 } = transSeFromHit(nlp, beta, e.dof, tCache)
+      out.qtl.push(qtlOf(e.phenotype_type)); out.phenotype.push(g.phenotype_id); out.gene.push(g.gene_id ?? g.phenotype_id)
       out.symbol.push(g.symbol); out.geneChr.push(g.chr); out.tss.push(g.tss == null ? null : BigInt(g.tss))
       out.variantChr.push(v.chr); out.position.push(v.position); out.rsid.push(v.rsNumber ? `rs${v.rsNumber}` : null); out.af.push(v.af)
       out.pval.push(nlp === Infinity ? 0 : Math.pow(10, -nlp)); out.beta.push(beta); out.se.push(se); out.r2.push(r2)

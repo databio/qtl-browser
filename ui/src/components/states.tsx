@@ -17,10 +17,6 @@ export function Unavailable({ what }: { what: string }) {
   return <Empty label={`${what}: not available in this data release yet.`} />
 }
 
-export function ErrorState({ message }: { message: string }) {
-  return <div className="alert alert-error text-sm">{message}</div>
-}
-
 export function Bar({ className = '' }: { className?: string }) {
   return <div className={`animate-pulse rounded bg-base-300/60 ${className}`} aria-hidden />
 }

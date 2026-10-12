@@ -10,7 +10,6 @@ dbsnp_assembly_report: dbsnp_b157/GCF_000001405.40_GRCh38.p14_assembly_report.tx
 # figures were drawn from BiobanksOnly (5,022 / 932,941), which is what the browser matches.
 # The META build is parked at data/derived/_full/gwas_meta/.
 dcm_gwas: dcm_gwas_jurgens2024/DCM_GWAS/Jurgens_DCM_GWAS_META_BiobanksOnly.tsv.gz
-gwas_bin_bp: 5000000     # landing-track windows (plan: 5 Mb regardless of what the track shows)
 
 # Refget anchor (steps_refget.py): the sequences every position sits on, named by digest.
 reference:
@@ -30,63 +29,43 @@ reference:
 sig_column: pval_perm
 sig_threshold: 0.05
 
-# parallelism and memory for the nominal re-encoding step
+# parallel workers and DuckDB limits for the adapters (and workers for the upload)
 workers: 3
 duckdb_memory_limit: 6GB
 duckdb_threads: 4
 
-# tested genes per nominal build-intermediate file, by TSS rank (the `bin` column of genes). The
-# TOPCHeF acceptance gate reads those files as the v0 eQTL rows.
-nominal_bin_genes: 100
+# TOPCHeF's Student-t degrees of freedom, which the adapter records in each experiment's `dof`.
+# Fitted to the cis rows, and exactly what the published trans `r2` implies (t^2 (1 - r2) / r2 is 435
+# and 480 on every row): n = 516 less 70 expression PCs (MaxPC70) or 25 splicing PCs (MaxPC25), 9
+# other covariates and 2. Nothing decodes through it; trans r2 is formed from it
+topchef:
+  dof: {eqtl: 435, sqtl: 480}
 
-# which introns get rows in the _tables/cis_sqtl_nominal build intermediate: `all` (10.8 GB) or
-# `significant` (1.8 GB, the 13,540 introns with pval_perm < 0.05). The TOPCHeF adapter and the gate
-# read every intron from the raw file instead. Every intron keeps its permutation row regardless.
-sqtl_nominal: significant
-
-# paper-named variants that must resolve to these rsIDs through the variants table
-paper_variants:
-  chr1:2212668: rs2503715      # SKI
-  chr1:236689867: rs4659701    # ACTN2
-  chr7:128829863: rs73238147   # FLNC
-  chr10:73661450: rs10824026   # MYOZ1 / SYNPO2L (paper eQTL text says 73,646,383, a typo; that is rs3740293. sQTL text and dbSNP agree on 73,661,450)
-  chr4:113537246: rs734348     # CAMK2D
-  chr16:918717: rs9889137      # LMF1
-
-# The frozen v0 pack format. `dof` is TOPCHeF's published Student-t degrees of freedom, which the
-# TOPCHeF adapter reports; the gate (adapters/verify_topchef.py) reads the DuckDB limits and the sample
-# genes; test_packfmt's real-data case reads the page size and zstd level.
-packs:
-  duckdb_memory_limit: 4GB
-  duckdb_threads: 4
-  dof: {eqtl: 435, sqtl: 480}      # Student-t degrees of freedom; readers derive slope from slope_se and p
-  variant_page_size: 512            # variants per page in the variants file
-  zstd_level: 19
-  # sample genes for the gate's pack comparison
-  check_genes:
-    - ENSG00000128591       # FLNC, bin 7, 6,050 variants
-    - ENSG00000229618       # AC011287.1, largest chr7 window, 10,419 variants
-    - ENSG00000121716       # PILRB, smallest chr7 p (8e-133), large-step case
-    - ENSG00000286192       # AC069288.1, sQTL-only, zero pairs
-    - ENSG00000157933       # SKI, chr1
-    - ENSG00000077522       # ACTN2, chr1
-    - ENSG00000142798       # HSPG2, chr1
-    - ENSG00000268575       # AL031282.2, chr1, sQTL only
-    - ENSG00000131374       # TBC1D5, chr3, wider intron run
-    - ENSG00000145349       # CAMK2D, chr4
-    - ENSG00000049656       # CLPTM1L, chr5
-    - ENSG00000204314       # PRRT1, chr6
-    - ENSG00000177791       # MYOZ1, chr10
-    - ENSG00000166317       # SYNPO2L, chr10
-    - ENSG00000103227       # LMF1, chr16
-    - ENSG00000238039       # AC244197.2, chrX
-  # sQTL sample genes for the gate: every intron of these genes
-  sqtl_check_genes:
-    - ENSG00000145349       # CAMK2D, chr4, 14 introns
-    - ENSG00000166317       # SYNPO2L, chr10, 7 introns
-    - ENSG00000103227       # LMF1, chr16, 9 introns
-    - ENSG00000142798       # HSPG2, chr1, 40 introns (the most for one gene)
-    - ENSG00000268575       # AL031282.2, chr1, sQTL only, 27 introns
+# ARIC plasma cis-pQTL adapter (pipeline/adapters/aric_pqtl.py): one entry per cohort. Paths are
+# relative to `raw` (QTLB_ARIC_ROOT overrides that root). The two cohorts are disjoint sets of
+# people -- OBS_CT is exactly 7,213 on every EA row and 1,871 on every AA row, and 7,213 + 1,871 is
+# the ~9,000 the source site claims for the whole dataset -- so neither pools the other.
+#
+# `significance` names p_bonferroni because PLINK2 --glm publishes no permutation p and the adapter
+# computes min(1, p_lead * n_variants) instead. `label` is what the browser prints, so it never says
+# "permutation p" about a number no permutation produced.
+aric_pqtl:
+  aric_plasma_ea:
+    zip: aric_pqtl_zhang2022/EA.zip
+    seqid: aric_pqtl_zhang2022/seqid.txt
+    member_prefix: EA
+    n_samples: 7213
+    cis_window_bp: 500000              # the site's stated +/-500 kb around the gene's TSS
+    gene_annotation: gencode_v34
+    significance: {column: p_bonferroni, op: "<", threshold: 0.05, label: Bonferroni p}
+  aric_plasma_aa:
+    zip: aric_pqtl_zhang2022/AA.zip
+    seqid: aric_pqtl_zhang2022/seqid.txt
+    member_prefix: AA
+    n_samples: 1871
+    cis_window_bp: 500000
+    gene_annotation: gencode_v34
+    significance: {column: p_bonferroni, op: "<", threshold: 0.05, label: Bonferroni p}
 
 # eQTL Catalogue adapter (pipeline/adapters/eqtl_catalogue.py): one entry per experiment, keyed by
 # the experiment id its tables go under (`_tables/<id>/`). Paths are absolute (brickyard on
@@ -106,3 +85,132 @@ eqtl_catalogue:
     gene_annotation: gencode_v39           # Ensembl 105
     n_samples: 382
     significance: {column: p_perm, op: "<", threshold: 0.05}
+
+# Optional facets on each experiment document (SPEC section 8; qtlstore.FACET_KEYS), keyed by
+# experiment id: plain labels the browser describes and filters by. A key left out is "not stated".
+# TOPCHeF's n_samples is left out on purpose: the paper states no per-scan n (516 is what its dof
+# imply, not what it says). A GWAS has no `assay`.
+facets:
+  topchef_ge_cis: &topchef_facets
+    organ: heart
+    tissue: left ventricle
+    ancestry: multi-ancestry
+    assay: bulk RNA-seq
+    sex: both
+    condition: heart failure (DCM, ICM) and non-failing
+  topchef_ge_trans: *topchef_facets
+  topchef_leafcutter_cis: *topchef_facets
+  topchef_leafcutter_trans: *topchef_facets
+  gtex_v8_heart_lv_ge_cis: &gtex_lv_facets
+    organ: heart
+    tissue: left ventricle
+    ancestry: mostly European
+    n_samples: 382
+    assay: bulk RNA-seq
+    sex: both
+    condition: postmortem, non-diseased
+  gtex_v8_heart_lv_leafcutter_cis: *gtex_lv_facets
+  dcm_jurgens2024_biobanks:
+    ancestry: European
+    n_samples: 937963                # 5,022 cases + 932,941 controls
+    sex: both
+    trait: dilated cardiomyopathy
+
+# The publications the experiments came from (SPEC section 8, collections). Keyed by the experiment
+# stem a cohort's scans are derived from (`topchef` -> topchef_ge_cis, ...) or by a GWAS experiment's
+# id. `build_store` passes these to the builders, which write one content-addressed collection
+# document per entry and name it from every member experiment; an entry missing here falls back to
+# what the adapter recorded. The PDFs are in data/raw/papers/ (not in git).
+collections:
+  topchef:
+    title: "TOPCHeF LV"
+    citation:
+      title: "Integration of dilated cardiomyopathy genomics with transcriptomics from the human heart implicates regulatory molecular mechanisms"
+      first_author: "Connor S. Murray"
+      last_author: "Matthew R. G. Taylor"
+      year: 2026
+      venue: "medRxiv"
+      doi: "10.64898/2026.01.12.26343934"
+      posted: "2026-01-13"
+    source:
+      record: "zenodo_21382723"
+      description: "TensorQTL cis and trans e/sQTL summary statistics, cis SuSiE credible sets"
+  dcm_jurgens2024_biobanks:
+    title: "Jurgens 2024 DCM"
+    citation:
+      title: "Genome-wide association study reveals mechanisms underlying dilated cardiomyopathy and myocardial resilience"
+      first_author: "Sean J. Jurgens"
+      year: 2024
+      venue: "Nature Genetics"
+      volume: 56
+      pages: "2636-2645"
+      doi: "10.1038/s41588-024-01975-5"
+    source:
+      record: "CVD Knowledge Portal release Jurgens2024_DCM_EU"
+      url: "https://kp4cd.org/dataset_downloads/mi"
+      file: "Jurgens_DCM_GWAS_META_BiobanksOnly.tsv.gz"
+      fetched: "2026-09-04"
+      note: "the biobanks-only set (5,022 cases / 932,941 controls), which the preprint's figures were drawn from; the full META is parked locally"
+  gtex_v8_heart_lv:
+    title: "GTEx v8 LV"
+    citation:
+      title: "The GTEx Consortium atlas of genetic regulatory effects across human tissues"
+      first_author: "The GTEx Consortium"
+      year: 2020
+      venue: "Science"
+      volume: 369
+      pages: "1318-1330"
+      doi: "10.1126/science.aaz1776"
+    source:
+      record: "eQTL Catalogue release 6, study QTS000015, datasets QTD000256 (ge) and QTD000260 (leafcutter)"
+      description: "the eQTL Catalogue's uniform reprocessing of GTEx v8: nominal and permutation summary statistics, SuSiE credible sets"
+      title: "A compendium of uniformly processed human gene expression and splicing quantitative trait loci"
+      first_author: "Nurlan Kerimov"
+      last_author: "Kaur Alasoo"
+      year: 2021
+      venue: "Nature Genetics"
+      volume: 53
+      pages: "1290-1299"
+      doi: "10.1038/s41588-021-00924-w"
+
+# Coloc lists (SPEC section 20, pipeline/coloc.py): optional, one per declared pair of a QTL experiment
+# and a GWAS experiment, membership only. `file` is coloc results as commonly written (CSV or TSV with
+# a phenotype, gene or symbol column, and maybe PP.H4, in which case `min_pp_h4` filters); the
+# pipeline never runs coloc. Added to a store whenever both experiments are in it.
+colocs:
+  murray2026_ge_dcm:
+    qtl: topchef_ge_cis
+    gwas: dcm_jurgens2024_biobanks
+    file: pipeline/colocs/murray2026_ge_dcm.tsv
+    threshold: "PP.H4 > 0.8"
+    source:
+      reported_by: "Murray et al. 2026, medRxiv, doi 10.64898/2026.01.12.26343934"
+      table: "Table 2 (eQTL); the gene symbols as listed by the authors, since the table body is not in the public PDF"
+      method: "coloc.abf, coloc 5.2.3 default priors, single causal variant, +/-1 Mb window"
+    note: "PJVK and CDKN1A are not eGenes by the permutation rule; their colocalization used nominal statistics."
+  murray2026_leafcutter_dcm:
+    qtl: topchef_leafcutter_cis
+    gwas: dcm_jurgens2024_biobanks
+    file: pipeline/colocs/murray2026_leafcutter_dcm.tsv
+    threshold: "PP.H4 >= 0.8"
+    source:
+      reported_by: "Murray et al. 2026, medRxiv, doi 10.64898/2026.01.12.26343934"
+      table: "Supplemental Table 2 (sQTL); the gene symbols as listed by the authors, since the table body is not in the public PDF"
+      method: "coloc.abf, coloc 5.2.3 default priors, single causal variant, +/-1 Mb window"
+    note: "17 introns in these 4 genes; the list names the genes, not the introns."
+
+# The bucket the browsers read (pipeline/upload.py). Credentials are never here: `B2_ACCESS_KEY_ID`
+# and `B2_SECRET_ACCESS_KEY` come from the environment or the gitignored .env at the repo root
+# (`pass show cloud-file-service/b2_access_key_id` and `.../b2_secret_access_key` in databio/secrets).
+# The key prefix is applied only inside the bucket calls, so every key the tool prints is a store
+# path: `immutable/<name>`, `experiments/<id>.json`, `store.json`.
+storage:
+  default_profile: b2
+  single_put_max_bytes: 4000000000       # one PUT per object, so the ETag is the MD5; largest object today is 285 MB
+  profiles:
+    b2:
+      provider: b2
+      endpoint: https://s3.us-west-002.backblazeb2.com
+      bucket: cloud-databio
+      key_prefix: qtl-browser/
+      public_url: https://cloud2.databio.org/qtl-browser

@@ -66,7 +66,12 @@ DEFAULT_SAMPLE = 100_000
 # widens further when the minimum lands near an edge, so this is a starting box, not a claim about
 # how many covariates a pipeline may fit.
 DEFAULT_WIDTH = 200
-EDGE = 3                     # argmin this close to a grid end means the box was too small
+# argmin this close to a grid end means the box was too small -- at the *lower* end, and at an upper
+# end the search chose not to extend. It does not mean that at `n_samples - 1`: dof <= n - 1 is the
+# model's own ceiling, so a near-saturated fit (ARIC's plasma pQTL is n - 2, a bare additive model on
+# pre-adjusted phenotypes, in both cohorts) is pinned where it belongs and `search` cannot widen
+# past it to prove otherwise. `_report` splits the two as `at_edge` and `at_model_limit`.
+EDGE = 3
 MIN_DOF = 2                  # t with dof < 2 has no variance; no QTL model produces one
 MAX_DOF = 100_000
 
@@ -121,8 +126,11 @@ def search(t: np.ndarray, lp: np.ndarray, grid: np.ndarray, hi_limit: int = MAX_
            rounds: int = 4) -> tuple[np.ndarray, np.ndarray]:
     """Evaluate `grid`, widening it while the minimum sits within EDGE of an end. The objective is
     V-shaped in dof (the p a candidate dof predicts moves monotonically with 1/dof at fixed t), so
-    a minimum against an edge means the box was drawn too small, not that the answer is there.
-    Returns the final (grid, objective)."""
+    a minimum against an edge means the box was drawn too small, not that the answer is there --
+    **where the box can be widened**. The two ends are not alike: downward stops at MIN_DOF, which
+    no real model approaches, while upward stops at `hi_limit = n_samples - 1`, which a model with
+    few covariates genuinely sits against. `_report` reports that case as `at_model_limit` rather
+    than as a grid edge. Returns the final (grid, objective)."""
     grid = np.asarray(grid, dtype=np.int64)
     obj = objective(t, lp, grid)
     for _ in range(rounds):
@@ -147,7 +155,8 @@ def _subsample(n: int, k: int, rng: np.random.Generator) -> np.ndarray:
     return np.arange(n) if n <= k else rng.choice(n, size=k, replace=False)
 
 
-def _report(grid: np.ndarray, obj: np.ndarray, t: np.ndarray, lp: np.ndarray) -> dict:
+def _report(grid: np.ndarray, obj: np.ndarray, t: np.ndarray, lp: np.ndarray,
+            hi_limit: int = MAX_DOF) -> dict:
     """One grid search turned into an answer plus the evidence that it is the answer."""
     k = int(np.argmin(obj))
     dof = int(grid[k])
@@ -158,12 +167,22 @@ def _report(grid: np.ndarray, obj: np.ndarray, t: np.ndarray, lp: np.ndarray) ->
     # How much worse each neighbour is. This is the number that says whether the minimum is a point
     # or a basin: on a dataset whose dof is unknown, a margin near 1 means the fit cannot tell.
     neighbours = {f"{o:+d}": by_dof.get(dof + o) for o in NEIGHBOURS}
+    # An end only means "the box was too small" if the box could have been bigger. `search` already
+    # treats the two ends differently -- it widens down while lo > MIN_DOF and up while
+    # hi < hi_limit -- and hi_limit is n_samples - 1, a property of the model rather than a choice.
+    # So a minimum pinned there is the answer, not a sign the search was boxed in; it is reported as
+    # `at_model_limit` instead, which is what catches the failure this guard should still catch:
+    # a wrong n_samples, or p-values that were not computed from this beta and se.
+    at_lo = k <= EDGE and int(grid[0]) > MIN_DOF
+    saturated = k >= len(grid) - 1 - EDGE and int(grid[-1]) >= hi_limit
+    at_hi = k >= len(grid) - 1 - EDGE and not saturated
     return {
         "dof": dof,
         "residual_log10p": best,
         "n": len(t),
         "grid": [int(grid[0]), int(grid[-1])],
-        "at_edge": k <= EDGE or k >= len(grid) - 1 - EDGE,
+        "at_edge": at_lo or at_hi,
+        "at_model_limit": saturated,
         "runner_up": {"dof": int(grid[second]), "residual_log10p": float(obj[second])},
         "margin": float(obj[second] / best) if best > 0 else float("inf"),
         "neighbours": neighbours,
@@ -197,7 +216,7 @@ def fit(beta, se, pvalue, n_samples: int | None = None, grid=None, sample: int =
     rng = np.random.default_rng(seed)
     pick = _subsample(len(t_all), sample, rng)
     uniform_grid, uniform_obj = search(t_all[pick], lp_all[pick], grid, hi_limit)
-    uni = _report(uniform_grid, uniform_obj, t_all[pick], lp_all[pick])
+    uni = _report(uniform_grid, uniform_obj, t_all[pick], lp_all[pick], hi_limit)
 
     # The same count of rows from the large-|t| tail, where dof actually bites.
     if len(t_all) <= sample:
@@ -205,7 +224,7 @@ def fit(beta, se, pvalue, n_samples: int | None = None, grid=None, sample: int =
     else:
         tail_idx = np.argpartition(t_all, len(t_all) - sample)[len(t_all) - sample:]
     tail_grid, tail_obj = search(t_all[tail_idx], lp_all[tail_idx], grid, hi_limit)
-    tail = _report(tail_grid, tail_obj, t_all[tail_idx], lp_all[tail_idx])
+    tail = _report(tail_grid, tail_obj, t_all[tail_idx], lp_all[tail_idx], hi_limit)
 
     # Score the answer on the tail rows too, at the dof the plan's uniform sample chose. The tail
     # is where a wrong dof does its damage, so this is the residual that bounds the rebuilt slope.

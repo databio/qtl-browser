@@ -4,13 +4,18 @@ import ExternalLink from '@/components/ExternalLink'
 import ColocLoci from '@/components/ColocLoci'
 import SentenceLines from '@/components/SentenceLines'
 import { Page } from '@/components/page'
-import { COLOC_EQTL_GENES, COLOC_SQTL_GENES } from '@/lib/coloc'
+import { colocGeneCount, useColocLists } from '@/lib/coloc'
 import { PREPRINT, ZENODO } from '@/lib/links'
 import { useStoreInfo } from '@/contexts/store-context'
 import { fmtInt } from '@/lib/format'
 
 export default function Home() {
   const counts = useStoreInfo()?.counts ?? null
+  // the coloc gene counts from the store's coloc lists; the clause is left out when it has none
+  const lists = useColocLists()
+  const colocClause = lists?.length
+    ? `; ${colocGeneCount(lists, 'eQTL')} eGenes and ${colocGeneCount(lists, 'sQTL')} sGenes colocalize with dilated cardiomyopathy (DCM) risk`
+    : ''
 
   return (
     <Page>
@@ -22,7 +27,7 @@ export default function Home() {
           // search bar and track do not move down when it lands
           counts && counts.egenes == null
             ? `${fmtInt(counts.genes_tested)} tested genes and ${fmtInt(counts.splice_phenotypes_tested)} splice phenotypes.`
-            : counts ? `${fmtInt(counts.egenes)} eGenes and ${fmtInt(counts.sqtl_sig_phenotypes)} significant sQTL introns across ${fmtInt(counts.genes_tested)} tested genes; ${COLOC_EQTL_GENES.length} eGenes and ${COLOC_SQTL_GENES.length} sGenes colocalize with dilated cardiomyopathy (DCM) risk.` : ' ',
+            : counts ? `${fmtInt(counts.egenes)} eGenes and ${fmtInt(counts.sqtl_sig_phenotypes)} significant sQTL introns across ${fmtInt(counts.genes_tested)} tested genes${colocClause}.` : ' ',
           <>
             Search a gene, variant, or region for summary statistics, fine-mapping, and locus views.
             <span className="ml-3 inline-flex gap-x-3">

@@ -6,12 +6,12 @@
  * The covering phenotypes come from the chromosome's search index part, already read for the page. For each phenotype
  * type the scan reads one span of its results file, from the first covering block to the end of
  * the last; both spans go out together. Only block headers are read, plus each covering block's
- * one raw pair at the variant's row and that row's credible-set record; nothing is decompressed.
+ * three codes at the variant's row and that row's credible-set record; nothing is decompressed.
  */
 import type { Row } from './db'
 import { geneInfo, phenotypesCovering } from './gene-index'
 import { EQTL_TYPE, fetchDecoded, getStore, resultsFile, SQTL_TYPE } from './store'
-import { blockHeader, PackError, scanBlockRow, type VariantRecord } from './store-decode'
+import { BLOCK_HEADER_LEN, blockHeader, PackError, scanBlockRow, type VariantRecord } from './store-decode'
 
 /** One nominal result at the variant. `phenotype_id` and `is_sqtl` are set on splicing rows only. */
 export interface CisHit {
@@ -48,7 +48,7 @@ const yieldToPage = () => new Promise<void>(r => setTimeout(r, 0))
 
 async function planSpan(v: VariantRecord, phenotypeType: string): Promise<Span | null> {
   const s = await getStore()
-  if (!s.results.get(phenotypeType)?.files[v.chr]) return null
+  if (!s.cis.get(phenotypeType)?.files[v.chr]) return null
   const phen = (await phenotypesCovering(phenotypeType, v.chr, v.vidx)).filter(p => p.blk_off != null && p.blk_len != null)
   const cover: Covering[] = await Promise.all(phen.map(async p => {
     const g = p.gene_id ? await geneInfo(p.gene_id, v.chr) : null
@@ -69,17 +69,17 @@ export async function planScan(v: VariantRecord): Promise<ScanPlan> {
 }
 
 /** Walk one span, keeping the row of every named block that covers `vidx`. */
-async function walkSpan(span: Uint8Array, s: Span, vidx: number, dof: number | null,
+async function walkSpan(span: Uint8Array, s: Span, vidx: number,
   make: (ref: PhenotypeRef, row: ReturnType<typeof scanBlockRow>) => CisHit): Promise<CisHit[]> {
   const named = new Map(s.blocks.map(b => [b.off, b.ref]))
   const out: CisHit[] = []
   let at = 0, seen = 0
   while (at < span.length) {
     const h = blockHeader(span, at, s.file)
-    if (h.blkLen < 64 || at + h.blkLen > span.length) throw new PackError(`${s.file}: the block at byte ${at} claims ${h.blkLen} bytes`)
+    if (h.blkLen < BLOCK_HEADER_LEN || at + h.blkLen > span.length) throw new PackError(`${s.file}: the block at byte ${at} claims ${h.blkLen} bytes`)
     const ref = named.get(s.off + at)
     if (ref && h.nRows > 0 && vidx >= h.varStart && vidx < h.varStart + h.nRows)
-      out.push(make(ref, scanBlockRow(span.subarray(at, at + h.blkLen), vidx - h.varStart, dof, `${s.file} block at ${s.off + at}`)))
+      out.push(make(ref, scanBlockRow(span.subarray(at, at + h.blkLen), vidx - h.varStart, `${s.file} block at ${s.off + at}`)))
     at += h.blkLen
     if (++seen % YIELD_EVERY === 0) await yieldToPage()
   }
@@ -93,9 +93,9 @@ async function scanType(plan: ScanPlan, span: Span | null, phenotypeType: string
   const f = resultsFile(st, phenotypeType, plan.chr)
   const bytes = await fetchDecoded(splicing ? 'store:scan-sqtl' : 'store:scan-eqtl', { chr: plan.chr, vidx: plan.vidx },
     f.name, span.off, span.len, b => b, splicing ? 'store:scan-sqtl-decode' : 'store:scan-eqtl-decode')
-  return walkSpan(bytes, span, plan.vidx, f.dof, (ref, r) => {
+  return walkSpan(bytes, span, plan.vidx, (ref, r) => {
     const base = { gene_id: ref.gene_id, symbol: ref.symbol, tss_distance: ref.tss == null ? NaN : v.position - ref.tss,
-      pval_nominal: r.pval, beta: r.slope, beta_se: r.se, af: v.af, pip: r.pip, cs_id: r.csId }
+      pval_nominal: r.pval, beta: r.beta, beta_se: r.se, af: v.af, pip: r.pip, cs_id: r.csId }
     return splicing ? { ...base, phenotype_id: ref.phenotype_id, is_sqtl: ref.significant } : base
   })
 }

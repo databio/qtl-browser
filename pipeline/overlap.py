@@ -161,7 +161,8 @@ def _conflicts_and_suspects(by_cat: dict[str, list[tuple]], ids: list[str]) -> t
 
 
 def build(store: qs.Store, oid: str, catalog_ids: list[str], *, page_size: int = PAGE_SIZE,
-          chunk: int = CHUNK, level: int = catalog.ZSTD_LEVEL, log=lambda *_: None) -> dict:
+          chunk: int = CHUNK, level: int = catalog.ZSTD_LEVEL, version: int = qs.FORMAT_VERSION,
+          log=lambda *_: None) -> dict:
     """Build the index over `catalog_ids`, write the object and the pointer, return the pointer doc."""
     ids = sorted(set(catalog_ids))
     if len(ids) != len(catalog_ids):
@@ -275,7 +276,7 @@ def build(store: qs.Store, oid: str, catalog_ids: list[str], *, page_size: int =
                             for bp in breaks))
     if len(directory) != dir_len:
         raise AssertionError(f"overlap: directory {len(directory)} bytes, computed {dir_len}")
-    head = qs.file_header(KIND_OVERLAP, "all", k, page_size, 0, collection)
+    head = qs.file_header(KIND_OVERLAP, "all", k, page_size, 0, collection, version)
     obj = head + directory + b"".join(page_bytes) + b"".join(chunk_bytes)
     name = store.put(obj, "qbo")
 
